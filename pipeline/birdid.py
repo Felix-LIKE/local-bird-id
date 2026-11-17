@@ -5,23 +5,31 @@ Bird Photo Identification Assistant  (birdid.py)
 Point it at a folder of photos and it will, for every image it hasn't already
 tagged:
 
-  1. read EXIF GPS + timestamp  (exiftool)
-  2. map lat/lon -> region (DE / SG / TH) and pick the month
-  3. build a candidate shortlist from the offline eBird region x month tables
-  4. send the photo + shortlist to a local vision LLM (FastFlowLM on the NPU)
-  5. parse the JSON verdict and write an IMatch-safe XMP sidecar per file
+  1. read EXIF GPS + timestamp  (exiftool, batched)
+  2. resolve location:
+       - embedded GPS if present, else the mean GPS of the surrounding folder
+         (a day's photos are usually taken within a small area), else --region
+     and pick the month (EXIF date, else parsed from folder names like
+     "260128-Botanic_Garden" / "2601-Singapur")
+  3. build a candidate shortlist from the offline eBird region x month tables,
+     optionally boosted by an eBird checklist export (*_observations.csv) that
+     sits in the photo folder
+  4. classify the photo with a local model backend (default: NPU vision LLM;
+     pluggable - see Classifier) and get a ranked species + confidence
+  5. write ONE IMatch-safe XMP sidecar per capture:  <base>.xmp
+     (never <base>.jpg.xmp / <base>.cr2.xmp)
   6. keep a resumable manifest + CSV report, and show a live TUI
 
 Originals (CR2/CR3/JPEG/...) are NEVER modified - only `.xmp` sidecars and the
-manifest are written. RAW + JPEG of the same capture are processed ONCE (on the
-viewable file) and the result is mirrored into both sidecars.
+manifest are written. A RAW + JPEG pair of the same capture is processed ONCE
+(on the viewable file) and produces a single shared sidecar.
 
-Requirements (all present on the T14):
-  - FastFlowLM server with a VISION model:  `flm serve qwen3vl-it:4b`
+Requirements:
   - exiftool, python3 (PIL, lxml, requests)
+  - a classifier backend (default: FastFlowLM vision model on the NPU)
 
 Usage:
-  birdid.py /path/to/photos [--region DE] [--model qwen3vl-it:4b] [options]
+  birdid.py /path/to/photos [--region DE] [options]
 
 See --help for all options. Examples:
   birdid.py ~/Pictures/birds --dry-run              # just scan + plan
@@ -34,12 +42,12 @@ import base64
 import csv
 import io
 import json
-import os
-import shutil
+import re
 import subprocess
 import sys
 import threading
 import time
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -204,6 +212,128 @@ def region_for(lat, lon, default: str) -> str:
                 return code
     return default
 
+
+def read_exif_batch(paths: list[Path]) -> dict[str, dict]:
+    """One exiftool call for many files -> {resolved_path_str: meta}.
+
+    meta = {"lat": float|None, "lon": float|None, "datetime": datetime|None}.
+    Missing/broken files yield an empty meta dict.
+    """
+    meta_map: dict[str, dict] = {}
+    if not paths:
+        return meta_map
+    cmd = ["exiftool", "-json", "-n",
+           "-GPSLatitude", "-GPSLongitude",
+           "-GPSLatitudeRef", "-GPSLongitudeRef",
+           "-DateTimeOriginal", "-CreateDate"] + [str(p) for p in paths]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=300).stdout
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        raise RuntimeError(f"exiftool batch failed: {e}") from e
+    try:
+        rows = json.loads(out) if out.strip() else []
+    except json.JSONDecodeError:
+        rows = []
+    for d in rows:
+        src = str(Path(d.get("SourceFile", "")).resolve())
+        lat = _gps(d, "GPSLatitude", "GPSLatitudeRef")
+        lon = _gps(d, "GPSLongitude", "GPSLongitudeRef")
+        dt = None
+        for tag in ("DateTimeOriginal", "CreateDate"):
+            raw = d.get(tag)
+            if raw and raw not in ("0000:00:00 00:00:00", "-", ""):
+                try:
+                    dt = datetime.strptime(str(raw)[:19], "%Y:%m:%d %H:%M:%S")
+                    break
+                except ValueError:
+                    continue
+        meta_map[src] = {"lat": lat, "lon": lon, "datetime": dt}
+    return meta_map
+
+
+def compute_dir_gps(meta_map: dict[str, dict]) -> dict[Path, tuple[float, float]]:
+    """Mean GPS per directory, computed from files that DO have coordinates."""
+    sums: dict[Path, list[float]] = defaultdict(lambda: [0.0, 0.0, 0])
+    for p_str, m in meta_map.items():
+        if m.get("lat") is not None and m.get("lon") is not None:
+            d = Path(p_str).parent
+            s = sums[d]
+            s[0] += m["lat"]; s[1] += m["lon"]; s[2] += 1
+    return {d: (s[0] / s[2], s[1] / s[2]) for d, s in sums.items() if s[2] > 0}
+
+
+def resolve_location(path: Path, meta: dict, dir_gps: dict[Path, tuple[float, float]]):
+    """(lat, lon, source) - embedded GPS, else folder-mean GPS, else (None, None).
+
+    source is one of "embedded" / "folder-mean" / "none".
+    """
+    if meta.get("lat") is not None and meta.get("lon") is not None:
+        return meta["lat"], meta["lon"], "embedded"
+    d = path.resolve().parent
+    seen = set()
+    while d not in seen and d != d.parent:
+        seen.add(d)
+        if d in dir_gps:
+            lat, lon = dir_gps[d]
+            return lat, lon, "folder-mean"
+        d = d.parent
+    return None, None, "none"
+
+
+_FOLDER_YYMMDD = re.compile(r"(?:^|[^0-9])(\d{6})(?:[-_]|$)")
+_FOLDER_YYMM = re.compile(r"(?:^|[^0-9])(\d{4})(?:[-_]|$)")
+
+
+def folder_date(path: Path) -> datetime | None:
+    """Guess a capture date from folder names like '260128-Botanic_Garden'
+    (YYMMDD) inside '2601-Singapur' (YYMM). Returns None if nothing parses."""
+    # YYMMDD from the capture's own folder, then YYMM from its parent
+    for d, full in ((path.parent, True), (path.parent.parent, True),
+                    (path.parent.parent.parent, False)):
+        m = _FOLDER_YYMMDD.search(d.name) if full else _FOLDER_YYMM.search(d.name)
+        if not m:
+            continue
+        s = m.group(1)
+        try:
+            if full and len(s) == 6:
+                return datetime(2000 + int(s[0:2]), int(s[2:4]), int(s[4:6]))
+            if len(s) == 4:
+                return datetime(2000 + int(s[0:2]), int(s[2:4]), 1)
+        except ValueError:
+            continue
+    return None
+
+
+CHECKLIST_PATTERNS = ("*_observations.csv", "*checklist*.csv", "*ebird*.csv")
+
+
+def find_checklist(directory: Path, root: Path) -> Path | None:
+    """Locate an optional eBird checklist export near the photos."""
+    for base in (directory, root):
+        try:
+            for pat in CHECKLIST_PATTERNS:
+                for p in sorted(base.glob(pat)):
+                    return p
+        except OSError:
+            continue
+    return None
+
+
+def load_checklist(path: Path) -> list[str]:
+    """Species common names from an eBird export (header: Species,...)."""
+    species: list[str] = []
+    if not path:
+        return species
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                name = (row.get("Species") or "").strip()
+                if name and name not in species:
+                    species.append(name)
+    except OSError:
+        pass
+    return species
+
 # --------------------------------------------------------------------------
 # Vision input preparation
 # --------------------------------------------------------------------------
@@ -294,6 +424,179 @@ def extract_json(text: str) -> dict:
     dec = json.JSONDecoder()
     obj, _ = dec.raw_decode(text[start:])
     return obj
+
+
+# --------------------------------------------------------------------------
+# Classifier backends (pluggable)
+# --------------------------------------------------------------------------
+
+class Classifier:
+    """Base interface: classify one photo against a candidate species list.
+
+    Returns a dict with at least:
+        {"species": common name, "confidence": 0..1,
+         "alternatives": [names], "reasoning": str}
+    """
+
+    name = "base"
+
+    def __init__(self, args):
+        self.args = args
+
+    def describe(self) -> str:
+        return self.name
+
+    def close(self):
+        pass
+
+    def classify(self, image: Path, candidates: list[tuple[str, str]],
+                 tax: dict[str, str], region: str, month: int,
+                 dt: datetime) -> dict:
+        raise NotImplementedError
+
+
+class VLMClassifier(Classifier):
+    """FastFlowLM vision LLM on the NPU (original backend)."""
+
+    name = "vlm"
+
+    def __init__(self, args):
+        super().__init__(args)
+        ok, available = server_ready(args.base_url)
+        if not ok:
+            raise ConnectionError(
+                f"no FLM server at {args.base_url}.\n"
+                f"Start it first (in another terminal):  flm serve {args.model}")
+        if args.model not in available:
+            print(f"note: '{args.model}' is not listed by the server "
+                  f"(server may serve a different model) - continuing anyway.", flush=True)
+
+    def classify(self, image, candidates, tax, region, month, dt):
+        b64 = prepare_vision_input(image, self.args.max_side)
+        prompt = build_prompt(region, dt, candidates, tax)
+        result = None
+        last_err = None
+        for attempt in range(self.args.retry + 1):
+            try:
+                result = ask_vlm(self.args.base_url, self.args.model, prompt, b64, self.args.timeout)
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                if attempt < self.args.retry:
+                    time.sleep(2)
+        if result is None:
+            raise RuntimeError(f"vision request failed: {last_err}")
+        return result
+
+
+class BioclipClassifier(Classifier):
+    """BioCLIP 2 (pybioclip) - text-conditioned species classifier on CPU.
+
+    Two-stage design (matches the project goal for birds + macro subjects):
+      stage 1 (coarse, cheap): CustomLabelsClassifier over broad categories
+        (bird / reptile / insect / ...) - decides whether the subject is a bird.
+      stage 2 (fine):
+        - bird   -> CustomLabelsClassifier over the eBird candidate list
+                    (region/month/checklist priors) -> ranked percentages.
+        - non-bird (macro reptiles/insects) -> TreeOfLifeClassifier at SPECIES
+                    rank, covering the whole tree of life (~1.6M species).
+
+    Requires:  pip install pybioclip   (pulls torch + torchvision; the
+    BioCLIP 2 weights and TreeOfLife datafiles download on first use).
+    """
+
+    name = "bioclip"
+    COARSE_LABELS = [
+        "a photo of a bird", "a photo of a reptile", "a photo of an amphibian",
+        "a photo of an insect", "a photo of a spider", "a photo of a mammal",
+        "a photo of a fish", "a photo of a plant", "a photo of a fungus",
+        "a photo of something else",
+    ]
+
+    def __init__(self, args):
+        super().__init__(args)
+        try:
+            import pybioclip  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError(
+                "pybioclip is not installed - run once:\n"
+                "  pip install pybioclip\n"
+                "(this pulls in torch + torchvision; model weights download "
+                "on first use)") from e
+        self._coarse = None
+        self._bird = None
+        self._tol = None
+
+    def _load_coarse(self):
+        if self._coarse is None:
+            from pybioclip import CustomLabelsClassifier
+            self._coarse = CustomLabelsClassifier(self.COARSE_LABELS)
+        return self._coarse
+
+    def _load_bird(self, names: list[str]):
+        if self._bird is None or self._bird_names != names:
+            from pybioclip import CustomLabelsClassifier
+            self._bird = CustomLabelsClassifier([f"a photo of a {n}" for n in names])
+            self._bird_names = names
+        return self._bird
+
+    def _load_tol(self):
+        if self._tol is None:
+            from pybioclip import TreeOfLifeClassifier, Rank
+            self._Rank = Rank
+            self._tol = TreeOfLifeClassifier()
+        return self._tol
+
+    def classify(self, image, candidates, tax, region, month, dt):
+        image = str(image)
+
+        # --- stage 1: coarse category ---
+        coarse = self._load_coarse()
+        res = coarse.predict(image, k=1)[0]
+        top = max(res.items(), key=lambda kv: kv[1])
+        cat = str(top[0]).replace("a photo of a ", "").replace("a photo of ", "")
+
+        # --- stage 2: fine species ---
+        if cat == "bird":
+            names = [s for s, _st in candidates] or ["unknown"]
+            fine = self._load_bird(names)
+            scores = fine.predict(image)[0]
+            ranked = sorted(
+                ((n, float(s)) for n, s in scores.items()), key=lambda kv: -kv[1])
+            species, p = ranked[0]
+            alts = [n for n, _ in ranked[1:4]]
+            reasoning = (f"BioCLIP-2: bird category; softmax over {len(names)} "
+                         f"eBird candidates -> {species} {p*100:.0f}%")
+            return {
+                "species": species,
+                "confidence": round(p, 4),
+                "alternatives": alts,
+                "reasoning": reasoning,
+            }
+
+        # non-bird (macro reptiles / insects / ...) - whole tree of life
+        tol = self._load_tol()
+        res = tol.predict(image, rank=self._Rank.SPECIES, k=3)[0]
+        # res: {file_name, SPECIES: name, common_name, score}
+        species = str(res.get("common_name") or res.get(self._Rank.SPECIES.name) or "unknown")
+        p = float(res.get("score", 0.0))
+        common, sci = normalize_species(species, tax)
+        return {
+            "species": common,
+            "confidence": round(p, 4),
+            "alternatives": [],
+            "reasoning": f"BioCLIP-2: subject category '{cat}' (non-bird); "
+                         f"TreeOfLife species -> {common} {p*100:.0f}%",
+        }
+
+
+def make_classifier(args) -> Classifier:
+    name = getattr(args, "classifier", "vlm")
+    if name == "vlm":
+        return VLMClassifier(args)
+    if name == "bioclip":
+        return BioclipClassifier(args)
+    raise ValueError(f"unknown classifier backend: {name}")
 
 # --------------------------------------------------------------------------
 # Prompt
@@ -401,11 +704,10 @@ def sidecar_done(sidecar: Path) -> bool:
         return False
 
 
-def write_sidecar(image: Path, result: dict, region: str, month: int,
+def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
                   dt: datetime, status: str, cfg, error: str = None, scientific: str = ""):
-    """Create/merge an XMP sidecar for `image`. Originals are never touched."""
+    """Create/merge an XMP sidecar at `sidecar`. Originals are never touched."""
     from lxml import etree
-    sidecar = image.parent / (image.name + ".xmp")
     root = _xmp_tree(sidecar)
     ns = _nsmap()
     descs = _find(root, "//rdf:Description")
@@ -491,18 +793,28 @@ def save_manifest(path: Path, manifest: dict):
 
 
 # --------------------------------------------------------------------------
-# Scan & grouping (RAW+JPEG pairs)
+# Scan & grouping (RAW+JPEG pairs -> ONE capture -> ONE sidecar)
 # --------------------------------------------------------------------------
 
 class Capture:
-    """One photographic capture = one or more files sharing a base name."""
+    """One photographic capture = one or more files sharing a base name.
 
-    def __init__(self, base: str):
-        self.base = base
+    A capture writes a SINGLE sidecar named ``<base>.xmp`` (never
+    ``<base>.jpg.xmp`` or ``<base>.cr2.xmp``), regardless of how many files
+    (JPG + RAW) it contains.
+    """
+
+    def __init__(self, base: str, directory: Path):
+        self.base = base            # original-case base name, e.g. "IMG_0001"
+        self.directory = directory  # folder the capture lives in
         self.files: list[Path] = []
 
+    def sidecar(self) -> Path:
+        """The one sidecar for this capture: <folder>/<base>.xmp"""
+        return self.directory / (self.base + ".xmp")
+
     def primary(self) -> Path:
-        """Best file to run the vision model on: a viewable one, else the first."""
+        """Best file to classify: a viewable one, else the first."""
         for f in self.files:
             if f.suffix.lower() in VIEWABLE_EXTS:
                 return f
@@ -513,13 +825,17 @@ class Capture:
 
 
 def scan_folder(root: Path, manifest: dict) -> list[Capture]:
-    captures: dict[str, Capture] = {}
+    """Group files by (relative folder, lowercased base name)."""
+    captures: dict[tuple[str, str], Capture] = {}
     for p in sorted(root.rglob("*")):
         if not p.is_file():
             continue
         if p.suffix.lower() in ALL_EXTS:
-            key = p.stem.lower()
-            captures.setdefault(key, Capture(key)).files.append(p)
+            rel_dir = str(p.parent.relative_to(root))
+            key = (rel_dir, p.stem.lower())
+            if key not in captures:
+                captures[key] = Capture(p.stem, p.parent)
+            captures[key].files.append(p)
 
     result = []
     for cap in captures.values():
@@ -546,13 +862,8 @@ def sidecar_status(sidecar: Path):
 
 
 def classify_capture(cap: Capture) -> str:
-    """done / error / pending - group is done iff every member sidecar is done."""
-    statuses = [sidecar_status(f.parent / (f.name + ".xmp")) for f in cap.files]
-    if statuses and all(s == "done" for s in statuses):
-        return "done"
-    if any(s == "error" for s in statuses):
-        return "error"
-    return "pending"
+    """done / error / pending - a capture is done iff its single sidecar is done."""
+    return sidecar_status(cap.sidecar()) or "pending"
 
 # --------------------------------------------------------------------------
 # TUI (curses) + worker orchestration
@@ -671,12 +982,12 @@ class TUI:
 
 def stage_hint(stage: str) -> str:
     hints = {
-        "exif": "reading EXIF (GPS + timestamp)",
-        "region": "mapping location to region / month",
-        "candidates": "building eBird candidate shortlist",
-        "vision": "sending photo to NPU vision model...",
-        "parse": "parsing model JSON verdict",
-        "sidecar": "writing XMP sidecar(s)",
+        "exif": "reading EXIF (GPS + timestamp, batched)",
+        "region": "resolving GPS / folder date -> region + month",
+        "candidates": "building candidate shortlist (eBird + checklist)",
+        "classify": "classifying photo (local model backend)",
+        "parse": "normalising species name",
+        "sidecar": "writing XMP sidecar",
         "": "",
     }
     return hints.get(stage, "")
@@ -697,12 +1008,17 @@ def fmt_result(result: dict, scientific: str = "") -> str:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Offline bird-photo identification via local NPU vision model.")
+        description="Offline bird-photo identification (single XMP sidecar per capture).")
     ap.add_argument("folder", nargs="?", default=None, help="folder (recursive) of photos to scan")
+    ap.add_argument("--classifier", default="vlm", choices=["vlm", "bioclip"],
+                    help="classification backend (default vlm = NPU vision LLM; "
+                         "bioclip = pybioclip, requires 'pip install pybioclip')")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"vision model tag (default {DEFAULT_MODEL})")
     ap.add_argument("--base-url", default=DEFAULT_BASE_URL, help="FLM OpenAI-compatible base URL")
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="dir containing eBird data (regions/, taxonomy)")
-    ap.add_argument("--region", default=DEFAULT_REGION, help="default region for photos without GPS (DE/SG/TH)")
+    ap.add_argument("--region", default=DEFAULT_REGION, help="default region when no GPS can be resolved (DE/SG/TH)")
+    ap.add_argument("--no-checklist", action="store_true",
+                    help="ignore optional eBird *_observations.csv exports in photo folders")
     ap.add_argument("--manifest", default=None, help="manifest path (default <folder>/birdid_manifest.json)")
     ap.add_argument("--report", default=None, help="CSV report path (default <folder>/birdid_report.csv)")
     ap.add_argument("--max", type=int, default=0, help="stop after this many captures (0 = all)")
@@ -711,7 +1027,7 @@ def main():
     ap.add_argument("--max-side", type=int, default=1280, help="max image dimension sent to the model")
     ap.add_argument("--timeout", type=float, default=300.0, help="per-request timeout (s)")
     ap.add_argument("--retry", type=int, default=2, help="retries per failed file")
-    ap.add_argument("--dry-run", action="store_true", help="scan + plan only, no NPU calls")
+    ap.add_argument("--dry-run", action="store_true", help="scan + plan only, no model calls")
     ap.add_argument("--no-tui", action="store_true", help="plain log output, no fullscreen UI")
     ap.add_argument("--list-candidates", action="store_true",
                     help="print candidate counts per region/month and exit")
@@ -777,7 +1093,7 @@ def main():
             summary_lines.append(
                 f"scan: {len(captures)} captures | {done_n} done | {error_n} error | {len(pending)} pending")
             for cap in pending[:20]:
-                summary_lines.append(f"  [pending] {cap.files[0]}")
+                summary_lines.append(f"  [pending] {cap.primary()} -> {cap.sidecar()}")
             if len(pending) > 20:
                 summary_lines.append(f"  ... and {len(pending) - 20} more")
             summary_lines.append("dry-run: nothing processed.")
@@ -786,18 +1102,33 @@ def main():
                 f"scan: {len(captures)} captures | {done_n} done | {error_n} error | 0 pending - nothing to do.")
 
         if not summary_lines:
-            # --- Phase 2: verify the NPU server ---
-            ok, available = server_ready(args.base_url)
-            if not ok:
-                raise ConnectionError(
-                    f"no FLM server at {args.base_url}.\n"
-                    f"Start it first (in another terminal):  flm serve {args.model}")
-            if args.model not in available:
-                tui.plain_line(f"note: '{args.model}' is not listed by the server "
-                               f"(server may serve a different model) - continuing anyway.")
+            # --- Phase 1.5: one batched EXIF read for ALL photos, then GPS means ---
+            tui.set(stage="exif", message=f"reading EXIF for {len(captures)} captures")
+            all_files = [f for cap in captures for f in cap.files]
+            meta_map = read_exif_batch(all_files)
+            dir_gps = compute_dir_gps(meta_map)
+
+            # --- Phase 2: classifier backend ---
+            tui.set(stage="classify", message=f"loading classifier ({args.classifier})")
+            classifier = make_classifier(args)
+            tui.plain_line(f"classifier: {classifier.describe()}")
 
             report_rows = []
             stop = tui.stop_flag
+            checklist_cache: dict[str, list[tuple[str, str]]] = {}
+
+            def capture_checklist(cap: Capture) -> list[tuple[str, str]]:
+                if args.no_checklist:
+                    return []
+                cl_path = find_checklist(cap.directory, root)
+                if cl_path is None:
+                    return []
+                key = str(cl_path)
+                if key not in checklist_cache:
+                    checklist_cache[key] = [
+                        (normalize_species(s, taxonomy)[0], "checklist")
+                        for s in load_checklist(cl_path) if s.strip()]
+                return checklist_cache[key]
 
             # --- Phase 3: process ---
             tui.set(phase="running")
@@ -806,44 +1137,37 @@ def main():
                     break
                 cap_files = cap.files
                 primary = cap.primary()
+                sidecar = cap.sidecar()
                 rel = primary.relative_to(root)
                 tui.set(current=str(rel), processed=i - 1)
                 last = ""
                 try:
-                    # EXIF
-                    tui.set(stage="exif", message=f"EXIF {primary.name}")
-                    meta = read_exif(primary)
-                    tui.set(stage="region", message="region/month")
-                    region = region_for(meta["lat"], meta["lon"], args.region)
-                    month = meta["datetime"].month if meta["datetime"] else datetime.now().month
+                    # location: embedded GPS -> folder-mean GPS -> --region
+                    tui.set(stage="region", message="resolving region/month")
+                    meta = meta_map.get(str(primary.resolve()), {})
+                    lat, lon, gps_src = resolve_location(primary, meta, dir_gps)
+                    region = region_for(lat, lon, args.region)
+                    dt = meta.get("datetime") or folder_date(primary)
+                    month = dt.month if dt else datetime.now().month
+                    date_src = "exif" if meta.get("datetime") else ("folder" if dt else "today")
+
                     tui.set(stage="candidates", message=f"{region} month {month:02d}")
-                    candidates = db.candidates(region, month)
-                    if not candidates:
-                        # still run with a hint in the prompt
-                        pass
+                    region_cands = db.candidates(region, month)
+                    checklist = capture_checklist(cap)
+                    cl_lower = {c[0].lower() for c in checklist}
+                    candidates = checklist + [
+                        (s, st) for (s, st) in region_cands if s.lower() not in cl_lower]
 
-                    tui.set(stage="vision", message=f"sending {primary.name}")
-                    b64 = prepare_vision_input(primary, args.max_side)
-                    prompt = build_prompt(region, meta["datetime"], candidates, taxonomy)
-                    result = None
-                    last_err = None
-                    for attempt in range(args.retry + 1):
-                        try:
-                            result = ask_vlm(args.base_url, args.model, prompt, b64, args.timeout)
-                            break
-                        except Exception as e:  # noqa: BLE001
-                            last_err = e
-                            tui.plain_line(f"  retry {attempt + 1}/{args.retry + 1} for {rel}: {e}")
-                            if attempt < args.retry:
-                                time.sleep(2)
-                    if result is None:
-                        raise RuntimeError(f"vision request failed: {last_err}")
+                    tui.set(stage="classify", message=f"classifying {primary.name}")
+                    result = classifier.classify(primary, candidates, taxonomy, region, month, dt)
 
-                    tui.set(stage="parse", message="parsing verdict")
+                    tui.set(stage="parse", message="normalising species")
                     if not isinstance(result, dict) or not result.get("species"):
-                        raise RuntimeError(f"bad model output: {result!r}")
+                        raise RuntimeError(f"bad classifier output: {result!r}")
                     species, scientific = normalize_species(str(result["species"]), taxonomy)
                     result["species"] = species
+                    if not scientific and result.get("scientific"):
+                        scientific = result["scientific"]
                     if scientific:
                         result["scientific"] = scientific
                     confidence = float(result.get("confidence", 0.0))
@@ -851,27 +1175,28 @@ def main():
                         tui.plain_line(f"  note: '{species}' not in eBird taxonomy - check spelling")
 
                     status = "done" if confidence >= args.min_confidence else "low-confidence"
-                    tui.set(stage="sidecar", message=f"writing {len(cap_files)} sidecar(s)")
-                    for f in cap_files:
-                        write_sidecar(f, result, region, month, meta["datetime"], status, args,
-                                      scientific=scientific)
-                        manifest[str(f)] = {
-                            "group": cap.base, "region": region, "month": month,
-                            "species": species, "scientific": scientific, "confidence": confidence,
-                            "status": status, "pipelineVersion": PIPELINE_VERSION,
-                            "mtime": f.stat().st_mtime, "size": f.stat().st_size,
-                            "ts": datetime.now().isoformat(timespec="seconds"),
-                        }
+                    tui.set(stage="sidecar", message=f"writing {sidecar.name}")
+                    write_sidecar(sidecar, result, region, month, dt, status, args,
+                                  scientific=scientific)
+                    manifest[str(sidecar)] = {
+                        "files": [str(f) for f in cap_files],
+                        "sidecar": str(sidecar), "region": region, "month": month,
+                        "gps": gps_src, "date_source": date_src,
+                        "species": species, "scientific": scientific, "confidence": confidence,
+                        "status": status, "classifier": classifier.describe(),
+                        "pipelineVersion": PIPELINE_VERSION,
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                    }
                     save_manifest(manifest_path, manifest)   # resumable: save after every capture
 
                     report_rows.append({
                         "capture": cap.base, "file": str(primary), "viewable": primary.name,
                         "region": region, "month": f"{month:02d}", "species": species,
                         "scientific_name": scientific, "confidence": f"{confidence:.2f}",
-                        "status": status,
+                        "status": status, "gps": gps_src, "date_source": date_src,
                         "alternatives": "; ".join(result.get("alternatives", [])),
                         "reasoning": result.get("reasoning", ""),
-                        "datetime": meta["datetime"].strftime("%Y-%m-%d %H:%M") if meta["datetime"] else "",
+                        "datetime": dt.strftime("%Y-%m-%d %H:%M") if dt else "",
                     })
                     last = fmt_result(result, scientific)
                     done_n += 1
@@ -880,17 +1205,18 @@ def main():
                     error_n += 1
                     last = f"ERROR: {e}"
                     try:
-                        for f in cap_files:
-                            write_sidecar(f, {}, region if "region" in dir() else args.region,
-                                          month if "month" in dir() else 1, None, "error", args, error=str(e))
-                            manifest[str(f)] = {"group": cap.base, "status": "error",
-                                                "error": str(e), "pipelineVersion": PIPELINE_VERSION,
-                                                "ts": datetime.now().isoformat(timespec="seconds")}
+                        write_sidecar(sidecar, {}, region if "region" in dir() else args.region,
+                                      month if "month" in dir() else 1, None, "error", args, error=str(e))
+                        manifest[str(sidecar)] = {"files": [str(f) for f in cap_files],
+                                                  "sidecar": str(sidecar),
+                                                  "status": "error", "error": str(e),
+                                                  "pipelineVersion": PIPELINE_VERSION,
+                                                  "ts": datetime.now().isoformat(timespec="seconds")}
                         save_manifest(manifest_path, manifest)
                         report_rows.append({"capture": cap.base, "file": str(primary), "viewable": primary.name,
                                             "region": "", "month": "", "species": "", "scientific_name": "",
-                                            "confidence": "", "status": "error", "alternatives": "",
-                                            "reasoning": str(e)[:500], "datetime": ""})
+                                            "confidence": "", "status": "error", "gps": "", "date_source": "",
+                                            "alternatives": "", "reasoning": str(e)[:500], "datetime": ""})
                     except Exception as e2:  # noqa: BLE001
                         last = f"ERROR (write failed too): {e2}"
                         tui.plain_line(f"  {last}")

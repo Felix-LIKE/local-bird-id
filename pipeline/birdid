@@ -50,10 +50,11 @@ fi
 # sanity: the pipeline script exists
 [ -f "$PIPELINE" ] || die "pipeline not found: $PIPELINE"
 
-# a --list-candidates / --dry-run call does not need the server
+# some invocations do not need the FLM/NPU server
 NEEDS_SERVER=1
 case " $* " in
     *" --list-candidates "*|*" --dry-run "*|*" -h "*|*" --help "*) NEEDS_SERVER=0 ;;
+    *" --classifier bioclip "*|*" --classifier=bioclip "*) NEEDS_SERVER=0 ;;
 esac
 
 FLM=""
