@@ -1,10 +1,12 @@
 # Bird Photo ID pipeline (offline)
 
-`birdid.py` scans a folder of photos, uses EXIF GPS+time to build a species
-candidate list from the offline eBird tables, and asks the local NPU vision
-model (Qwen3-VL via FastFlowLM) to identify each bird. It writes IMatch-safe
-XMP sidecars and a resumable manifest. **Originals are never modified** - only
-`<file>.xmp` sidecars, the manifest, and the report are written. Every result
+`birdid.py` scans a folder of photos, resolves where/when each photo was taken
+(embedded GPS → folder-average GPS → `--region`; EXIF date → folder name like
+`260128-Botanic_Garden`), builds a species candidate list from the offline eBird
+tables (optionally boosted by an eBird checklist export in the photo folder),
+and classifies each bird with a local model. It writes IMatch-safe XMP sidecars
+and a resumable manifest. **Originals are never modified** - only one `<base>.xmp`
+sidecar per capture, the manifest, and the report are written. Every result
 records both the **common name** and the **scientific name** (from the official
 eBird taxonomy).
 
@@ -18,21 +20,38 @@ birdid /path/to/photos            # auto-starts the NPU server if needed
 birdid /path/to/photos --max 10   # extra birdid.py args pass straight through
 birdid /path/to/photos --dry-run  # plan only, no server needed
 birdid --list-candidates          # inspect the region/month tables
+birdid /path/to/photos --classifier bioclip   # CPU BioCLIP, no NPU server
 ```
 
-- If the FLM server isn't already running, the launcher starts
-  `flm serve qwen3vl-it:4b`, waits for it, runs the pipeline, then **stops the
-  server again only if it was the one that started it** (an already-running
-  server is left alone).
+- If the FLM server isn't already running (and a server-based backend is
+  selected), the launcher starts `flm serve qwen3vl-it:4b`, waits for it, runs
+  the pipeline, then **stops the server again only if it was the one that
+  started it** (an already-running server is left alone). With
+  `--classifier bioclip` no server is started at all.
 - If `flm` is missing or the server fails to start, it prints a clear error,
   tails the server log, and exits 1.
 - Env overrides: `BIRDID_MODEL`, `BIRDID_BASE_URL`, `BIRDID_START_WAIT`,
   `BIRDID_LOG`, `BIRDID_PY`.
 
+## Classifier backends
+
+`--classifier vlm|bioclip` (default `vlm`):
+
+- `vlm` - FastFlowLM vision LLM on the NPU (`qwen3vl-it:4b`). No extra
+  install; lower fine-grained accuracy.
+- `bioclip` - **recommended**: pybioclip/BioCLIP 2 on CPU. Text-conditioned
+  species classifier: scores the photo against the eBird candidate list and
+  returns real ranked percentages. Two-stage: coarse category first
+  (bird/reptile/insect/...), then fine species - birds use the eBird priors,
+  non-birds (macro reptiles/insects) use the whole TreeOfLife taxonomy.
+  Install once: `pip install pybioclip` (pulls torch + torchvision; model
+  weights download on first use).
+
 ## Prerequisites (one time)
 
 ```bash
-flm pull qwen3vl-it:4b          # vision model (~3.9 GB, already pulled)
+flm pull qwen3vl-it:4b          # vision model (~3.9 GB, already pulled) - vlm backend
+pip install pybioclip           # BioCLIP 2 - bioclip backend
 ```
 
 Needs `exiftool` and python3 with `PIL`, `lxml`, `requests` (all present). The
@@ -62,19 +81,31 @@ Defaults are fine: model `qwen3vl-it:4b`, server `127.0.0.1:52625/v1`, data in
 
 - **Scan → manifest → worklist → process**: the manifest
   (`<folder>/birdid_manifest.json`) is updated after every capture, so a rerun
-  skips anything already tagged and never redoes NPU work.
-- **Idempotency**: a file is *done* iff its sidecar has `bird:species` with >=1
-  entry; *error* iff `bird:status=error`.
-- **RAW+JPEG pairs**: same base name = one capture -> the vision model runs
-  once on the viewable file, the result is mirrored to **both** sidecars
-  (`IMG_1234.jpg.xmp` + `IMG_1234.CR2.xmp`).
+  skips anything already tagged and never redoes model work.
+- **Idempotency**: a capture is *done* iff its single sidecar
+  (`<base>.xmp`) has `bird:species` with >=1 entry; *error* iff
+  `bird:status=error`.
+- **ONE sidecar per capture**: a RAW+JPEG pair (same base name) is processed
+  once (on the viewable file) and produces a single `<base>.xmp` - never
+  `<base>.jpg.xmp` / `<base>.cr2.xmp`.
 - **RAW-only files**: the embedded JPEG preview is extracted with exiftool for
   the model (temporary, never written over the RAW).
+- **Location fallbacks**: embedded GPS -> mean GPS of the surrounding folder
+  (a day's photos are usually one area) -> `--region`. The fallback source is
+  recorded in the report (`gps` column: embedded / folder-mean / none).
+- **Date fallbacks**: EXIF date -> folder names `YYMMDD-Location` /
+  `YYMM-Event` (`date_source` column: exif / folder / today).
+- **Optional eBird checklist**: a `*_observations.csv` export in a photo folder
+  adds that day's observed species to the candidate list (highest priority).
+  Use `--no-checklist` to ignore. Works fully offline - it is just a CSV.
 - **Sidecars are merged**, never blind-rewritten: existing XMP elements are
   preserved and only the `bird:` fields (+ `dc:subject`, `dc:description`) are
   updated.
 
 ## Output per photo (XMP sidecar)
+
+One sidecar per capture, `<base>.xmp` (e.g. `IMG_1234.xmp` for
+`IMG_1234.CR2` + `IMG_1234.JPG`):
 
 `bird:species` (Seq), `bird:confidence` (Seq), `bird:summary`
 ("Great Tit 95% | ..."), `bird:topSpecies`, `bird:scientificName`
@@ -94,9 +125,11 @@ scientific field and a "check spelling" note.
 ## Report (CSV)
 
 `<folder>/birdid_report.csv` has one row per capture: `capture, file,
-viewable, region, month, species, scientific_name, confidence, status,
-alternatives, reasoning, datetime`. Both `species` (common) and
-`scientific_name` are always recorded.
+viewable, region, month, species, scientific_name, confidence, status, gps,
+date_source, alternatives, reasoning, datetime`. Both `species` (common) and
+`scientific_name` are always recorded; `gps` / `date_source` say where the
+location and date came from (embedded / folder-mean / none and exif / folder /
+today).
 
 ## Data
 
