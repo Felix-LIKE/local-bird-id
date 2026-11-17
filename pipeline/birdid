@@ -93,7 +93,17 @@ if [ "$NEEDS_SERVER" -eq 1 ] && ! server_up; then
     fi
 fi
 
-# run the pipeline
+# run the pipeline. Guarantee fully-offline operation: the BioCLIP/TOL
+# backends are predownloaded with `--download-backends` (which is the ONE mode
+# that must NOT run under HF_HUB_OFFLINE=1 - it needs the network).
+case " $* " in
+    *" --download-backends "*) OFFLINE=0 ;;
+    *) OFFLINE=1 ;;
+esac
+if [ "$OFFLINE" -eq 1 ]; then
+    export HF_HUB_OFFLINE=1
+    export TRANSFORMERS_OFFLINE=1
+fi
 "$PY" "$PIPELINE" "$@"
 rc=$?
 

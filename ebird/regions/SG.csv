@@ -14,21 +14,23 @@ SG,Straw-headed Bulbul,resident,111111111111
 SG,White-throated Kingfisher,resident,111111111111
 SG,Collared Kingfisher,resident,111111111111
 SG,Black-naped Oriole,resident,111111111111
-SG,Pink-necked Green Pigeon,resident,111111111111
+SG,Pink-necked Green-Pigeon,resident,111111111111
 SG,Zebra Dove,resident,111111111111
 SG,Spotted Dove,resident,111111111111
 SG,Rock Pigeon,resident,111111111111
 SG,Asian Glossy Starling,resident,111111111111
 SG,Common Flameback,resident,111111111111
-SG,Olive-backed Sunbird,resident,111111111111
+SG,Garden Sunbird,resident,111111111111
 SG,Crimson Sunbird,resident,111111111111
 SG,Brown-throated Sunbird,resident,111111111111
 SG,Little Egret,resident,111111111111
 SG,Great Egret,resident,111111111111
-SG,Grey Heron,resident,111111111111
+SG,Gray Heron,resident,111111111111
 SG,Purple Heron,resident,111111111111
 SG,Striated Heron,resident,111111111111
-SG,White-bellied Sea Eagle,resident,111111111111
+SG,Asian Openbill,resident,111111111111
+SG,Malayan Night Heron,resident,111111111111
+SG,White-bellied Sea-Eagle,resident,111111111111
 SG,Brahminy Kite,resident,111111111111
 SG,Black-winged Kite,resident,111111111111
 SG,Changeable Hawk-Eagle,resident,111111111111
@@ -39,9 +41,9 @@ SG,Common Tailorbird,resident,111111111111
 SG,Dark-necked Tailorbird,resident,111111111111
 SG,Golden-bellied Gerygone,resident,111111111111
 SG,Pin-striped Tit-babbler,resident,111111111111
-SG,Oriental White-eye,resident,111111111111
+SG,Indian White-eye,resident,111111111111
 SG,Swinhoe's White-eye,resident,111111111111
-SG,Malaysian Pied Fantail,resident,111111111111
+SG,Sunda Pied-Fantail,resident,111111111111
 SG,Scarlet-backed Flowerpecker,resident,111111111111
 SG,Thick-billed Flowerpecker,resident,111111111111
 SG,Long-tailed Shrike,resident,111111111111
@@ -57,7 +59,6 @@ SG,Javan Munia,resident,111111111111
 SG,Baya Weaver,resident,111111111111
 SG,White-breasted Waterhen,resident,111111111111
 SG,Eurasian Moorhen,resident,111111111111
-SG,Common Moorhen,resident,111111111111
 SG,Common Kingfisher,resident,111111111111
 SG,White-rumped Shama,resident,111111111111
 SG,Asian Fairy-bluebird,resident,111111111111
@@ -66,15 +67,15 @@ SG,Rufous-tailed Shama,resident,111111111111
 SG,Blue-tailed Bee-eater,winter,111100001111
 SG,Blue-throated Bee-eater,winter,111100001111
 SG,Barn Swallow,winter,111100001111
-SG,Asian House Martin,winter,111100001111
+SG,Asian House-Martin,winter,111100001111
 SG,Brown Shrike,winter,111100001111
 SG,Tiger Shrike,winter,111100001111
 SG,Red-breasted Flycatcher,winter,111100001111
 SG,Asian Brown Flycatcher,winter,111100001111
-SG,Japanese Paradise Flycatcher,winter,111100001111
+SG,Black Paradise-Flycatcher,winter,111100001111
 SG,Common Sandpiper,winter,111100001111
 SG,Wood Sandpiper,winter,111100001111
-SG,Whimbrel,winter,111100001111
-SG,Grey Plover,winter,111100001111
-SG,Blue Rock Thrush,winter,111100001111
-SG,Blue-winged Pitta,passage,011100011100
+SG,Eurasian Whimbrel,winter,111100001111
+SG,Black-bellied Plover,winter,111100001111
+SG,Blue Rock-Thrush,winter,111100001111
+SG,Blue-winged Pitta,winter,111100001111

@@ -74,6 +74,17 @@ REGION_BBOXES = {
     "TH": (5.5, 20.5, 97.0, 106.0),    # Thailand
 }
 
+# Low-confidence fallback: when the base country list yields no confident
+# answer, re-score against the union with a wider regional pool. Birds don't
+# respect borders, so a species photographed just across a border (or missed by
+# the curated country table) still gets a chance. Pools are ordinary region
+# tables (same CSV format) covering the surrounding countries.
+REGION_POOLS = {
+    "SG": "SEA",     # Singapore -> Southeast Asia pool (MY/ID/TH/...)
+    "TH": "SEA",     # Thailand   -> Southeast Asia pool
+    "DE": "EUROPE",  # Germany    -> European pool
+}
+
 BIRD_NS = "http://ns.birdpipeline/1.0/"
 
 # --------------------------------------------------------------------------
@@ -99,8 +110,12 @@ class SpeciesDB:
                 for row in csv.DictReader(f):
                     if not row:
                         continue
+                    # comment lines may contain commas, which csv splits into
+                    # later fields - always key off the first (region) field
+                    if (row.get("region") or "").lstrip().startswith("#"):
+                        continue
                     species = (row.get("species") or "").strip()
-                    if not species or species.startswith("#"):
+                    if not species:
                         continue
                     status = (row.get("status") or "resident").strip()
                     mask = (row.get("month_mask") or "").strip()
@@ -115,6 +130,24 @@ class SpeciesDB:
     def candidates(self, region: str, month: int) -> list[tuple[str, str]]:
         """Species plausibly present in `region` during `month` (1..12)."""
         return self._table.get(region.upper(), {}).get(month - 1, [])
+
+    def expanded(self, region: str, month: int) -> list[tuple[str, str]]:
+        """Base region candidates + the neighbouring regional pool, deduped.
+
+        Used as the low-confidence fallback so species that occur just across a
+        border (or were missed by the curated country table) still get a chance.
+        """
+        region = region.upper()
+        base = self._table.get(region, {}).get(month - 1, [])
+        pool_code = REGION_POOLS.get(region)
+        pool = self._table.get(pool_code, {}).get(month - 1, []) if pool_code else []
+        seen = set()
+        out = []
+        for sp, st in list(base) + list(pool):
+            if sp.lower() not in seen:
+                seen.add(sp.lower())
+                out.append((sp, st))
+        return out
 
     def regions(self):
         return sorted(self._table)
@@ -450,8 +483,8 @@ class Classifier:
         pass
 
     def classify(self, image: Path, candidates: list[tuple[str, str]],
-                 tax: dict[str, str], region: str, month: int,
-                 dt: datetime) -> dict:
+                 expanded: list[tuple[str, str]], tax: dict[str, str],
+                 region: str, month: int, dt: datetime) -> dict:
         raise NotImplementedError
 
 
@@ -471,9 +504,10 @@ class VLMClassifier(Classifier):
             print(f"note: '{args.model}' is not listed by the server "
                   f"(server may serve a different model) - continuing anyway.", flush=True)
 
-    def classify(self, image, candidates, tax, region, month, dt):
+    def classify(self, image, candidates, expanded, tax, region, month, dt):
         b64 = prepare_vision_input(image, self.args.max_side)
-        prompt = build_prompt(region, dt, candidates, tax)
+        # hint the VLM with the wider regional pool too (as secondary context)
+        prompt = build_prompt(region, dt, candidates, tax, expanded)
         result = None
         last_err = None
         for attempt in range(self.args.retry + 1):
@@ -524,8 +558,8 @@ class BioclipClassifier(Classifier):
                 "(this pulls in torch + torchvision; model weights download "
                 "on first use)") from e
         self._coarse = None
-        self._bird = None
-        self._bird_names = None
+        self._bird_cls = None       # cached CustomLabelsClassifier
+        self._bird_key = None       # tuple of names it was built for
         self._tol = None
         self._Rank = None
 
@@ -535,15 +569,22 @@ class BioclipClassifier(Classifier):
             self._coarse = CustomLabelsClassifier(self.COARSE_LABELS)
         return self._coarse
 
-    def _load_bird(self, names: list[str]):
-        if self._bird is None or self._bird_names != names:
+    def _bird_classifier(self, names: list[str]):
+        """Cached CustomLabelsClassifier over `names` (plain species names, so
+        predict() returns clean names)."""
+        key = tuple(names)
+        if self._bird_cls is None or self._bird_key != key:
             from bioclip.predict import CustomLabelsClassifier
-            # pass PLAIN names as the class labels so predict() returns clean
-            # species names ("Blue Tit"), not the prefixed text templates
-            # ("a photo of a Blue Tit") that would leak into the sidecar/report
-            self._bird = CustomLabelsClassifier(list(names))
-            self._bird_names = names
-        return self._bird
+            self._bird_cls = CustomLabelsClassifier(list(names))
+            self._bird_key = key
+        return self._bird_cls
+
+    def _score_bird(self, image: str, names: list[str]) -> list[tuple[str, float]]:
+        rows = self._bird_classifier(names).predict(image)
+        ranked = [(d.get("classification", ""), float(d.get("score", 0.0)))
+                  for d in rows if d.get("score") is not None]
+        ranked.sort(key=lambda kv: -kv[1])
+        return ranked
 
     def _load_tol(self):
         if self._tol is None:
@@ -553,7 +594,7 @@ class BioclipClassifier(Classifier):
             self._tol = TreeOfLifeClassifier()
         return self._tol
 
-    def classify(self, image, candidates, tax, region, month, dt):
+    def classify(self, image, candidates, expanded, tax, region, month, dt):
         image = str(image)
 
         # --- stage 1: coarse category ---
@@ -565,24 +606,7 @@ class BioclipClassifier(Classifier):
 
         # --- stage 2: fine species ---
         if cat == "bird":
-            names = [s for s, _st in candidates] or ["unknown"]
-            fine = self._load_bird(names)
-            rows = fine.predict(image)
-            ranked = [(d.get("classification", ""), float(d.get("score", 0.0)))
-                      for d in rows if d.get("score") is not None]
-            ranked.sort(key=lambda kv: -kv[1])
-            if not ranked:
-                raise RuntimeError("BioCLIP returned no bird scores")
-            species, p = ranked[0]
-            alts = [n for n, _ in ranked[1:4]]
-            reasoning = (f"BioCLIP-2: bird category; softmax over {len(names)} "
-                         f"eBird candidates -> {species} {p*100:.0f}%")
-            return {
-                "species": species,
-                "confidence": round(p, 4),
-                "alternatives": alts,
-                "reasoning": reasoning,
-            }
+            return self._classify_bird(image, candidates, expanded)
 
         # non-bird (macro reptiles / insects / ...) - whole tree of life
         tol = self._load_tol()
@@ -597,10 +621,49 @@ class BioclipClassifier(Classifier):
         common, sci = normalize_species(species, tax)
         return {
             "species": common,
+            "scientific": sci,
             "confidence": round(p, 4),
             "alternatives": [],
             "reasoning": f"BioCLIP-2: subject category '{cat}' (non-bird); "
                          f"TreeOfLife species -> {common} {p*100:.0f}%",
+        }
+
+    def _classify_bird(self, image: str, candidates: list[tuple[str, str]],
+                       expanded: list[tuple[str, str]]) -> dict:
+        """Two-tier bird ID:
+          tier 1 - score against the eBird candidate list (country + checklist).
+          tier 2 - if the top score is below --expand-threshold, re-score
+                   against the wider regional pool (neighbouring countries).
+        """
+        names = [s for s, _st in candidates] or ["unknown"]
+        ranked = self._score_bird(image, names)
+        if not ranked:
+            raise RuntimeError("BioCLIP returned no bird scores")
+        species, p = ranked[0]
+
+        pool_only = [s for s, _st in expanded if s not in names]
+        used_pool = False
+        low_p = p
+        if p < self.args.expand_threshold and pool_only:
+            ranked2 = self._score_bird(image, names + pool_only)
+            if ranked2 and ranked2[0][1] > p:
+                species, p = ranked2[0]
+                ranked = ranked2
+                used_pool = True
+
+        alts = [n for n, _ in ranked[1:4]]
+        if used_pool:
+            reasoning = (f"BioCLIP-2: bird category; low confidence over the "
+                         f"country list ({low_p*100:.0f}% top), expanded to neighbouring "
+                         f"regions -> {species} {p*100:.0f}%")
+        else:
+            reasoning = (f"BioCLIP-2: bird category; softmax over {len(names)} "
+                         f"eBird candidates -> {species} {p*100:.0f}%")
+        return {
+            "species": species,
+            "confidence": round(p, 4),
+            "alternatives": alts,
+            "reasoning": reasoning,
         }
 
 
@@ -617,7 +680,8 @@ def make_classifier(args) -> Classifier:
 # --------------------------------------------------------------------------
 
 def build_prompt(region: str, dt: datetime, candidates: list[tuple[str, str]],
-                 tax: dict[str, str] | None = None) -> str:
+                 tax: dict[str, str] | None = None,
+                 expanded: list[tuple[str, str]] | None = None) -> str:
     region_name = {"DE": "Germany", "SG": "Singapore", "TH": "Thailand"}.get(region, region)
     date_str = dt.strftime("%Y-%m-%d %H:%M") if dt else "unknown"
     tax = tax or {}
@@ -629,12 +693,22 @@ def build_prompt(region: str, dt: datetime, candidates: list[tuple[str, str]],
         cand = ", ".join(parts)
     else:
         cand = "none in the local table for this region/month - answer from general knowledge"
+    extra = ""
+    if expanded and len(expanded) > len(candidates):
+        extra_parts = []
+        for s, st in expanded:
+            if s.lower() not in {c.lower() for c, _ in candidates}:
+                sci = tax.get(s, "")
+                extra_parts.append(f"{s} ({sci})" if sci else s)
+        if extra_parts:
+            extra = (f"\n- Additional species from the wider region (neighbouring "
+                     f"countries - birds do not respect borders): {', '.join(extra_parts[:60])}")
     return (
         "You are an expert bird identification assistant. Identify the single main bird in the photo.\n\n"
         f"Photo context:\n"
         f"- Region: {region_name} ({region})\n"
         f"- Date/time: {date_str}\n"
-        f"- Species plausibly present here this month (eBird): {cand}\n\n"
+        f"- Species plausibly present here this month (eBird): {cand}{extra}\n\n"
         "Rules:\n"
         "1. The species must be a real English common name (matching one from the list when possible).\n"
         "2. If you cannot identify the bird confidently, set confidence < 0.3 and species to \"unknown\".\n"
@@ -1038,6 +1112,13 @@ def main():
     ap.add_argument("--max", type=int, default=0, help="stop after this many captures (0 = all)")
     ap.add_argument("--min-confidence", type=float, default=0.5,
                     help="below this, status is 'low-confidence' (default 0.5)")
+    ap.add_argument("--expand-threshold", type=float, default=0.35,
+                    help="below this top score, re-score against the wider "
+                         "regional pool (neighbouring countries) - 0 disables "
+                         "the expansion (default 0.35)")
+    ap.add_argument("--download-backends", action="store_true",
+                    help="predownload the BioCLIP 2 model + TreeOfLife data so "
+                         "a later run works fully offline (HF_HUB_OFFLINE=1)")
     ap.add_argument("--max-side", type=int, default=1280, help="max image dimension sent to the model")
     ap.add_argument("--timeout", type=float, default=300.0, help="per-request timeout (s)")
     ap.add_argument("--retry", type=int, default=2, help="retries per failed file")
@@ -1046,6 +1127,21 @@ def main():
     ap.add_argument("--list-candidates", action="store_true",
                     help="print candidate counts per region/month and exit")
     args = ap.parse_args()
+
+    if args.download_backends:
+        # Predownload everything so a later run works fully offline. Must NOT
+        # run under HF_HUB_OFFLINE=1 (the launcher takes care of that).
+        print("predownloading BioCLIP 2 + TreeOfLife backends ...", flush=True)
+        from bioclip.predict import CustomLabelsClassifier, TreeOfLifeClassifier
+        from bioclip import Rank
+        CustomLabelsClassifier(BioclipClassifier.COARSE_LABELS)   # BioCLIP 2 weights
+        tol = TreeOfLifeClassifier()                              # TOL-200M datafile
+        tol.create_taxa_filter(Rank.CLASS, ["Aves"])              # + Aves filter tables
+        import os
+        cache = os.path.expanduser("~/.cache/huggingface")
+        print(f"done - backends cached under {cache}. A later run with "
+              f"HF_HUB_OFFLINE=1 needs no network.", flush=True)
+        return
 
     if not args.folder and not args.list_candidates:
         ap.error("the following arguments are required: folder  (or use --list-candidates)")
@@ -1171,9 +1267,12 @@ def main():
                     cl_lower = {c[0].lower() for c in checklist}
                     candidates = checklist + [
                         (s, st) for (s, st) in region_cands if s.lower() not in cl_lower]
+                    expanded = checklist + [
+                        (s, st) for (s, st) in db.expanded(region, month)
+                        if s.lower() not in cl_lower]
 
                     tui.set(stage="classify", message=f"classifying {primary.name}")
-                    result = classifier.classify(primary, candidates, taxonomy, region, month, dt)
+                    result = classifier.classify(primary, candidates, expanded, taxonomy, region, month, dt)
 
                     tui.set(stage="parse", message="normalising species")
                     if not isinstance(result, dict) or not result.get("species"):

@@ -1,0 +1,258 @@
+region,species,status,month_mask
+# Europe regional pool - wider candidate list used when the base country table
+# (DE) yields no confident answer. Birds ignore borders, so species from the
+# surrounding countries (FR, NL, BE, CH, AT, CZ, PL, DK, ...) get a chance here.
+# Same format as the country tables: month_mask = 12 chars (Jan..Dec).
+# status: resident | winter | summer | passage
+# Source: curated from standard field references (Svensson / Collins / the eBird
+# taxonomy). Replace or extend with real eBird data if an API key is available.
+# --- waterfowl ---
+EUROPE,Mute Swan,resident,111111111111
+EUROPE,Whooper Swan,winter,111100001111
+EUROPE,Tundra Swan,winter,111100001111
+EUROPE,Graylag Goose,resident,111111111111
+EUROPE,Greater White-fronted Goose,winter,111100001111
+EUROPE,Pink-footed Goose,winter,111100001111
+EUROPE,Barnacle Goose,winter,111100001111
+EUROPE,Brant,winter,111100001111
+EUROPE,Canada Goose,resident,111111111111
+EUROPE,Common Shelduck,resident,111111111111
+EUROPE,Mallard,resident,111111111111
+EUROPE,Gadwall,resident,111111111111
+EUROPE,Eurasian Wigeon,winter,111100001111
+EUROPE,Northern Shoveler,winter,111100001111
+EUROPE,Northern Pintail,winter,111100001111
+EUROPE,Garganey,passage,001111110000
+EUROPE,Green-winged Teal,winter,111100001111
+EUROPE,Common Pochard,winter,111100001111
+EUROPE,Tufted Duck,winter,111100001111
+EUROPE,Greater Scaup,winter,111100001111
+EUROPE,Common Goldeneye,winter,111100001111
+EUROPE,Smew,winter,111100001111
+EUROPE,Red-breasted Merganser,winter,111100001111
+EUROPE,Common Merganser,resident,111111111111
+EUROPE,Ruddy Duck,resident,111111111111
+# --- gamebirds ---
+EUROPE,Ring-necked Pheasant,resident,111111111111
+EUROPE,Gray Partridge,resident,111111111111
+EUROPE,Common Quail,passage,001111110000
+EUROPE,Red-legged Partridge,resident,111111111111
+# --- divers & grebes ---
+EUROPE,Great Crested Grebe,resident,111111111111
+EUROPE,Little Grebe,resident,111111111111
+EUROPE,Eared Grebe,winter,111100001111
+EUROPE,Red-necked Grebe,winter,111100001111
+EUROPE,Horned Grebe,winter,111100001111
+EUROPE,Red-throated Loon,winter,111100001111
+EUROPE,Arctic Loon,winter,111100001111
+EUROPE,Common Loon,winter,111100001111
+# --- cormorants, herons, storks ---
+EUROPE,Great Cormorant,resident,111111111111
+EUROPE,European Shag,resident,111111111111
+EUROPE,Northern Gannet,passage,111111111111
+EUROPE,Gray Heron,resident,111111111111
+EUROPE,Great Egret,resident,111111111111
+EUROPE,Little Egret,resident,111111111111
+EUROPE,Western Cattle-Egret,resident,111111111111
+EUROPE,Purple Heron,summer,001111110000
+EUROPE,Black-crowned Night Heron,resident,111111111111
+EUROPE,Eurasian Bittern,resident,111111111111
+EUROPE,Little Bittern,passage,001111110000
+EUROPE,White Stork,summer,001111110000
+EUROPE,Black Stork,passage,001111110000
+EUROPE,Eurasian Spoonbill,passage,001111110000
+EUROPE,Glossy Ibis,passage,001111110000
+# --- raptors ---
+EUROPE,Osprey,passage,001111110000
+EUROPE,White-tailed Eagle,resident,111111111111
+EUROPE,Golden Eagle,resident,111111111111
+EUROPE,Western Marsh Harrier,resident,111111111111
+EUROPE,Hen Harrier,winter,111100001111
+EUROPE,Montagu's Harrier,passage,001111110000
+EUROPE,Eurasian Sparrowhawk,resident,111111111111
+EUROPE,Eurasian Goshawk,resident,111111111111
+EUROPE,Common Buzzard,resident,111111111111
+EUROPE,Rough-legged Hawk,winter,111100001111
+EUROPE,European Honey-buzzard,passage,001111110000
+EUROPE,Eurasian Kestrel,resident,111111111111
+EUROPE,Merlin,winter,111100001111
+EUROPE,Peregrine Falcon,resident,111111111111
+EUROPE,Eurasian Hobby,passage,001111110000
+EUROPE,Red Kite,resident,111111111111
+EUROPE,Black Kite,resident,111111111111
+EUROPE,Short-toed Snake-Eagle,passage,001111110000
+# --- rails & cranes ---
+EUROPE,Water Rail,resident,111111111111
+EUROPE,Eurasian Moorhen,resident,111111111111
+EUROPE,Eurasian Coot,resident,111111111111
+EUROPE,Corn Crake,passage,001111110000
+EUROPE,Common Crane,passage,001100001100
+# --- shorebirds ---
+EUROPE,Eurasian Oystercatcher,resident,111111111111
+EUROPE,Pied Avocet,resident,111111111111
+EUROPE,Black-winged Stilt,passage,001111110000
+EUROPE,Common Ringed Plover,passage,001111110000
+EUROPE,Little Ringed Plover,resident,111111111111
+EUROPE,Kentish Plover,passage,001111110000
+EUROPE,European Golden-Plover,winter,111100001111
+EUROPE,Black-bellied Plover,passage,001111110000
+EUROPE,Northern Lapwing,resident,111111111111
+EUROPE,Common Snipe,winter,111100001111
+EUROPE,Jack Snipe,winter,111100001111
+EUROPE,Eurasian Woodcock,winter,111100001111
+EUROPE,Black-tailed Godwit,passage,001111110000
+EUROPE,Bar-tailed Godwit,passage,001111110000
+EUROPE,Eurasian Whimbrel,passage,001111110000
+EUROPE,Eurasian Curlew,passage,001111110000
+EUROPE,Common Redshank,resident,111111111111
+EUROPE,Spotted Redshank,passage,001111110000
+EUROPE,Common Greenshank,passage,001111110000
+EUROPE,Green Sandpiper,passage,001111110000
+EUROPE,Wood Sandpiper,passage,001111110000
+EUROPE,Common Sandpiper,resident,111111111111
+EUROPE,Ruddy Turnstone,passage,001111110000
+EUROPE,Red Knot,passage,001111110000
+EUROPE,Dunlin,winter,111100001111
+EUROPE,Ruff,passage,001111110000
+EUROPE,Little Stint,passage,001111110000
+EUROPE,Temminck's Stint,passage,001111110000
+# --- gulls, terns, auks ---
+EUROPE,Black-headed Gull,resident,111111111111
+EUROPE,Common Gull,resident,111111111111
+EUROPE,European Herring Gull,resident,111111111111
+EUROPE,Lesser Black-backed Gull,resident,111111111111
+EUROPE,Great Black-backed Gull,winter,111100001111
+EUROPE,Caspian Gull,resident,111111111111
+EUROPE,Yellow-legged Gull,passage,001111110000
+EUROPE,Common Tern,resident,111111111111
+EUROPE,Arctic Tern,passage,001111110000
+EUROPE,Sandwich Tern,passage,001111110000
+EUROPE,Black Tern,passage,001111110000
+EUROPE,Little Tern,passage,001111110000
+EUROPE,Common Murre,winter,111100001111
+EUROPE,Razorbill,winter,111100001111
+EUROPE,Atlantic Puffin,passage,001111110000
+# --- pigeons & doves ---
+EUROPE,Rock Pigeon,resident,111111111111
+EUROPE,Stock Dove,resident,111111111111
+EUROPE,Common Wood-Pigeon,resident,111111111111
+EUROPE,Eurasian Collared-Dove,resident,111111111111
+EUROPE,European Turtle-Dove,passage,001111110000
+EUROPE,Oriental Turtle-Dove,passage,001111110000
+# --- cuckoos & owls ---
+EUROPE,Common Cuckoo,summer,001111110000
+EUROPE,Western Barn Owl,resident,111111111111
+EUROPE,Tawny Owl,resident,111111111111
+EUROPE,Long-eared Owl,resident,111111111111
+EUROPE,Short-eared Owl,winter,111100001111
+EUROPE,Little Owl,resident,111111111111
+EUROPE,Eurasian Eagle-Owl,resident,111111111111
+EUROPE,Northern Saw-whet Owl,winter,111100001111
+# --- swifts, nightjars, kingfishers, hoopoes ---
+EUROPE,Common Swift,summer,001111110000
+EUROPE,Alpine Swift,passage,001111110000
+EUROPE,Eurasian Nightjar,passage,001111110000
+EUROPE,Common Kingfisher,resident,111111111111
+EUROPE,Common Hoopoe,passage,001111110000
+EUROPE,Eurasian Wryneck,passage,001111110000
+# --- woodpeckers ---
+EUROPE,Great Spotted Woodpecker,resident,111111111111
+EUROPE,Middle Spotted Woodpecker,resident,111111111111
+EUROPE,Lesser Spotted Woodpecker,resident,111111111111
+EUROPE,Black Woodpecker,resident,111111111111
+EUROPE,Eurasian Green Woodpecker,resident,111111111111
+EUROPE,Gray-headed Woodpecker,resident,111111111111
+# --- larks, swallows, pipits, wagtails ---
+EUROPE,Eurasian Skylark,resident,111111111111
+EUROPE,Wood Lark,resident,111111111111
+EUROPE,Barn Swallow,summer,001111110000
+EUROPE,Western House-Martin,summer,001111110000
+EUROPE,Bank Swallow,summer,001111110000
+EUROPE,Tree Pipit,passage,001111110000
+EUROPE,Meadow Pipit,resident,111111111111
+EUROPE,Water Pipit,winter,111100001111
+EUROPE,Rock Pipit,resident,111111111111
+EUROPE,Western Yellow Wagtail,passage,001111110000
+EUROPE,Gray Wagtail,resident,111111111111
+EUROPE,White Wagtail,resident,111111111111
+# --- shrikes, starlings, waxwings, orioles ---
+EUROPE,Red-backed Shrike,passage,001111110000
+EUROPE,Great Gray Shrike,winter,111100001111
+EUROPE,European Starling,resident,111111111111
+EUROPE,Rosy Starling,passage,001111110000
+EUROPE,Eurasian Golden Oriole,passage,001111110000
+EUROPE,Bohemian Waxwing,winter,111100001111
+# --- dippers, wrens, kinglets, accentors ---
+EUROPE,White-throated Dipper,resident,111111111111
+EUROPE,Eurasian Wren,resident,111111111111
+EUROPE,Goldcrest,resident,111111111111
+EUROPE,Common Firecrest,resident,111111111111
+EUROPE,Dunnock,resident,111111111111
+EUROPE,Alpine Accentor,resident,111111111111
+# --- chats & thrushes ---
+EUROPE,European Robin,resident,111111111111
+EUROPE,Bluethroat,passage,001111110000
+EUROPE,Common Redstart,passage,001111110000
+EUROPE,Black Redstart,resident,111111111111
+EUROPE,Whinchat,passage,001111110000
+EUROPE,Northern Wheatear,passage,001111110000
+EUROPE,Siberian Stonechat,resident,111111111111
+EUROPE,Song Thrush,resident,111111111111
+EUROPE,Mistle Thrush,resident,111111111111
+EUROPE,Redwing,winter,111100001111
+EUROPE,Fieldfare,winter,111100001111
+EUROPE,Eurasian Blackbird,resident,111111111111
+EUROPE,Ring Ouzel,passage,001111110000
+# --- warblers ---
+EUROPE,Cetti's Warbler,resident,111111111111
+EUROPE,Common Grasshopper Warbler,passage,001111110000
+EUROPE,Sedge Warbler,passage,001111110000
+EUROPE,Common Reed Warbler,passage,001111110000
+EUROPE,Marsh Warbler,passage,001111110000
+EUROPE,Greater Whitethroat,passage,001111110000
+EUROPE,Lesser Whitethroat,passage,001111110000
+EUROPE,Garden Warbler,passage,001111110000
+EUROPE,Eurasian Blackcap,resident,111111111111
+EUROPE,Common Chiffchaff,resident,111111111111
+EUROPE,Willow Warbler,passage,001111110000
+EUROPE,Wood Warbler,passage,001111110000
+EUROPE,Yellow-browed Warbler,winter,111100001111
+EUROPE,Common Nightingale,passage,001111110000
+# --- tits & nuthatches ---
+EUROPE,Marsh Tit,resident,111111111111
+EUROPE,Willow Tit,resident,111111111111
+EUROPE,Coal Tit,resident,111111111111
+EUROPE,Eurasian Blue Tit,resident,111111111111
+EUROPE,Great Tit,resident,111111111111
+EUROPE,Crested Tit,resident,111111111111
+EUROPE,Long-tailed Tit,resident,111111111111
+EUROPE,Bearded Reedling,resident,111111111111
+EUROPE,Eurasian Nuthatch,resident,111111111111
+EUROPE,Short-toed Treecreeper,resident,111111111111
+EUROPE,Eurasian Treecreeper,resident,111111111111
+EUROPE,Wallcreeper,winter,111100001111
+# --- finches & buntings ---
+EUROPE,Common Chaffinch,resident,111111111111
+EUROPE,Brambling,winter,111100001111
+EUROPE,European Greenfinch,resident,111111111111
+EUROPE,European Goldfinch,resident,111111111111
+EUROPE,Eurasian Siskin,winter,111100001111
+EUROPE,Eurasian Linnet,resident,111111111111
+EUROPE,Redpoll,winter,111100001111
+EUROPE,Eurasian Bullfinch,resident,111111111111
+EUROPE,Hawfinch,resident,111111111111
+EUROPE,Common Rosefinch,passage,001111110000
+EUROPE,Yellowhammer,resident,111111111111
+EUROPE,Ortolan Bunting,passage,001111110000
+EUROPE,Reed Bunting,resident,111111111111
+EUROPE,Corn Bunting,resident,111111111111
+EUROPE,Snow Bunting,winter,111100001111
+EUROPE,Lapland Longspur,winter,111100001111
+# --- crows ---
+EUROPE,Eurasian Jay,resident,111111111111
+EUROPE,Eurasian Magpie,resident,111111111111
+EUROPE,Eurasian Jackdaw,resident,111111111111
+EUROPE,Rook,resident,111111111111
+EUROPE,Carrion Crow,resident,111111111111
+EUROPE,Hooded Crow,resident,111111111111
+EUROPE,Common Raven,resident,111111111111

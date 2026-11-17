@@ -1,0 +1,359 @@
+region,species,status,month_mask
+# Southeast Asia regional pool - wider candidate list used when the base
+# country table (SG/TH) yields no confident answer. Birds ignore borders, so
+# species from the surrounding countries (Malaysia, Indonesia, southern
+# Thailand, Myanmar, Cambodia, Vietnam, southern China) get a chance here.
+# Same format as the country tables: month_mask = 12 chars (Jan..Dec).
+# status: resident | winter (northern migrant) | passage
+# Source: curated from standard field references (Robson / Mackinnon & Phillipps
+# / Wells / the eBird taxonomy). Replace or extend with real eBird data if an
+# API key is available (see README).
+# --- herons, egrets, storks, ibis ---
+SEA,Asian Openbill,resident,111111111111
+SEA,Painted Stork,resident,111111111111
+SEA,Milky Stork,resident,111111111111
+SEA,Yellow Bittern,resident,111111111111
+SEA,Cinnamon Bittern,resident,111111111111
+SEA,Black Bittern,resident,111111111111
+SEA,Malayan Night Heron,resident,111111111111
+SEA,Black-crowned Night Heron,resident,111111111111
+SEA,Indian Pond-Heron,resident,111111111111
+SEA,Chinese Pond-Heron,resident,111111111111
+SEA,Javan Pond-Heron,winter,111100001111
+SEA,Gray Heron,resident,111111111111
+SEA,Purple Heron,resident,111111111111
+SEA,Great Egret,resident,111111111111
+SEA,Yellow-billed Egret,resident,111111111111
+SEA,Little Egret,resident,111111111111
+SEA,Western Cattle-Egret,resident,111111111111
+SEA,Black-faced Spoonbill,winter,111100001111
+SEA,Glossy Ibis,winter,111100001111
+SEA,Black-headed Ibis,resident,111111111111
+# --- rails, crakes, jacanas, moorhens ---
+SEA,White-breasted Waterhen,resident,111111111111
+SEA,Eurasian Moorhen,resident,111111111111
+SEA,Eurasian Coot,winter,111100001111
+SEA,Gray-headed Swamphen,resident,111111111111
+SEA,White-browed Crake,resident,111111111111
+SEA,Ruddy-breasted Crake,resident,111111111111
+SEA,Baillon's Crake,winter,111100001111
+SEA,Pheasant-tailed Jacana,resident,111111111111
+SEA,Bronze-winged Jacana,resident,111111111111
+# --- shorebirds & waders ---
+SEA,Common Sandpiper,winter,111100001111
+SEA,Wood Sandpiper,winter,111100001111
+SEA,Green Sandpiper,winter,111100001111
+SEA,Marsh Sandpiper,winter,111100001111
+SEA,Common Greenshank,winter,111100001111
+SEA,Eurasian Whimbrel,winter,111100001111
+SEA,Eurasian Curlew,winter,111100001111
+SEA,Bar-tailed Godwit,winter,111100001111
+SEA,Black-tailed Godwit,winter,111100001111
+SEA,Common Redshank,winter,111100001111
+SEA,Spotted Redshank,winter,111100001111
+SEA,Pacific Golden-Plover,winter,111100001111
+SEA,Black-bellied Plover,winter,111100001111
+SEA,Little Ringed Plover,winter,111100001111
+SEA,Kentish Plover,winter,111100001111
+SEA,Malaysian Plover,resident,111111111111
+SEA,Greater Sand-Plover,winter,111100001111
+SEA,Siberian Sand-Plover,winter,111100001111
+SEA,Black-winged Stilt,resident,111111111111
+SEA,Pied Stilt,resident,111111111111
+SEA,Red-wattled Lapwing,resident,111111111111
+SEA,Gray-headed Lapwing,winter,111100001111
+SEA,Little Tern,resident,111111111111
+SEA,Whiskered Tern,resident,111111111111
+SEA,White-winged Tern,winter,111100001111
+SEA,Black-naped Tern,resident,111111111111
+SEA,Greater Crested Tern,resident,111111111111
+SEA,Caspian Tern,winter,111100001111
+SEA,Gull-billed Tern,winter,111100001111
+SEA,Common Tern,winter,111100001111
+# --- raptors ---
+SEA,White-bellied Sea-Eagle,resident,111111111111
+SEA,Gray-headed Fish-Eagle,resident,111111111111
+SEA,Brahminy Kite,resident,111111111111
+SEA,Black-winged Kite,resident,111111111111
+SEA,Changeable Hawk-Eagle,resident,111111111111
+SEA,Crested Serpent-Eagle,resident,111111111111
+SEA,Rufous-bellied Eagle,resident,111111111111
+SEA,Blyth's Hawk-Eagle,resident,111111111111
+SEA,Crested Goshawk,resident,111111111111
+SEA,Osprey,winter,111100001111
+SEA,Eurasian Kestrel,winter,111100001111
+SEA,Peregrine Falcon,winter,111100001111
+SEA,Oriental Honey-buzzard,winter,111100001111
+SEA,Japanese Sparrowhawk,winter,111100001111
+SEA,Chinese Sparrowhawk,winter,111100001111
+SEA,Booted Eagle,winter,111100001111
+SEA,Black Kite,winter,111100001111
+SEA,Common Buzzard,winter,111100001111
+# --- pigeons & doves ---
+SEA,Rock Pigeon,resident,111111111111
+SEA,Spotted Dove,resident,111111111111
+SEA,Zebra Dove,resident,111111111111
+SEA,Peaceful Dove,resident,111111111111
+SEA,Asian Emerald Dove,resident,111111111111
+SEA,Pink-necked Green-Pigeon,resident,111111111111
+SEA,Thick-billed Green-Pigeon,resident,111111111111
+SEA,Little Green-Pigeon,resident,111111111111
+SEA,Cinnamon-headed Green-Pigeon,resident,111111111111
+SEA,Green Imperial-Pigeon,resident,111111111111
+SEA,Pied Imperial-Pigeon,resident,111111111111
+SEA,Sunda Collared-Dove,resident,111111111111
+SEA,Red Collared-Dove,resident,111111111111
+# --- parrots ---
+SEA,Long-tailed Parakeet,resident,111111111111
+SEA,Red-breasted Parakeet,resident,111111111111
+SEA,Rose-ringed Parakeet,resident,111111111111
+SEA,Blue-crowned Hanging-parrot,resident,111111111111
+SEA,Blue-rumped Parrot,resident,111111111111
+# --- cuckoos ---
+SEA,Asian Koel,resident,111111111111
+SEA,Greater Coucal,resident,111111111111
+SEA,Lesser Coucal,resident,111111111111
+SEA,Chestnut-bellied Malkoha,resident,111111111111
+SEA,Raffles's Malkoha,resident,111111111111
+SEA,Green-billed Malkoha,resident,111111111111
+SEA,Plaintive Cuckoo,resident,111111111111
+SEA,Banded Bay Cuckoo,resident,111111111111
+SEA,Little Bronze-Cuckoo,resident,111111111111
+SEA,Violet Cuckoo,winter,111100001111
+SEA,Asian Emerald Cuckoo,winter,111100001111
+SEA,Chestnut-winged Cuckoo,winter,111100001111
+SEA,Square-tailed Drongo-Cuckoo,winter,111100001111
+SEA,Fork-tailed Drongo-Cuckoo,winter,111100001111
+SEA,Hodgson's Hawk-Cuckoo,winter,111100001111
+SEA,Malayan Hawk-Cuckoo,resident,111111111111
+SEA,Indian Cuckoo,winter,111100001111
+SEA,Himalayan Cuckoo,winter,111100001111
+SEA,Oriental Cuckoo,winter,111100001111
+SEA,Common Cuckoo,winter,111100001111
+# --- owls ---
+SEA,Eastern Barn Owl,resident,111111111111
+SEA,Buffy Fish-Owl,resident,111111111111
+SEA,Spotted Wood-Owl,resident,111111111111
+SEA,Brown Boobook,resident,111111111111
+SEA,Sunda Scops-Owl,resident,111111111111
+SEA,Collared Scops-Owl,resident,111111111111
+SEA,Barred Eagle-Owl,resident,111111111111
+# --- swifts ---
+SEA,Little Swift,resident,111111111111
+SEA,White-nest Swiftlet,resident,111111111111
+SEA,Glossy Swiftlet,resident,111111111111
+SEA,Black-nest Swiftlet,resident,111111111111
+SEA,Brown-backed Needletail,winter,111100001111
+# --- kingfishers & bee-eaters ---
+SEA,Common Kingfisher,resident,111111111111
+SEA,White-throated Kingfisher,resident,111111111111
+SEA,Collared Kingfisher,resident,111111111111
+SEA,Blue-eared Kingfisher,resident,111111111111
+SEA,Rufous-backed Dwarf-Kingfisher,resident,111111111111
+SEA,Stork-billed Kingfisher,resident,111111111111
+SEA,Banded Kingfisher,resident,111111111111
+SEA,Malayan Blue-banded Kingfisher,resident,111111111111
+SEA,Black-backed Dwarf-Kingfisher,resident,111111111111
+SEA,Blue-throated Bee-eater,resident,111111111111
+SEA,Blue-tailed Bee-eater,resident,111111111111
+SEA,Chestnut-headed Bee-eater,winter,111100001111
+# --- rollers, hoopoes ---
+SEA,Oriental Dollarbird,resident,111111111111
+SEA,Common Hoopoe,winter,111100001111
+# --- hornbills ---
+SEA,Oriental Pied-Hornbill,resident,111111111111
+SEA,Rhinoceros Hornbill,resident,111111111111
+SEA,Great Hornbill,resident,111111111111
+SEA,Black Hornbill,resident,111111111111
+SEA,White-crowned Hornbill,resident,111111111111
+SEA,Wreathed Hornbill,resident,111111111111
+SEA,Bushy-crested Hornbill,resident,111111111111
+# --- barbets & woodpeckers ---
+SEA,Coppersmith Barbet,resident,111111111111
+SEA,Lineated Barbet,resident,111111111111
+SEA,Red-crowned Barbet,resident,111111111111
+SEA,Blue-eared Barbet,resident,111111111111
+SEA,Gold-whiskered Barbet,resident,111111111111
+SEA,Common Flameback,resident,111111111111
+SEA,Greater Flameback,resident,111111111111
+SEA,Laced Woodpecker,resident,111111111111
+SEA,Banded Woodpecker,resident,111111111111
+SEA,Sunda Pygmy Woodpecker,resident,111111111111
+SEA,Gray-and-buff Woodpecker,resident,111111111111
+SEA,Maroon Woodpecker,resident,111111111111
+SEA,Crimson-winged Woodpecker,resident,111111111111
+SEA,Olive-backed Woodpecker,resident,111111111111
+# --- broadbills & pittas ---
+SEA,Black-and-red Broadbill,resident,111111111111
+SEA,Banded Broadbill,resident,111111111111
+SEA,Black-and-yellow Broadbill,resident,111111111111
+SEA,Dusky Broadbill,resident,111111111111
+SEA,Green Broadbill,resident,111111111111
+SEA,Long-tailed Broadbill,resident,111111111111
+SEA,Blue-winged Pitta,resident,111111111111
+SEA,Garnet Pitta,resident,111111111111
+SEA,Western Hooded Pitta,resident,111111111111
+SEA,Mangrove Pitta,resident,111111111111
+SEA,Fairy Pitta,winter,111100001111
+# --- cuckooshrikes, minivets, drongos ---
+SEA,Common Iora,resident,111111111111
+SEA,Great Iora,resident,111111111111
+SEA,Ashy Minivet,resident,111111111111
+SEA,Scarlet Minivet,resident,111111111111
+SEA,Pied Triller,resident,111111111111
+SEA,Tiger Shrike,winter,111100001111
+SEA,Brown Shrike,winter,111100001111
+SEA,Long-tailed Shrike,resident,111111111111
+SEA,Black Drongo,resident,111111111111
+SEA,Ashy Drongo,winter,111100001111
+SEA,Crow-billed Drongo,winter,111100001111
+SEA,Greater Racket-tailed Drongo,resident,111111111111
+SEA,Lesser Racket-tailed Drongo,resident,111111111111
+SEA,Bronzed Drongo,resident,111111111111
+SEA,Spangled Drongo,resident,111111111111
+SEA,Hair-crested Drongo,resident,111111111111
+SEA,White-breasted Woodswallow,resident,111111111111
+# --- leafbirds, fairy-bluebird, magpies, crows ---
+SEA,Asian Fairy-bluebird,resident,111111111111
+SEA,Blue-winged Leafbird,resident,111111111111
+SEA,Greater Green Leafbird,resident,111111111111
+SEA,Golden-fronted Leafbird,resident,111111111111
+SEA,Orange-bellied Leafbird,resident,111111111111
+SEA,Common Green-Magpie,resident,111111111111
+SEA,Crested Jayshrike,resident,111111111111
+SEA,Malayan Black Magpie,resident,111111111111
+SEA,House Crow,resident,111111111111
+SEA,Large-billed Crow,resident,111111111111
+SEA,Sunda Crow,resident,111111111111
+# --- swallows ---
+SEA,Pacific Swallow,resident,111111111111
+SEA,Barn Swallow,winter,111100001111
+SEA,Asian House-Martin,winter,111100001111
+SEA,Bank Swallow,winter,111100001111
+# --- bulbuls ---
+SEA,Yellow-vented Bulbul,resident,111111111111
+SEA,Straw-headed Bulbul,resident,111111111111
+SEA,Olive-winged Bulbul,resident,111111111111
+SEA,Red-eyed Bulbul,resident,111111111111
+SEA,Cream-vented Bulbul,resident,111111111111
+SEA,Black-headed Bulbul,resident,111111111111
+SEA,Yellow-bellied Bulbul,resident,111111111111
+SEA,Hairy-backed Bulbul,resident,111111111111
+SEA,Gray-bellied Bulbul,resident,111111111111
+SEA,Cachar Bulbul,resident,111111111111
+SEA,Black-crested Bulbul,resident,111111111111
+SEA,White-throated Bulbul,resident,111111111111
+# --- babblers ---
+SEA,White-crested Laughingthrush,resident,111111111111
+SEA,Chestnut-capped Laughingthrush,resident,111111111111
+SEA,Abbott's Babbler,resident,111111111111
+SEA,Short-tailed Babbler,resident,111111111111
+SEA,Black-throated Babbler,resident,111111111111
+SEA,Chestnut-winged Babbler,resident,111111111111
+SEA,Pin-striped Tit-babbler,resident,111111111111
+SEA,Bold-striped Tit-babbler,resident,111111111111
+SEA,Sunda Scimitar-Babbler,resident,111111111111
+SEA,Malayan Black-capped Babbler,resident,111111111111
+SEA,White-chested Babbler,resident,111111111111
+SEA,Horsfield's Babbler,resident,111111111111
+SEA,Rufous-fronted Babbler,resident,111111111111
+SEA,Brown Fulvetta,resident,111111111111
+SEA,White-browed Shrike-Babbler,resident,111111111111
+# --- gerygones, tailorbirds, warblers ---
+SEA,Golden-bellied Gerygone,resident,111111111111
+SEA,Common Tailorbird,resident,111111111111
+SEA,Dark-necked Tailorbird,resident,111111111111
+SEA,Ashy Tailorbird,resident,111111111111
+SEA,Rufous-tailed Tailorbird,resident,111111111111
+SEA,Arctic Warbler,winter,111100001111
+SEA,Eastern Crowned Warbler,winter,111100001111
+SEA,Pale-legged Leaf Warbler,winter,111100001111
+SEA,Yellow-browed Warbler,winter,111100001111
+SEA,Two-barred Warbler,winter,111100001111
+SEA,Oriental Reed Warbler,winter,111100001111
+SEA,Black-browed Reed Warbler,winter,111100001111
+SEA,Zitting Cisticola,resident,111111111111
+SEA,Golden-headed Cisticola,resident,111111111111
+SEA,Hill Prinia,resident,111111111111
+SEA,Rufescent Prinia,resident,111111111111
+SEA,Yellow-bellied Prinia,resident,111111111111
+# --- robins, shamas, flycatchers ---
+SEA,White-rumped Shama,resident,111111111111
+SEA,Rufous-tailed Shama,resident,111111111111
+SEA,Oriental Magpie-Robin,resident,111111111111
+SEA,Javan Forktail,resident,111111111111
+SEA,Siberian Blue Robin,winter,111100001111
+SEA,Yellow-rumped Flycatcher,winter,111100001111
+SEA,Mugimaki Flycatcher,winter,111100001111
+SEA,Asian Brown Flycatcher,winter,111100001111
+SEA,Dark-sided Flycatcher,winter,111100001111
+SEA,Ferruginous Flycatcher,winter,111100001111
+SEA,Gray-streaked Flycatcher,winter,111100001111
+SEA,Red-breasted Flycatcher,winter,111100001111
+SEA,Verditer Flycatcher,winter,111100001111
+SEA,Indigo Flycatcher,resident,111111111111
+SEA,Hill Blue Flycatcher,resident,111111111111
+SEA,Mangrove Blue Flycatcher,resident,111111111111
+SEA,Tickell's Blue Flycatcher,resident,111111111111
+SEA,Pale Blue Flycatcher,resident,111111111111
+SEA,Gray-headed Canary-Flycatcher,resident,111111111111
+SEA,Indian Paradise-Flycatcher,resident,111111111111
+SEA,Black Paradise-Flycatcher,winter,111100001111
+SEA,Black-naped Monarch,resident,111111111111
+SEA,White-throated Fantail,resident,111111111111
+SEA,Sunda Pied-Fantail,resident,111111111111
+# --- starlings & mynas ---
+SEA,Asian Glossy Starling,resident,111111111111
+SEA,Common Hill Myna,resident,111111111111
+SEA,Great Myna,resident,111111111111
+SEA,Jungle Myna,resident,111111111111
+SEA,Common Myna,resident,111111111111
+SEA,Javan Myna,resident,111111111111
+SEA,Black-winged Myna,resident,111111111111
+SEA,Daurian Starling,winter,111100001111
+SEA,Chestnut-tailed Starling,winter,111100001111
+SEA,Rosy Starling,passage,001100001100
+SEA,European Starling,winter,111100001111
+SEA,Black-collared Starling,resident,111111111111
+SEA,Crested Myna,resident,111111111111
+# --- thrushes, chats, flowerpeckers, sunbirds ---
+SEA,Blue Rock-Thrush,winter,111100001111
+SEA,Orange-headed Thrush,resident,111111111111
+SEA,Eyebrowed Thrush,winter,111100001111
+SEA,Siberian Thrush,winter,111100001111
+SEA,White's Thrush,winter,111100001111
+SEA,Siberian Stonechat,winter,111100001111
+SEA,Pied Bushchat,winter,111100001111
+SEA,Scarlet-backed Flowerpecker,resident,111111111111
+SEA,Thick-billed Flowerpecker,resident,111111111111
+SEA,Crimson-breasted Flowerpecker,resident,111111111111
+SEA,Orange-bellied Flowerpecker,resident,111111111111
+SEA,Yellow-vented Flowerpecker,resident,111111111111
+SEA,Garden Sunbird,resident,111111111111
+SEA,Brown-throated Sunbird,resident,111111111111
+SEA,Crimson Sunbird,resident,111111111111
+SEA,Ruby-cheeked Sunbird,resident,111111111111
+SEA,Copper-throated Sunbird,resident,111111111111
+SEA,Purple-throated Sunbird,resident,111111111111
+SEA,Van Hasselt's Sunbird,resident,111111111111
+SEA,Little Spiderhunter,resident,111111111111
+SEA,Long-billed Spiderhunter,resident,111111111111
+SEA,Spectacled Spiderhunter,resident,111111111111
+SEA,Gray-breasted Spiderhunter,resident,111111111111
+# --- sparrows, munias, weavers, wagtails, pipits ---
+SEA,Eurasian Tree Sparrow,resident,111111111111
+SEA,House Sparrow,resident,111111111111
+SEA,Scaly-breasted Munia,resident,111111111111
+SEA,White-headed Munia,resident,111111111111
+SEA,Javan Munia,resident,111111111111
+SEA,Chestnut Munia,resident,111111111111
+SEA,White-bellied Munia,resident,111111111111
+SEA,Baya Weaver,resident,111111111111
+SEA,Asian Golden Weaver,resident,111111111111
+SEA,Pin-tailed Parrotfinch,resident,111111111111
+SEA,Gray Wagtail,winter,111100001111
+SEA,White Wagtail,winter,111100001111
+SEA,Eastern Yellow Wagtail,winter,111100001111
+SEA,Forest Wagtail,winter,111100001111
+SEA,Richard's Pipit,winter,111100001111
+SEA,Paddyfield Pipit,resident,111111111111
