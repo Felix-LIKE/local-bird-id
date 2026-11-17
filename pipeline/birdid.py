@@ -538,7 +538,10 @@ class BioclipClassifier(Classifier):
     def _load_bird(self, names: list[str]):
         if self._bird is None or self._bird_names != names:
             from bioclip.predict import CustomLabelsClassifier
-            self._bird = CustomLabelsClassifier([f"a photo of a {n}" for n in names])
+            # pass PLAIN names as the class labels so predict() returns clean
+            # species names ("Blue Tit"), not the prefixed text templates
+            # ("a photo of a Blue Tit") that would leak into the sidecar/report
+            self._bird = CustomLabelsClassifier(list(names))
             self._bird_names = names
         return self._bird
 
@@ -558,18 +561,18 @@ class BioclipClassifier(Classifier):
         res = coarse.predict(image, k=1)
         if isinstance(res, list):
             res = res[0]
-        top = max(res.items(), key=lambda kv: kv[1])
-        cat = str(top[0]).replace("a photo of a ", "").replace("a photo of ", "")
+        cat = str(res.get("classification", "")).replace("a photo of a ", "").replace("a photo of ", "")
 
         # --- stage 2: fine species ---
         if cat == "bird":
             names = [s for s, _st in candidates] or ["unknown"]
             fine = self._load_bird(names)
-            scores = fine.predict(image)
-            if isinstance(scores, list):
-                scores = scores[0]
-            ranked = sorted(
-                ((n, float(s)) for n, s in scores.items()), key=lambda kv: -kv[1])
+            rows = fine.predict(image)
+            ranked = [(d.get("classification", ""), float(d.get("score", 0.0)))
+                      for d in rows if d.get("score") is not None]
+            ranked.sort(key=lambda kv: -kv[1])
+            if not ranked:
+                raise RuntimeError("BioCLIP returned no bird scores")
             species, p = ranked[0]
             alts = [n for n, _ in ranked[1:4]]
             reasoning = (f"BioCLIP-2: bird category; softmax over {len(names)} "
@@ -583,12 +586,14 @@ class BioclipClassifier(Classifier):
 
         # non-bird (macro reptiles / insects / ...) - whole tree of life
         tol = self._load_tol()
-        res = tol.predict(image, rank=self._Rank.SPECIES, k=3)
-        if isinstance(res, list):
-            res = res[0]
-        # res: {file_name, SPECIES: name, common_name, score}
-        species = str(res.get("common_name") or res.get(self._Rank.SPECIES.name) or "unknown")
-        p = float(res.get("score", 0.0))
+        rows = tol.predict(image, rank=self._Rank.SPECIES, k=3)
+        if isinstance(rows, list):
+            row = rows[0] if rows else {}
+        else:
+            row = rows
+        # row keys: file_name, kingdom..genus, species (sci), common_name, score
+        species = str(row.get("common_name") or row.get("species") or "unknown")
+        p = float(row.get("score", 0.0))
         common, sci = normalize_species(species, tax)
         return {
             "species": common,

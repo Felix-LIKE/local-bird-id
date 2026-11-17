@@ -5,7 +5,6 @@ region,species,status,month_mask
 # Source: curated from standard field references (Collins / Svensson). Replace
 # or extend with real eBird data if an API key is available (see README).
 DE,Great Tit,resident,111111111111
-DE,Blue Tit,resident,111111111111
 DE,Eurasian Blue Tit,resident,111111111111
 DE,Eurasian Blackbird,resident,111111111111
 DE,Common Blackbird,resident,111111111111
