@@ -1,0 +1,97 @@
+region,species,status,month_mask
+# Thailand — seed list of common species with monthly presence.
+# month_mask: 12 chars, Jan..Dec, '1' = present that month.
+# status: resident | winter (northern migrant) | passage
+# Source: curated from standard field references (Craig Robson / Thailand
+# bird guides). Replace or extend with real eBird data if an API key is
+# available (see README).
+TH,Asian Koel,resident,111111111111
+TH,Greater Coucal,resident,111111111111
+TH,Spotted Dove,resident,111111111111
+TH,Red Collared Dove,resident,111111111111
+TH,Zebra Dove,resident,111111111111
+TH,Asian Emerald Dove,resident,111111111111
+TH,Green Imperial Pigeon,resident,111111111111
+TH,Pink-necked Green Pigeon,resident,111111111111
+TH,Thick-billed Green Pigeon,resident,111111111111
+TH,Red-wattled Lapwing,resident,111111111111
+TH,Indian Roller,resident,111111111111
+TH,Common Kingfisher,resident,111111111111
+TH,White-throated Kingfisher,resident,111111111111
+TH,Black-capped Kingfisher,resident,111111111111
+TH,Stork-billed Kingfisher,resident,111111111111
+TH,Green Bee-eater,resident,111111111111
+TH,Blue-tailed Bee-eater,resident,111111111111
+TH,Chestnut-headed Bee-eater,resident,111111111111
+TH,Asian Openbill,resident,111111111111
+TH,Little Egret,resident,111111111111
+TH,Cattle Egret,resident,111111111111
+TH,Great Egret,resident,111111111111
+TH,Intermediate Egret,resident,111111111111
+TH,Grey Heron,resident,111111111111
+TH,Purple Heron,resident,111111111111
+TH,Oriental Pied Hornbill,resident,111111111111
+TH,Great Hornbill,resident,111111111111
+TH,Hoopoe,resident,111111111111
+TH,Coppersmith Barbet,resident,111111111111
+TH,Lineated Barbet,resident,111111111111
+TH,Blue-throated Barbet,resident,111111111111
+TH,Great Barbet,resident,111111111111
+TH,Asian Fairy-bluebird,resident,111111111111
+TH,Black-naped Oriole,resident,111111111111
+TH,Black Drongo,resident,111111111111
+TH,Ashy Drongo,resident,111111111111
+TH,Greater Racket-tailed Drongo,resident,111111111111
+TH,Asian Paradise-flycatcher,resident,111111111111
+TH,Black-naped Monarch,resident,111111111111
+TH,Pied Fantail,resident,111111111111
+TH,Malaysian Pied Fantail,resident,111111111111
+TH,White-rumped Shama,resident,111111111111
+TH,Oriental Magpie-Robin,resident,111111111111
+TH,Common Myna,resident,111111111111
+TH,White-vented Myna,resident,111111111111
+TH,Hill Myna,resident,111111111111
+TH,Eurasian Tree Sparrow,resident,111111111111
+TH,House Sparrow,resident,111111111111
+TH,Scaly-breasted Munia,resident,111111111111
+TH,White-rumped Munia,resident,111111111111
+TH,Chestnut Munia,resident,111111111111
+TH,Baya Weaver,resident,111111111111
+TH,Yellow-vented Bulbul,resident,111111111111
+TH,Streak-eared Bulbul,resident,111111111111
+TH,Sooty-headed Bulbul,resident,111111111111
+TH,Red-whiskered Bulbul,resident,111111111111
+TH,Black-crested Bulbul,resident,111111111111
+TH,Asian Glossy Starling,resident,111111111111
+TH,Vinous-breasted Starling,resident,111111111111
+TH,Golden-crested Myna,resident,111111111111
+TH,Olive-backed Sunbird,resident,111111111111
+TH,Purple Sunbird,resident,111111111111
+TH,Brown-throated Sunbird,resident,111111111111
+TH,Crimson Sunbird,resident,111111111111
+TH,Scarlet-backed Flowerpecker,resident,111111111111
+TH,Common Iora,resident,111111111111
+TH,Great Tit,resident,111111111111
+TH,Long-tailed Shrike,resident,111111111111
+TH,Rufous Treepie,resident,111111111111
+TH,Hooded Pitta,resident,111111111111
+TH,White-breasted Waterhen,resident,111111111111
+TH,Grey-headed Swamphen,resident,111111111111
+TH,Common Moorhen,resident,111111111111
+TH,White-browed Crake,resident,111111111111
+TH,Little Cormorant,resident,111111111111
+TH,Indian Cormorant,resident,111111111111
+TH,Oriental Darter,resident,111111111111
+TH,Little Grebe,resident,111111111111
+TH,Black-winged Stilt,resident,111111111111
+TH,Barn Swallow,winter,111100001111
+TH,Asian House Martin,winter,111100001111
+TH,Common Sandpiper,winter,111100001111
+TH,Wood Sandpiper,winter,111100001111
+TH,Brown Shrike,winter,111100001111
+TH,Tiger Shrike,winter,111100001111
+TH,Blue Rock Thrush,winter,111100001111
+TH,Siberian Blue Robin,winter,111100001111
+TH,Red-breasted Flycatcher,winter,111100001111
+TH,Asian Brown Flycatcher,winter,111100001111
+TH,Blue-winged Pitta,passage,011100011100

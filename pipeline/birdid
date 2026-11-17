@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# birdid - one-command offline bird-photo identification.
+#
+# Point it at a folder of photos. It auto-starts the NPU vision server
+# (FastFlowLM + qwen3vl-it:4b) if needed, runs the pipeline, and stops the
+# server again ONLY if it was the one that started it.
+#
+# Usage:
+#   birdid /path/to/photos [extra birdid.py args...]
+#   birdid --list-candidates            # inspect the region/month tables
+#
+# Exit codes:
+#   0  success (or nothing to do)
+#   1  pipeline error (server start failure / flm missing / FATAL)
+set -u
+
+# ---- config ---------------------------------------------------------------
+MODEL="${BIRDID_MODEL:-qwen3vl-it:4b}"
+BASE_URL="${BIRDID_BASE_URL:-http://127.0.0.1:52625/v1}"
+SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PY="${BIRDID_PY:-python3}"
+PIPELINE="$SCRIPT_DIR/birdid.py"
+LOG="${BIRDID_LOG:-/tmp/opencode/birdid-server.log}"
+START_WAIT="${BIRDID_START_WAIT:-120}"   # seconds to wait for the server
+
+# ---- helpers --------------------------------------------------------------
+say()  { printf '%s\n' "$*"; }
+die()  { printf 'birdid: ERROR: %s\n' "$*" >&2; exit 1; }
+
+server_up() {
+    curl -sS --max-time 3 "$BASE_URL/models" >/dev/null 2>&1
+}
+
+find_flm() {
+    command -v flm 2>/dev/null || {
+        for c in "$HOME/.local/bin/flm" /usr/local/bin/flm /usr/bin/flm; do
+            [ -x "$c" ] && { echo "$c"; return 0; }
+        done
+        return 1
+    }
+}
+
+# ---- main -----------------------------------------------------------------
+if [ "$#" -eq 0 ]; then
+    say "usage: birdid /path/to/photos [birdid.py args...]"
+    say "       birdid --list-candidates"
+    exit 2
+fi
+
+# sanity: the pipeline script exists
+[ -f "$PIPELINE" ] || die "pipeline not found: $PIPELINE"
+
+# a --list-candidates / --dry-run call does not need the server
+NEEDS_SERVER=1
+case " $* " in
+    *" --list-candidates "*|*" --dry-run "*|*" -h "*|*" --help "*) NEEDS_SERVER=0 ;;
+esac
+
+FLM=""
+if [ "$NEEDS_SERVER" -eq 1 ] && ! server_up; then
+    FLM="$(find_flm)" || die "flm not found on PATH. Install FastFlowLM first."
+    say "birdid: FLM server not running - starting it with '$MODEL' ..."
+    FLM_MODEL_PATH="${FLM_MODEL_PATH:-/data/models/flm}" \
+        "$FLM" serve "$MODEL" >"$LOG" 2>&1 &
+    SERVER_PID=$!
+
+    # wait for the OpenAI-compatible endpoint
+    waited=0
+    while [ "$waited" -lt "$START_WAIT" ]; do
+        if server_up; then
+            say "birdid: server ready after ${waited}s (pid $SERVER_PID)"
+            break
+        fi
+        sleep 2
+        waited=$((waited + 2))
+    done
+    if ! server_up; then
+        say "birdid: ERROR: FLM server did not become ready after ${START_WAIT}s." >&2
+        if [ -f "$LOG" ]; then
+            say "birdid: last lines of the server log ($LOG):" >&2
+            tail -25 "$LOG" >&2 || true
+        fi
+        kill "$SERVER_PID" 2>/dev/null
+        wait "$SERVER_PID" 2>/dev/null
+        die "could not start the NPU server. See the log above."
+    fi
+fi
+
+# run the pipeline
+"$PY" "$PIPELINE" "$@"
+rc=$?
+
+# stop the server only if we started it
+if [ -n "${SERVER_PID:-}" ]; then
+    say "birdid: stopping the server we started (pid $SERVER_PID)"
+    kill "$SERVER_PID" 2>/dev/null
+    wait "$SERVER_PID" 2>/dev/null
+fi
+
+exit "$rc"

@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Downloaded data artifact (see ebird/README.md for the download command)
+ebird/eBird_Taxonomy_v2023.csv
+
+# Local runtime logs
+*.log
