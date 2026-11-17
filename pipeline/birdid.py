@@ -14,8 +14,8 @@ tagged:
   3. build a candidate shortlist from the offline eBird region x month tables,
      optionally boosted by an eBird checklist export (*_observations.csv) that
      sits in the photo folder
-  4. classify the photo with a local model backend (default: NPU vision LLM;
-     pluggable - see Classifier) and get a ranked species + confidence
+  4. classify the photo with BioCLIP 2 (pybioclip, CPU) and get a ranked
+     species + confidence
   5. write ONE IMatch-safe XMP sidecar per capture:  <base>.xmp
      (never <base>.jpg.xmp / <base>.cr2.xmp)
   6. keep a resumable manifest + CSV report, and show a live TUI
@@ -24,9 +24,18 @@ Originals (CR2/CR3/JPEG/...) are NEVER modified - only `.xmp` sidecars and the
 manifest are written. A RAW + JPEG pair of the same capture is processed ONCE
 (on the viewable file) and produces a single shared sidecar.
 
+Data management (see pipeline/ebird_data.py):
+  birdid.py --list [country|region]    what's available to download
+  birdid.py --download <code>          regenerate a region table from real
+                                       eBird observations (needs --api key;
+                                       no key = keep the curated seed)
+  birdid.py --api [<key>]              store / show the eBird API key
+  birdid.py --initialize               one-time: download taxonomy + BioCLIP 2
+                                       backends so everything works offline
+
 Requirements:
   - exiftool, python3 (PIL, lxml, requests)
-  - a classifier backend (default: FastFlowLM vision model on the NPU)
+  - pybioclip (BioCLIP 2) - the only classifier backend
 
 Usage:
   birdid.py /path/to/photos [--region DE] [options]
@@ -38,7 +47,6 @@ See --help for all options. Examples:
 """
 
 import argparse
-import base64
 import csv
 import io
 import json
@@ -51,12 +59,12 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+from ebird_data import COARSE_LABELS   # shared with --initialize (single source of truth)
+
 # --------------------------------------------------------------------------
 # Config / defaults
 # --------------------------------------------------------------------------
 
-DEFAULT_BASE_URL = "http://127.0.0.1:52625/v1"
-DEFAULT_MODEL = "qwen3vl-it:4b"
 DEFAULT_DATA_DIR = "/data/offline-data/bird/ebird"
 DEFAULT_REGION = "DE"
 PIPELINE_VERSION = "1"
@@ -368,99 +376,7 @@ def load_checklist(path: Path) -> list[str]:
     return species
 
 # --------------------------------------------------------------------------
-# Vision input preparation
-# --------------------------------------------------------------------------
-
-def prepare_vision_input(path: Path, max_side: int = 1280) -> str:
-    """Return base64 JPEG for the model. RAW files: use the embedded preview."""
-    from PIL import Image  # imported here so the module can at least be parsed without PIL
-
-    ext = path.suffix.lower()
-    data = None
-    if ext in RAW_EXTS:
-        data = _embedded_preview(path)
-    if data is None:
-        with open(path, "rb") as f:
-            data = f.read()
-    img = Image.open(io.BytesIO(data))
-    if img.mode not in ("RGB", "L"):
-        img = img.convert("RGB")
-    w, h = img.size
-    if max(w, h) > max_side:
-        scale = max_side / max(w, h)
-        img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))))
-    buf = io.BytesIO()
-    img.convert("RGB").save(buf, "JPEG", quality=85)
-    return base64.b64encode(buf.getvalue()).decode("ascii")
-
-
-def _embedded_preview(path: Path):
-    """Try to pull a JPEG preview out of a RAW file with exiftool."""
-    for tag in ("-PreviewImage", "-JpgFromRaw"):
-        try:
-            out = subprocess.run(["exiftool", "-b", tag, str(path)],
-                                 capture_output=True, timeout=60).stdout
-            if out and out[:3] == b"\xff\xd8\xff":  # JPEG magic
-                return out
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            continue
-    return None
-
-# --------------------------------------------------------------------------
-# FastFlowLM client
-# --------------------------------------------------------------------------
-
-def server_ready(base_url: str, timeout: float = 3.0):
-    """Return (ok, list_of_model_ids). Connectivity check only."""
-    try:
-        import requests
-        r = requests.get(base_url.rstrip("/") + "/models", timeout=timeout)
-        if not r.ok:
-            return False, []
-        data = r.json().get("data", [])
-        return True, [m.get("id") for m in data]
-    except Exception:
-        return False, []
-
-
-def ask_vlm(base_url: str, served_model: str, prompt: str, b64: str, timeout: float = 300.0):
-    import requests
-    url = base_url.rstrip("/") + "/chat/completions"
-    body = {
-        "model": served_model,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            ],
-        }],
-        "temperature": 0,
-        "max_tokens": 800,
-    }
-    r = requests.post(url, json=body, timeout=timeout)
-    r.raise_for_status()
-    content = r.json()["choices"][0]["message"]["content"]
-    return extract_json(content)
-
-
-def extract_json(text: str) -> dict:
-    """Pull the first JSON object out of a model reply (tolerates fences/extra text)."""
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-    start = text.find("{")
-    if start < 0:
-        raise ValueError(f"no JSON object in model reply: {text[:200]!r}")
-    dec = json.JSONDecoder()
-    obj, _ = dec.raw_decode(text[start:])
-    return obj
-
-
-# --------------------------------------------------------------------------
-# Classifier backends (pluggable)
+# Classifier backends
 # --------------------------------------------------------------------------
 
 class Classifier:
@@ -488,41 +404,6 @@ class Classifier:
         raise NotImplementedError
 
 
-class VLMClassifier(Classifier):
-    """FastFlowLM vision LLM on the NPU (original backend)."""
-
-    name = "vlm"
-
-    def __init__(self, args):
-        super().__init__(args)
-        ok, available = server_ready(args.base_url)
-        if not ok:
-            raise ConnectionError(
-                f"no FLM server at {args.base_url}.\n"
-                f"Start it first (in another terminal):  flm serve {args.model}")
-        if args.model not in available:
-            print(f"note: '{args.model}' is not listed by the server "
-                  f"(server may serve a different model) - continuing anyway.", flush=True)
-
-    def classify(self, image, candidates, expanded, tax, region, month, dt):
-        b64 = prepare_vision_input(image, self.args.max_side)
-        # hint the VLM with the wider regional pool too (as secondary context)
-        prompt = build_prompt(region, dt, candidates, tax, expanded)
-        result = None
-        last_err = None
-        for attempt in range(self.args.retry + 1):
-            try:
-                result = ask_vlm(self.args.base_url, self.args.model, prompt, b64, self.args.timeout)
-                break
-            except Exception as e:  # noqa: BLE001
-                last_err = e
-                if attempt < self.args.retry:
-                    time.sleep(2)
-        if result is None:
-            raise RuntimeError(f"vision request failed: {last_err}")
-        return result
-
-
 class BioclipClassifier(Classifier):
     """BioCLIP 2 (pybioclip) - text-conditioned species classifier on CPU.
 
@@ -540,12 +421,6 @@ class BioclipClassifier(Classifier):
     """
 
     name = "bioclip"
-    COARSE_LABELS = [
-        "a photo of a bird", "a photo of a reptile", "a photo of an amphibian",
-        "a photo of an insect", "a photo of a spider", "a photo of a mammal",
-        "a photo of a fish", "a photo of a plant", "a photo of a fungus",
-        "a photo of something else",
-    ]
 
     def __init__(self, args):
         super().__init__(args)
@@ -566,7 +441,7 @@ class BioclipClassifier(Classifier):
     def _load_coarse(self):
         if self._coarse is None:
             from bioclip.predict import CustomLabelsClassifier
-            self._coarse = CustomLabelsClassifier(self.COARSE_LABELS)
+            self._coarse = CustomLabelsClassifier(COARSE_LABELS)
         return self._coarse
 
     def _bird_classifier(self, names: list[str]):
@@ -668,54 +543,8 @@ class BioclipClassifier(Classifier):
 
 
 def make_classifier(args) -> Classifier:
-    name = getattr(args, "classifier", "vlm")
-    if name == "vlm":
-        return VLMClassifier(args)
-    if name == "bioclip":
-        return BioclipClassifier(args)
-    raise ValueError(f"unknown classifier backend: {name}")
+    return BioclipClassifier(args)
 
-# --------------------------------------------------------------------------
-# Prompt
-# --------------------------------------------------------------------------
-
-def build_prompt(region: str, dt: datetime, candidates: list[tuple[str, str]],
-                 tax: dict[str, str] | None = None,
-                 expanded: list[tuple[str, str]] | None = None) -> str:
-    region_name = {"DE": "Germany", "SG": "Singapore", "TH": "Thailand"}.get(region, region)
-    date_str = dt.strftime("%Y-%m-%d %H:%M") if dt else "unknown"
-    tax = tax or {}
-    if candidates:
-        parts = []
-        for s, st in candidates:
-            sci = tax.get(s, "")
-            parts.append(f"{s} ({sci}) ({st})" if sci else f"{s} ({st})")
-        cand = ", ".join(parts)
-    else:
-        cand = "none in the local table for this region/month - answer from general knowledge"
-    extra = ""
-    if expanded and len(expanded) > len(candidates):
-        extra_parts = []
-        for s, st in expanded:
-            if s.lower() not in {c.lower() for c, _ in candidates}:
-                sci = tax.get(s, "")
-                extra_parts.append(f"{s} ({sci})" if sci else s)
-        if extra_parts:
-            extra = (f"\n- Additional species from the wider region (neighbouring "
-                     f"countries - birds do not respect borders): {', '.join(extra_parts[:60])}")
-    return (
-        "You are an expert bird identification assistant. Identify the single main bird in the photo.\n\n"
-        f"Photo context:\n"
-        f"- Region: {region_name} ({region})\n"
-        f"- Date/time: {date_str}\n"
-        f"- Species plausibly present here this month (eBird): {cand}{extra}\n\n"
-        "Rules:\n"
-        "1. The species must be a real English common name (matching one from the list when possible).\n"
-        "2. If you cannot identify the bird confidently, set confidence < 0.3 and species to \"unknown\".\n"
-        "3. Reply with ONLY valid JSON, no markdown, in exactly this shape:\n"
-        '{"species": "Common Name", "confidence": 0.0, '
-        '"alternatives": ["Other Name", "Another"], "reasoning": "one short sentence"}'
-    )
 
 # --------------------------------------------------------------------------
 # XMP sidecars (IMatch-safe, merge-aware)
@@ -1096,13 +925,8 @@ def fmt_result(result: dict, scientific: str = "") -> str:
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Offline bird-photo identification (single XMP sidecar per capture).")
+        description="Offline bird-photo identification (BioCLIP 2, single XMP sidecar per capture).")
     ap.add_argument("folder", nargs="?", default=None, help="folder (recursive) of photos to scan")
-    ap.add_argument("--classifier", default="bioclip", choices=["vlm", "bioclip"],
-                    help="classification backend (default bioclip = pybioclip/BioCLIP 2 "
-                         "on CPU; vlm = NPU vision LLM, needs the FLM server running)")
-    ap.add_argument("--model", default=DEFAULT_MODEL, help=f"vision model tag (default {DEFAULT_MODEL})")
-    ap.add_argument("--base-url", default=DEFAULT_BASE_URL, help="FLM OpenAI-compatible base URL")
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="dir containing eBird data (regions/, taxonomy)")
     ap.add_argument("--region", default=DEFAULT_REGION, help="default region when no GPS can be resolved (DE/SG/TH)")
     ap.add_argument("--no-checklist", action="store_true",
@@ -1116,35 +940,67 @@ def main():
                     help="below this top score, re-score against the wider "
                          "regional pool (neighbouring countries) - 0 disables "
                          "the expansion (default 0.35)")
-    ap.add_argument("--download-backends", action="store_true",
-                    help="predownload the BioCLIP 2 model + TreeOfLife data so "
-                         "a later run works fully offline (HF_HUB_OFFLINE=1)")
-    ap.add_argument("--max-side", type=int, default=1280, help="max image dimension sent to the model")
-    ap.add_argument("--timeout", type=float, default=300.0, help="per-request timeout (s)")
-    ap.add_argument("--retry", type=int, default=2, help="retries per failed file")
     ap.add_argument("--dry-run", action="store_true", help="scan + plan only, no model calls")
     ap.add_argument("--no-tui", action="store_true", help="plain log output, no fullscreen UI")
     ap.add_argument("--list-candidates", action="store_true",
                     help="print candidate counts per region/month and exit")
+
+    # --- data management commands (no photo folder needed) ---
+    ap.add_argument("-d", "--download", nargs="+", metavar="SPEC",
+                    help="regenerate a region table from real eBird observations, "
+                         "in place. SPEC is a code (SG/TH/DE/SEA/EUROPE), optionally "
+                         "as 'country CODE' or 'region CODE'; bare 'country'/'region' "
+                         "use the defaults. Needs an API key (--api); without one "
+                         "the curated seed is kept (no-key fallback).")
+    ap.add_argument("--list", nargs="*", metavar="KIND",
+                    help="list countries/regions available for download "
+                         "(optional filter: country | region)")
+    ap.add_argument("--api", nargs="?", const="__show__", metavar="KEY",
+                    help="store your eBird API key (--api <key>); bare --api shows status")
+    ap.add_argument("--initialize", action="store_true",
+                    help="one-time setup: download the eBird taxonomy + BioCLIP 2/"
+                         "TreeOfLife backends so everything works offline")
+    ap.add_argument("--download-backends", action="store_true",
+                    help="predownload the BioCLIP 2 + TreeOfLife backends so a "
+                         "later run works fully offline (same backend part as "
+                         "--initialize)")
+    ap.add_argument("--api-delay", type=float, default=1.5,
+                    help="seconds between eBird API calls (rate-limit guard, default 1.5)")
+    ap.add_argument("--sample-dates", type=int, default=2,
+                    help="sample dates per month for --download (default 2)")
+    ap.add_argument("--year", type=int, default=2025,
+                    help="historic-data year for --download (default 2025)")
     args = ap.parse_args()
 
-    if args.download_backends:
-        # Predownload everything so a later run works fully offline. Must NOT
-        # run under HF_HUB_OFFLINE=1 (the launcher takes care of that).
-        print("predownloading BioCLIP 2 + TreeOfLife backends ...", flush=True)
-        from bioclip.predict import CustomLabelsClassifier, TreeOfLifeClassifier
-        from bioclip import Rank
-        CustomLabelsClassifier(BioclipClassifier.COARSE_LABELS)   # BioCLIP 2 weights
-        tol = TreeOfLifeClassifier()                              # TOL-200M datafile
-        tol.create_taxa_filter(Rank.CLASS, ["Aves"])              # + Aves filter tables
-        import os
-        cache = os.path.expanduser("~/.cache/huggingface")
-        print(f"done - backends cached under {cache}. A later run with "
-              f"HF_HUB_OFFLINE=1 needs no network.", flush=True)
+    data_dir = Path(args.data_dir)
+
+    # --- data management commands (no photo folder needed) ---
+    mgmt = (args.initialize or args.download_backends or args.api is not None
+            or args.list is not None or args.download)
+    if mgmt:
+        try:
+            if args.initialize or args.download_backends:
+                from ebird_data import initialize
+                initialize(data_dir, data_dir / "regions")
+            elif args.api is not None:
+                from ebird_data import handle_api
+                handle_api(args.api)
+            elif args.list is not None:
+                from ebird_data import list_regions
+                list_regions(data_dir, args.list)
+            elif args.download:
+                from ebird_data import set_api_delay, download
+                set_api_delay(args.api_delay)
+                download(data_dir, args.download, year=args.year,
+                         sample_dates=args.sample_dates)
+        except (ValueError, RuntimeError, OSError, KeyError) as e:
+            sys.exit(f"birdid: ERROR: {e}")
         return
 
     if not args.folder and not args.list_candidates:
-        ap.error("the following arguments are required: folder  (or use --list-candidates)")
+        ap.error("the following arguments are required: folder  "
+                 "(or use a management command: --download/--list/--api/"
+                 "--initialize/--list-candidates)")
 
     root = None
     if args.folder:
@@ -1219,7 +1075,7 @@ def main():
             dir_gps = compute_dir_gps(meta_map)
 
             # --- Phase 2: classifier backend ---
-            tui.set(stage="classify", message=f"loading classifier ({args.classifier})")
+            tui.set(stage="classify", message="loading classifier (BioCLIP 2)")
             classifier = make_classifier(args)
             tui.plain_line(f"classifier: {classifier.describe()}")
 

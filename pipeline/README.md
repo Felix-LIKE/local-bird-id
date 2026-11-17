@@ -4,11 +4,11 @@
 (embedded GPS → folder-average GPS → `--region`; EXIF date → folder name like
 `260128-Botanic_Garden`), builds a species candidate list from the offline eBird
 tables (optionally boosted by an eBird checklist export in the photo folder),
-and classifies each bird with a local model. It writes IMatch-safe XMP sidecars
-and a resumable manifest. **Originals are never modified** - only one `<base>.xmp`
-sidecar per capture, the manifest, and the report are written. Every result
-records both the **common name** and the **scientific name** (from the official
-eBird taxonomy).
+and classifies each bird with **BioCLIP 2** (pybioclip, CPU). It writes
+IMatch-safe XMP sidecars and a resumable manifest. **Originals are never
+modified** - only one `<base>.xmp` sidecar per capture, the manifest, and the
+report are written. Every result records both the **common name** and the
+**scientific name** (from the official eBird taxonomy).
 
 ## One-command launcher (recommended)
 
@@ -16,61 +16,58 @@ eBird taxonomy).
 everything for you:
 
 ```bash
-birdid /path/to/photos            # BioCLIP 2 on CPU - no server needed
-birdid /path/to/photos --classifier vlm   # NPU vision LLM (auto-starts server)
+birdid /path/to/photos            # BioCLIP 2 on CPU, fully offline
 birdid /path/to/photos --max 10   # extra birdid.py args pass straight through
 birdid /path/to/photos --dry-run  # plan only, no model work
 birdid --list-candidates          # inspect the region/month tables
-birdid --download-backends        # predownload BioCLIP 2 + TreeOfLife once
+birdid --list                     # what's available to download
+birdid --api [<key>]              # store / show the eBird API key
+birdid --download <code>          # regenerate a region table from real eBird data
+birdid --initialize               # one-time: taxonomy + BioCLIP 2 backends
 ```
 
-- The default backend is **BioCLIP 2** (CPU, runs in the project venv), so
-  normally **no server is needed**. If `--classifier vlm` is chosen and the FLM
-  server isn't already running, the launcher starts
-  `flm serve qwen3vl-it:4b`, waits for it, runs the pipeline, then **stops the
-  server again only if it was the one that started it** (an already-running
-  server is left alone).
-- If `flm` is missing or the server fails to start, it prints a clear error,
-  tails the server log, and exits 1.
-- **Fully offline by default**: the launcher runs the pipeline with
-  `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`, so a run never touches the
-  network. Run `birdid --download-backends` once (the one mode that stays
-  online) to cache the BioCLIP 2 weights, the TreeOfLife-200M datafile and the
-  Aves filter under `~/.cache/huggingface`.
-- Env overrides: `BIRDID_MODEL`, `BIRDID_BASE_URL`, `BIRDID_START_WAIT`,
-  `BIRDID_LOG`, `BIRDID_PY`.
+- The only backend is **BioCLIP 2** (CPU, runs in the project venv) - no server
+  is ever needed.
+- **Fully offline by default**: for folder runs the launcher sets
+  `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`, so the pipeline never touches
+  the network. Run `birdid --initialize` once (the management commands run
+  online) to cache the BioCLIP 2 weights, the TreeOfLife-200M datafile, the Aves
+  filter and the eBird taxonomy under `~/.cache/huggingface`.
+- Env override: `BIRDID_PY` (python to use; defaults to the project venv).
 
-## Classifier backends
+## Data management
 
-`--classifier vlm|bioclip` (default `bioclip`):
+`birdid --download` / `--list` / `--api` / `--initialize` need **no photo
+folder**; they manage the eBird data used as the classifier's prior.
 
-- `bioclip` - **default**: pybioclip/BioCLIP 2 on CPU (project venv
-  `pipeline/.venv`). Text-conditioned species classifier: scores the photo
-  against the eBird candidate list and returns real ranked percentages.
-  Two-stage: coarse category first (bird/reptile/insect/...), then fine
-  species - birds use the eBird priors, non-birds (macro reptiles/insects) use
-  the whole TreeOfLife taxonomy. Install once:
-  `python3 -m venv --system-site-packages pipeline/.venv && \
-  pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
-  pipeline/.venv/bin/pip install pybioclip`
-  (model weights + TreeOfLife datafile download on first use).
-- `vlm` - FastFlowLM vision LLM on the NPU (`qwen3vl-it:4b`). Needs the FLM
-  server; lower fine-grained accuracy.
+- `--list [country|region]` prints the registry: the countries we ship seeds
+  for (SG / TH / DE), the wider pools (SEA / EUROPE, by member countries),
+  whether each table exists locally, and the API-key status.
+- `--api <key>` stores your eBird API key in
+  `~/.config/birdid/ebird_api_key` (chmod 600); bare `--api` shows the status.
+- `--download <code>` regenerates a region table **in place** from real eBird
+  historic observations: for each month it samples dates (`--sample-dates 2`
+  by default, `--year 2025`) and unions the species actually reported that
+  month. A country downloads that country; a pool aggregates its member
+  countries. With no key it keeps the curated seed (the no-key fallback).
+- `--initialize` downloads the eBird taxonomy (no key) and the BioCLIP 2 +
+  TreeOfLife backends once, so everything afterwards works offline.
 
 ## Prerequisites (one time)
 
 ```bash
-flm pull qwen3vl-it:4b          # vision model (~3.9 GB, already pulled) - vlm backend
-pip install pybioclip           # BioCLIP 2 - bioclip backend
+python3 -m venv --system-site-packages pipeline/.venv
+pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pipeline/.venv/bin/pip install pybioclip
+pipeline/birdid --initialize
 ```
 
-Needs `exiftool` and python3 with `PIL`, `lxml`, `requests` (all present). The
-launcher calls `flm serve` itself, so no manual server step is needed.
+Needs `exiftool` and python3 with `PIL`, `lxml`, `requests` (all present).
 
 ## Usage (direct)
 
 ```bash
-# Plan only (no NPU work, no sidecars):
+# Plan only (no model work, no sidecars):
 python3 birdid.py /path/to/photos --dry-run
 
 # Process everything (shows a live TUI; q = quit, resume-safe):
@@ -84,8 +81,7 @@ python3 birdid.py /path/to/photos --region DE
 python3 birdid.py --list-candidates
 ```
 
-Defaults are fine: model `qwen3vl-it:4b`, server `127.0.0.1:52625/v1`, data in
-`/data/offline-data/bird/ebird`.
+Defaults are fine: data in `/data/offline-data/bird/ebird`, region `DE`.
 
 ## Behaviour (per the project plan)
 
@@ -156,15 +152,14 @@ today).
 - `eBird_Taxonomy_v2023.csv` - full official taxonomy (downloaded from the
   eBird API, no key) used to normalise species names.
 - `regions/DE.csv`, `regions/SG.csv`, `regions/TH.csv` - species-per-month
-  country tables (the GPS+time prior). Currently curated seed lists;
-  regenerate from real eBird observations once an API key is available (see
-  `../ebird/README.md`).
+  country tables (the GPS+time prior). Shipped as curated seeds; `--download`
+  regenerates them in place from real eBird observations with an API key.
 - `regions/SEA.csv`, `regions/EUROPE.csv` - wider regional pools used by the
   two-tier expansion above (the "neighbouring countries" fallback).
   Species names in every table are the canonical eBird v2023 common names.
 
 ## Known limits
 
-- Small vision models are good on common species, weaker on look-alikes /
+- Text-image classifiers are good on common species, weaker on look-alikes /
   juveniles / females. Treat results as suggestions and confirm tricky IDs.
 - Photos without GPS fall back to `--region`.
