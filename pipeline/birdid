@@ -18,7 +18,13 @@ set -u
 MODEL="${BIRDID_MODEL:-qwen3vl-it:4b}"
 BASE_URL="${BIRDID_BASE_URL:-http://127.0.0.1:52625/v1}"
 SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
-PY="${BIRDID_PY:-python3}"
+# prefer the project venv (BioCLIP backend) if present
+VENV="$SCRIPT_DIR/.venv"
+if [ -x "$VENV/bin/python" ]; then
+    PY="${BIRDID_PY:-$VENV/bin/python}"
+else
+    PY="${BIRDID_PY:-python3}"
+fi
 PIPELINE="$SCRIPT_DIR/birdid.py"
 LOG="${BIRDID_LOG:-/tmp/opencode/birdid-server.log}"
 START_WAIT="${BIRDID_START_WAIT:-120}"   # seconds to wait for the server
@@ -50,11 +56,11 @@ fi
 # sanity: the pipeline script exists
 [ -f "$PIPELINE" ] || die "pipeline not found: $PIPELINE"
 
-# some invocations do not need the FLM/NPU server
-NEEDS_SERVER=1
+# the FLM/NPU server is only needed when the vlm backend is explicitly chosen
+# (the default bioclip backend runs on CPU). dry-run/list/help never need it.
+NEEDS_SERVER=0
 case " $* " in
-    *" --list-candidates "*|*" --dry-run "*|*" -h "*|*" --help "*) NEEDS_SERVER=0 ;;
-    *" --classifier bioclip "*|*" --classifier=bioclip "*) NEEDS_SERVER=0 ;;
+    *" --classifier vlm "*|*" --classifier=vlm "*) NEEDS_SERVER=1 ;;
 esac
 
 FLM=""

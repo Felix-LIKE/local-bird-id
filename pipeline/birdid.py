@@ -516,7 +516,7 @@ class BioclipClassifier(Classifier):
     def __init__(self, args):
         super().__init__(args)
         try:
-            import pybioclip  # noqa: F401
+            import bioclip  # noqa: F401  (distribution: pybioclip, module: bioclip)
         except ImportError as e:
             raise RuntimeError(
                 "pybioclip is not installed - run once:\n"
@@ -525,24 +525,27 @@ class BioclipClassifier(Classifier):
                 "on first use)") from e
         self._coarse = None
         self._bird = None
+        self._bird_names = None
         self._tol = None
+        self._Rank = None
 
     def _load_coarse(self):
         if self._coarse is None:
-            from pybioclip import CustomLabelsClassifier
+            from bioclip.predict import CustomLabelsClassifier
             self._coarse = CustomLabelsClassifier(self.COARSE_LABELS)
         return self._coarse
 
     def _load_bird(self, names: list[str]):
         if self._bird is None or self._bird_names != names:
-            from pybioclip import CustomLabelsClassifier
+            from bioclip.predict import CustomLabelsClassifier
             self._bird = CustomLabelsClassifier([f"a photo of a {n}" for n in names])
             self._bird_names = names
         return self._bird
 
     def _load_tol(self):
         if self._tol is None:
-            from pybioclip import TreeOfLifeClassifier, Rank
+            from bioclip.predict import TreeOfLifeClassifier
+            from bioclip import Rank
             self._Rank = Rank
             self._tol = TreeOfLifeClassifier()
         return self._tol
@@ -552,7 +555,9 @@ class BioclipClassifier(Classifier):
 
         # --- stage 1: coarse category ---
         coarse = self._load_coarse()
-        res = coarse.predict(image, k=1)[0]
+        res = coarse.predict(image, k=1)
+        if isinstance(res, list):
+            res = res[0]
         top = max(res.items(), key=lambda kv: kv[1])
         cat = str(top[0]).replace("a photo of a ", "").replace("a photo of ", "")
 
@@ -560,7 +565,9 @@ class BioclipClassifier(Classifier):
         if cat == "bird":
             names = [s for s, _st in candidates] or ["unknown"]
             fine = self._load_bird(names)
-            scores = fine.predict(image)[0]
+            scores = fine.predict(image)
+            if isinstance(scores, list):
+                scores = scores[0]
             ranked = sorted(
                 ((n, float(s)) for n, s in scores.items()), key=lambda kv: -kv[1])
             species, p = ranked[0]
@@ -576,7 +583,9 @@ class BioclipClassifier(Classifier):
 
         # non-bird (macro reptiles / insects / ...) - whole tree of life
         tol = self._load_tol()
-        res = tol.predict(image, rank=self._Rank.SPECIES, k=3)[0]
+        res = tol.predict(image, rank=self._Rank.SPECIES, k=3)
+        if isinstance(res, list):
+            res = res[0]
         # res: {file_name, SPECIES: name, common_name, score}
         species = str(res.get("common_name") or res.get(self._Rank.SPECIES.name) or "unknown")
         p = float(res.get("score", 0.0))
@@ -1010,9 +1019,9 @@ def main():
     ap = argparse.ArgumentParser(
         description="Offline bird-photo identification (single XMP sidecar per capture).")
     ap.add_argument("folder", nargs="?", default=None, help="folder (recursive) of photos to scan")
-    ap.add_argument("--classifier", default="vlm", choices=["vlm", "bioclip"],
-                    help="classification backend (default vlm = NPU vision LLM; "
-                         "bioclip = pybioclip, requires 'pip install pybioclip')")
+    ap.add_argument("--classifier", default="bioclip", choices=["vlm", "bioclip"],
+                    help="classification backend (default bioclip = pybioclip/BioCLIP 2 "
+                         "on CPU; vlm = NPU vision LLM, needs the FLM server running)")
     ap.add_argument("--model", default=DEFAULT_MODEL, help=f"vision model tag (default {DEFAULT_MODEL})")
     ap.add_argument("--base-url", default=DEFAULT_BASE_URL, help="FLM OpenAI-compatible base URL")
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="dir containing eBird data (regions/, taxonomy)")

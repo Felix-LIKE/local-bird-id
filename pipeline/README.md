@@ -16,18 +16,19 @@ eBird taxonomy).
 everything for you:
 
 ```bash
-birdid /path/to/photos            # auto-starts the NPU server if needed
+birdid /path/to/photos            # BioCLIP 2 on CPU - no server needed
+birdid /path/to/photos --classifier vlm   # NPU vision LLM (auto-starts server)
 birdid /path/to/photos --max 10   # extra birdid.py args pass straight through
-birdid /path/to/photos --dry-run  # plan only, no server needed
+birdid /path/to/photos --dry-run  # plan only, no model work
 birdid --list-candidates          # inspect the region/month tables
-birdid /path/to/photos --classifier bioclip   # CPU BioCLIP, no NPU server
 ```
 
-- If the FLM server isn't already running (and a server-based backend is
-  selected), the launcher starts `flm serve qwen3vl-it:4b`, waits for it, runs
-  the pipeline, then **stops the server again only if it was the one that
-  started it** (an already-running server is left alone). With
-  `--classifier bioclip` no server is started at all.
+- The default backend is **BioCLIP 2** (CPU, runs in the project venv), so
+  normally **no server is needed**. If `--classifier vlm` is chosen and the FLM
+  server isn't already running, the launcher starts
+  `flm serve qwen3vl-it:4b`, waits for it, runs the pipeline, then **stops the
+  server again only if it was the one that started it** (an already-running
+  server is left alone).
 - If `flm` is missing or the server fails to start, it prints a clear error,
   tails the server log, and exits 1.
 - Env overrides: `BIRDID_MODEL`, `BIRDID_BASE_URL`, `BIRDID_START_WAIT`,
@@ -35,17 +36,20 @@ birdid /path/to/photos --classifier bioclip   # CPU BioCLIP, no NPU server
 
 ## Classifier backends
 
-`--classifier vlm|bioclip` (default `vlm`):
+`--classifier vlm|bioclip` (default `bioclip`):
 
-- `vlm` - FastFlowLM vision LLM on the NPU (`qwen3vl-it:4b`). No extra
-  install; lower fine-grained accuracy.
-- `bioclip` - **recommended**: pybioclip/BioCLIP 2 on CPU. Text-conditioned
-  species classifier: scores the photo against the eBird candidate list and
-  returns real ranked percentages. Two-stage: coarse category first
-  (bird/reptile/insect/...), then fine species - birds use the eBird priors,
-  non-birds (macro reptiles/insects) use the whole TreeOfLife taxonomy.
-  Install once: `pip install pybioclip` (pulls torch + torchvision; model
-  weights download on first use).
+- `bioclip` - **default**: pybioclip/BioCLIP 2 on CPU (project venv
+  `pipeline/.venv`). Text-conditioned species classifier: scores the photo
+  against the eBird candidate list and returns real ranked percentages.
+  Two-stage: coarse category first (bird/reptile/insect/...), then fine
+  species - birds use the eBird priors, non-birds (macro reptiles/insects) use
+  the whole TreeOfLife taxonomy. Install once:
+  `python3 -m venv --system-site-packages pipeline/.venv && \
+  pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu && \
+  pipeline/.venv/bin/pip install pybioclip`
+  (model weights + TreeOfLife datafile download on first use).
+- `vlm` - FastFlowLM vision LLM on the NPU (`qwen3vl-it:4b`). Needs the FLM
+  server; lower fine-grained accuracy.
 
 ## Prerequisites (one time)
 
