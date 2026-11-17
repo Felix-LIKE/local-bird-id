@@ -21,6 +21,7 @@ birdid /path/to/photos --classifier vlm   # NPU vision LLM (auto-starts server)
 birdid /path/to/photos --max 10   # extra birdid.py args pass straight through
 birdid /path/to/photos --dry-run  # plan only, no model work
 birdid --list-candidates          # inspect the region/month tables
+birdid --download-backends        # predownload BioCLIP 2 + TreeOfLife once
 ```
 
 - The default backend is **BioCLIP 2** (CPU, runs in the project venv), so
@@ -31,6 +32,11 @@ birdid --list-candidates          # inspect the region/month tables
   server is left alone).
 - If `flm` is missing or the server fails to start, it prints a clear error,
   tails the server log, and exits 1.
+- **Fully offline by default**: the launcher runs the pipeline with
+  `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`, so a run never touches the
+  network. Run `birdid --download-backends` once (the one mode that stays
+  online) to cache the BioCLIP 2 weights, the TreeOfLife-200M datafile and the
+  Aves filter under `~/.cache/huggingface`.
 - Env overrides: `BIRDID_MODEL`, `BIRDID_BASE_URL`, `BIRDID_START_WAIT`,
   `BIRDID_LOG`, `BIRDID_PY`.
 
@@ -102,9 +108,19 @@ Defaults are fine: model `qwen3vl-it:4b`, server `127.0.0.1:52625/v1`, data in
 - **Optional eBird checklist**: a `*_observations.csv` export in a photo folder
   adds that day's observed species to the candidate list (highest priority).
   Use `--no-checklist` to ignore. Works fully offline - it is just a CSV.
+- **Two-tier neighbour-region expansion**: birds don't respect borders. If the
+  top score over the base country list falls below `--expand-threshold`
+  (default 0.35), the photo is re-scored against the *union* of the country
+  list and a wider regional pool - `SEA` (Southeast Asia) for `SG`/`TH`,
+  `EUROPE` for `DE` - so a species photographed just across a border (or missed
+  by the curated table) still gets a chance. The reasoning field records when
+  this fired. `--expand-threshold 0` disables it.
 - **Sidecars are merged**, never blind-rewritten: existing XMP elements are
   preserved and only the `bird:` fields (+ `dc:subject`, `dc:description`) are
   updated.
+- **Forcing a re-run**: a capture counts as *done* iff its sidecar is done, so
+  reruns skip it. To re-tag a folder, delete the stale sidecars (+ manifest +
+  report) first - originals are never touched.
 
 ## Output per photo (XMP sidecar)
 
@@ -140,8 +156,12 @@ today).
 - `eBird_Taxonomy_v2023.csv` - full official taxonomy (downloaded from the
   eBird API, no key) used to normalise species names.
 - `regions/DE.csv`, `regions/SG.csv`, `regions/TH.csv` - species-per-month
-  tables. Currently curated seed lists; regenerate from real eBird observations
-  once an API key is available (see `../ebird/README.md`).
+  country tables (the GPS+time prior). Currently curated seed lists;
+  regenerate from real eBird observations once an API key is available (see
+  `../ebird/README.md`).
+- `regions/SEA.csv`, `regions/EUROPE.csv` - wider regional pools used by the
+  two-tier expansion above (the "neighbouring countries" fallback).
+  Species names in every table are the canonical eBird v2023 common names.
 
 ## Known limits
 
