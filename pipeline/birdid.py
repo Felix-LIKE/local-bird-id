@@ -106,20 +106,28 @@ BIRD_NS = "http://ns.birdpipeline/1.0/"
 # --------------------------------------------------------------------------
 
 class SpeciesDB:
-    """Loads region/*.csv tables: region,species,status,month_mask (12 chars, Jan..Dec)."""
+    """Loads region tables: region,species,status,month_mask (12 chars, Jan..Dec).
 
-    def __init__(self, regions_dir: Path):
-        self.regions_dir = Path(regions_dir)
+    Two sources, cleanly separated:
+      - `curated_dir` (committed seeds, e.g. regions/EUROPE.csv, regions/SEA.csv),
+      - `generated_dir` (gitignored, API-derived from `birdid --download`).
+    A generated table for a region REPLACES the curated one (preferred); the
+    curated seed remains the fallback when no generated table exists.
+    """
+
+    def __init__(self, curated_dir: Path, generated_dir: Path | None = None):
+        self.curated_dir = Path(curated_dir)
+        self.generated_dir = Path(generated_dir) if generated_dir else None
         # region -> (month index 0..11) -> list[(species, status)]
         self._table: dict[str, dict[int, list[tuple[str, str]]]] = {}
+        # region -> "curated" | "generated"
+        self._source: dict[str, str] = {}
 
-    def load(self):
-        if not self.regions_dir.is_dir():
-            raise FileNotFoundError(
-                f"regions dir not found: {self.regions_dir}\n"
-                f"expected region CSVs (DE.csv, SG.csv, TH.csv).")
-        for csv_path in sorted(self.regions_dir.glob("*.csv")):
+    def _load_dir(self, base_dir: Path, source: str, override: bool):
+        for csv_path in sorted(base_dir.glob("*.csv")):
             region = csv_path.stem.upper()
+            if override:
+                self._table[region] = {}
             with open(csv_path, newline="", encoding="utf-8") as f:
                 for row in csv.DictReader(f):
                     if not row:
@@ -138,8 +146,17 @@ class SpeciesDB:
                     for i, ch in enumerate(mask):
                         if ch == "1":
                             self._table.setdefault(region, {}).setdefault(i, []).append((species, status))
+            self._source[region] = source
+
+    def load(self):
+        if self.curated_dir.is_dir():
+            self._load_dir(self.curated_dir, "curated", override=False)
+        if self.generated_dir and self.generated_dir.is_dir():
+            self._load_dir(self.generated_dir, "generated", override=True)
         if not self._table:
-            raise FileNotFoundError(f"no region tables loaded from {self.regions_dir}")
+            raise FileNotFoundError(
+                f"no region tables loaded from {self.curated_dir} "
+                f"(expected curated seeds like EUROPE.csv / SEA.csv)")
 
     def candidates(self, region: str, month: int) -> list[tuple[str, str]]:
         """Species plausibly present in `region` during `month` (1..12)."""
@@ -162,6 +179,10 @@ class SpeciesDB:
                 seen.add(sp.lower())
                 out.append((sp, st))
         return out
+
+    def source(self, region: str) -> str:
+        """'curated' | 'generated' | '' for a region."""
+        return self._source.get(region.upper(), "")
 
     def regions(self):
         return sorted(self._table)
@@ -595,7 +616,13 @@ class BioclipClassifier(Classifier):
           tier 2 - if the top score is below --expand-threshold, re-score
                    against the wider regional pool (neighbouring countries).
         """
-        names = [s for s, _st in candidates] or ["unknown"]
+        names = [s for s, _st in candidates]
+        if not names:
+            # no country table for this region (only EUROPE/SEA are shipped) -
+            # fall back to the expanded list (the regional pool) as tier 1.
+            names = [s for s, _st in expanded]
+        if not names:
+            names = ["unknown"]
         ranked = self._score_bird(image, names)
         if not ranked:
             raise RuntimeError("BioCLIP returned no bird scores")
@@ -1110,12 +1137,16 @@ def main():
     regions_dir = data_dir / "regions"
     taxonomy_path = find_taxonomy(data_dir)
 
-    db = SpeciesDB(regions_dir)
+    db = SpeciesDB(regions_dir, data_dir / "regions_generated")
     db.load()
     taxonomy = load_taxonomy(taxonomy_path)
     tax_src = taxonomy_path.name if taxonomy_path else "none"
     print(f"eBird tables: {', '.join(db.regions())}   taxonomy: "
           f"{tax_src} ({len(taxonomy)} names)")
+    gen = [r for r in db.regions() if db.source(r) == "generated"]
+    if gen:
+        print(f"generated (API-derived) tables in use: {', '.join(gen)} "
+              "(gitignored - preferred over the curated seeds)")
 
     avibase_sci, avibase_common = load_avibase(data_dir)
     if avibase_sci:

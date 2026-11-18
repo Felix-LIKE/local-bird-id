@@ -51,7 +51,13 @@ DEFAULT_API_DELAY = 1.5               # seconds between API calls (rate limit)
 
 # taxonomy file names (single source of truth; birdid.py imports these)
 TAXONOMY_2023 = "eBird_Taxonomy_v2023.csv"          # eBird API download (gitignored)
-TAXONOMY_2026 = "eBird-Clements_v2026_integrated-checklist-October-2026.csv"  # bundled offline fallback
+# bundled offline fallback; VERSION-AGNOSTIC name so a newer Clements download
+# simply replaces this file (same name) - see ebird/README.md.
+TAXONOMY_2026 = "eBird-Clements_Integrated_Checklist.csv"
+
+# generated (API-derived) region tables live here - gitignored, never committed;
+# the pipeline prefers them over the curated seeds in regions/.
+GENERATED_DIR = "regions_generated"
 
 # keyless taxonomy sources (no API key needed)
 CLEMENTS_V2026_URL = (
@@ -412,8 +418,9 @@ def write_region_csv(path: Path, region: str, sp_months: dict[str, set[int]],
         header.append(f"Pool over member countries: {', '.join(members)}.")
     header.append("month_mask: 12 chars, Jan..Dec, '1' = reported that month. "
                   "status: resident | seasonal (informative only).")
-    header.append("This table overwrote the curated seed in place - real data "
-                  "is now preferred for this region.")
+    header.append("This is API-derived eBird data - it lives in the gitignored "
+                  "regions_generated/ dir and is NOT committed to git; the "
+                  "curated seed in regions/ stays as the fallback.")
 
     with open(path, "w", newline="", encoding="utf-8") as f:
         f.write("region,species,status,month_mask\n")
@@ -457,24 +464,23 @@ def download(data_dir: Path, tokens: list[str], year: int = DEFAULT_YEAR,
             download_taxonomy(data_dir)
         except RuntimeError as e:
             print(f"birdid: ERROR: {e}")
-        print(f"birdid: no API key configured - keeping the curated seed for "
+        print(f"birdid: no API key configured - no generated table written for "
               f"{code} ({label}).")
         print("        without a key, --download can only fetch the taxonomy "
-              "(above); the species tables keep the curated no-key data.")
+              "(above); region tables use the curated seeds (EUROPE/SEA) or none.")
         print("        to fetch real eBird observations instead:")
         print("          birdid --api <your-ebird-key>   then rerun --download")
         return
 
-    regions_dir = data_dir / "regions"
-    if not regions_dir.is_dir():
-        raise FileNotFoundError(f"regions dir not found: {regions_dir}")
+    generated_dir = data_dir / GENERATED_DIR
+    generated_dir.mkdir(parents=True, exist_ok=True)
 
     if kind == "country":
         if not region_exists(code, key):
             raise RuntimeError(f"eBird region code '{code}' is not valid "
                                f"(check your key / the code).")
         sp_months = _sample_with_progress(code, key, year, sample_dates)
-        write_region_csv(regions_dir / f"{code}.csv", code, sp_months,
+        write_region_csv(generated_dir / f"{code}.csv", code, sp_months,
                          label, year, sample_dates)
     else:
         members = POOLS[code]["members"]
@@ -488,13 +494,15 @@ def download(data_dir: Path, tokens: list[str], year: int = DEFAULT_YEAR,
             sp = _sample_with_progress(member, key, year, sample_dates)
             for name, months in sp.items():
                 pool_months[name].update(months)
-        write_region_csv(regions_dir / f"{code}.csv", code, dict(pool_months),
+        write_region_csv(generated_dir / f"{code}.csv", code, dict(pool_months),
                          label, year, sample_dates, members=members)
         print("birdid: note: pool tables cover many countries - expect a large "
               "species count.")
 
-    print("birdid: done. The generated table is now the committed source for "
-          "this region (real eBird data preferred over the curated seed).")
+    print("birdid: done. Real eBird data written to "
+          f"{generated_dir / f'{code}.csv'} (API-derived, gitignored - not "
+          "committed). The curated seed in regions/ remains the fallback; the "
+          "pipeline prefers this generated table when present.")
 
 
 def _sample_with_progress(region_code: str, key: str, year: int, sample_dates: int):
@@ -516,21 +524,27 @@ def _sample_with_progress(region_code: str, key: str, year: int, sample_dates: i
 # --list
 # ---------------------------------------------------------------------------
 
-def region_table_info(regions_dir: Path, region: str) -> tuple[bool, int]:
-    """(present, n_species) for a region table in the regions dir."""
-    path = Path(regions_dir) / f"{region}.csv"
-    if not path.is_file():
-        return False, 0
-    n = 0
-    with open(path, newline="", encoding="utf-8") as f:
-        for row in f:
-            line = row.lstrip()
-            if not line or line.startswith("#"):
-                continue
-            if line.startswith("region,"):
-                continue
-            n += 1
-    return True, n
+def region_table_info(curated_dir: Path, generated_dir: Path, region: str
+                      ) -> tuple[str, int]:
+    """(source, n_species) for a region table, "" when none.
+
+    source is "generated" (API-derived, preferred), "curated" (committed seed)
+    or "" (no table).
+    """
+    for source, base in (("generated", generated_dir), ("curated", curated_dir)):
+        path = Path(base) / f"{region}.csv"
+        if path.is_file():
+            n = 0
+            with open(path, newline="", encoding="utf-8") as f:
+                for row in f:
+                    line = row.lstrip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if line.startswith("region,"):
+                        continue
+                    n += 1
+            return source, n
+    return "", 0
 
 
 def ebird_region_list(region_type: str, parent_code: str | None, key: str) -> list[dict]:
@@ -550,7 +564,8 @@ def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
     `subnational2 <CODE>` lists a country's subregions via the API (needs key).
     """
     data_dir = Path(data_dir)
-    regions_dir = data_dir / "regions"
+    curated_dir = data_dir / "regions"
+    generated_dir = data_dir / GENERATED_DIR
 
     member_of: dict[str, str] = {}
     for pool, info in POOLS.items():
@@ -593,19 +608,21 @@ def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
     print("  birdid --download <CODE>   or   --download country <CODE>")
     for code in sorted(countries):
         name = countries[code]
-        present, n = region_table_info(regions_dir, code)
-        local = f"yes ({n} spp)" if present else "-"
+        src, n = region_table_info(curated_dir, generated_dir, code)
+        local = f"{src} ({n} spp)" if src else "-"
         pool = member_of.get(code, "-")
-        print(f"  {code:<5} {name:<34} local: {local:<13} pool: {pool}")
+        print(f"  {code:<5} {name:<34} local: {local:<16} pool: {pool}")
     print()
-    print("  local = a region CSV already exists in the data dir; "
-          "pool = member of a --download pool (SEA/EUROPE).")
+    print("  local = a region CSV already in the data dir: 'curated' = committed "
+          "seed (no key), 'generated' = API-derived (gitignored, preferred);")
+    print("  pool = member of a --download pool (SEA/EUROPE).")
     print("  subnational regions:  birdid --list downloadable subnational1 <CODE>")
 
 
 def list_regions(data_dir: Path, filter_tokens: list[str]):
     data_dir = Path(data_dir)
-    regions_dir = data_dir / "regions"
+    curated_dir = data_dir / "regions"
+    generated_dir = data_dir / GENERATED_DIR
     lowered = [t.lower() for t in filter_tokens]
 
     if "downloadable" in lowered:
@@ -620,33 +637,36 @@ def list_regions(data_dir: Path, filter_tokens: list[str]):
     print(f"download with:  birdid --download <code>   |   birdid --list "
           f"country|region to filter")
     print()
+    print("table: curated = committed no-key seed; generated = API-derived "
+          "(gitignored, preferred); - = none (needs a key to create).")
+    print()
 
     if show_countries:
         print("countries (pool = wider region used by the two-tier fallback):")
         for code in sorted(COUNTRIES):
             info = COUNTRIES[code]
-            present, n = region_table_info(regions_dir, code)
-            tbl = f"yes ({n} spp)" if present else "no table"
-            print(f"  {code:<5} {info['name']:<22} table: {tbl:<14} pool: {info['pool']}")
+            src, n = region_table_info(curated_dir, generated_dir, code)
+            tbl = f"{src} ({n} spp)" if src else "none"
+            print(f"  {code:<5} {info['name']:<22} table: {tbl:<20} pool: {info['pool']}")
         print()
 
     if show_pools:
         print("regions / pools (aggregate of member countries):")
         for code in sorted(POOLS):
             info = POOLS[code]
-            present, n = region_table_info(regions_dir, code)
-            tbl = f"yes ({n} spp)" if present else "no table"
-            print(f"  {code:<5} {info['name']:<22} table: {tbl:<14} "
+            src, n = region_table_info(curated_dir, generated_dir, code)
+            tbl = f"{src} ({n} spp)" if src else "none"
+            print(f"  {code:<5} {info['name']:<22} table: {tbl:<20} "
                   f"members: {len(info['members'])} countries")
         print()
 
     key = get_api_key()
     if key:
-        print(f"API key: configured (....{key[-4:]}); --download fetches real "
-              "eBird data.")
+        print(f"API key: configured (....{key[-4:]}); --download writes real "
+              "eBird data to regions_generated/ (preferred over the seeds).")
     else:
-        print("API key: not configured; --download keeps the curated seeds.")
-        print("         add a key with:  birdid --api <your-ebird-key>")
+        print("API key: not configured; only the curated seeds (EUROPE/SEA) "
+              "are used. Other regions need a key:  birdid --api <your-ebird-key>")
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +691,8 @@ def initialize(data_dir: Path, regions_dir: Path):
 
     if not regions_dir.is_dir():
         print(f"birdid: warning: regions dir missing: {regions_dir}")
+
+    (data_dir / GENERATED_DIR).mkdir(parents=True, exist_ok=True)
 
     print("birdid: initialize complete. Everything now works offline "
           "(the launcher sets HF_HUB_OFFLINE=1 for folder runs).")

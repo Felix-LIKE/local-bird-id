@@ -8,5 +8,10 @@ __pycache__/
 # Downloaded data artifact (see ebird/README.md for the download command)
 ebird/eBird_Taxonomy_v2023.csv
 
+# API-derived region tables from `birdid --download` - never committed (eBird
+# API data may not be redistributed). The pipeline prefers these over the
+# committed curated seeds in ebird/regions/.
+ebird/regions_generated/
+
 # Local runtime logs
 *.log

@@ -23,7 +23,7 @@ birdid --list-candidates          # inspect the region/month tables
 birdid --list                     # what's available to download
 birdid --list downloadable        # every eBird country (offline reference)
 birdid --api [<key>]              # store / show the eBird API key
-birdid --download <code>          # regenerate a region table from real eBird data
+birdid --download <code>          # write a real eBird table to regions_generated/ (needs --api)
 birdid --download taxonomy        # fetch the keyless eBird/Clements taxonomy
 birdid --initialize               # one-time: taxonomy + BioCLIP 2 backends
 ```
@@ -42,9 +42,9 @@ birdid --initialize               # one-time: taxonomy + BioCLIP 2 backends
 `birdid --download` / `--list` / `--api` / `--initialize` need **no photo
 folder**; they manage the eBird data used as the classifier's prior.
 
-- `--list [country|region]` prints the registry: the countries we ship seeds
-  for (SG / TH / DE), the wider pools (SEA / EUROPE, by member countries),
-  whether each table exists locally, and the API-key status.
+- `--list [country|region]` prints the registry: every country and pool, whether
+  each table exists locally and from which source (`curated` = committed no-key
+  seed, `generated` = API-derived gitignored table), and the API-key status.
   `--list downloadable` shows every eBird country from the bundled ISO
   reference (offline, no key); with the API key,
   `--list downloadable subnational1 <CODE>` (or `subnational2`) lists a
@@ -52,11 +52,14 @@ folder**; they manage the eBird data used as the classifier's prior.
   `--download country <CODE>`.
 - `--api <key>` stores your eBird API key in
   `~/.config/birdid/ebird_api_key` (chmod 600); bare `--api` shows the status.
-- `--download <code>` regenerates a region table **in place** from real eBird
-  historic observations: for each month it samples dates (`--sample-dates 2`
-  by default, `--year 2025`) and unions the species actually reported that
-  month. A country downloads that country; a pool aggregates its member
-  countries. With no key it keeps the curated seed (the no-key fallback).
+- `--download <code>` writes a real-eBird table to the **gitignored**
+  `ebird/regions_generated/` directory: for each month it samples dates
+  (`--sample-dates 2` by default, `--year 2025`) and unions the species
+  actually reported that month. A country downloads that country; a pool
+  aggregates its member countries. Generated tables are **API-derived and
+  never committed** (eBird API data may not be redistributed); the pipeline
+  prefers them over the curated seeds while present. No key = no generated
+  table; only the curated seeds apply.
 - `--download taxonomy` (and any no-key `--download`) fetches the **keyless**
   eBird/Clements taxonomy: it tries the Clements v2026 integrated checklist
   (Cornell) first, then the eBird API v2023 taxonomy (neither needs a key). If
@@ -118,11 +121,13 @@ Defaults are fine: data in `/data/offline-data/bird/ebird`, region `DE`.
   adds that day's observed species to the candidate list (highest priority).
   Use `--no-checklist` to ignore. Works fully offline - it is just a CSV.
 - **Two-tier neighbour-region expansion**: birds don't respect borders. If the
-  top score over the base country list falls below `--expand-threshold`
-  (default 0.35), the photo is re-scored against the *union* of the country
+  top score over the base region list falls below `--expand-threshold`
+  (default 0.35), the photo is re-scored against the *union* of the region
   list and a wider regional pool - `SEA` (Southeast Asia) for `SG`/`TH`,
   `EUROPE` for `DE` - so a species photographed just across a border (or missed
-  by the curated table) still gets a chance. The reasoning field records when
+  by the curated table) still gets a chance. If a region has **no table at all**
+  (only EUROPE and SEA ship seeds - every other region needs `--download`), the
+  pool is used as the tier-1 list directly. The reasoning field records when
   this fired. `--expand-threshold 0` disables it.
 - **Sidecars are merged**, never blind-rewritten: existing XMP elements are
   preserved and only the `bird:` fields (+ `dc:subject`, `dc:description`) are
@@ -153,9 +158,10 @@ matched case-insensitively, a scientific-name answer is converted back to the
 common name, and dropped leading qualifiers are restored (e.g. "Blue Tit" ->
 "Eurasian Blue Tit", *Cyanistes caeruleus*). Unmatched names keep a blank
 scientific field and a "check spelling" note. The Avibase id comes from the
-bundled Clements v2026 checklist ('taxon concept ID' column); when that file is
-missing the Avibase fields are simply omitted. The same link is printed on the
-per-capture console line and stored in the report + manifest.
+bundled Clements checklist (`eBird-Clements_Integrated_Checklist.csv`,
+'taxon concept ID' column); when that file is missing the Avibase fields are
+simply omitted. The same link is printed on the per-capture console line and
+stored in the report + manifest.
 
 ## Report (CSV)
 
@@ -165,26 +171,28 @@ date_source, alternatives, reasoning, avibase_url, datetime`. Both `species`
 (common) and `scientific_name` are always recorded; `gps` / `date_source` say
 where the location and date came from (embedded / folder-mean / none and exif /
 folder / today), and `avibase_url` is the Avibase page for the top guess
-(blank when the v2026 file is unavailable).
+(blank when the bundled Clements file is unavailable).
 
 ## Data
 
 - `eBird_Taxonomy_v2023.csv` - full official taxonomy (downloaded from the
   eBird API, no key) used to normalise species names; if absent, the bundled
-  Clements v2026 checklist (`eBird-Clements_v2026_integrated-checklist-October-2026.csv`)
-  is used instead (same 18,631 common→scientific pairs), so installs with no
+  Clements checklist (`eBird-Clements_Integrated_Checklist.csv`) is used
+  instead (same 18,631 common→scientific pairs), so installs with no
   API/network access still get scientific names.
-- `eBird-Clements_v2026_integrated-checklist-October-2026.csv` - the bundled
-  Clements v2026 integrated checklist. Besides being the taxonomy fallback it
-  is the source of the Avibase ids: its `taxon concept ID` column
-  (`avibase-XXXX...`) maps every species to its Avibase page
-  (`https://avibase.ca/<id>`), surfaced for the highest-confidence guess.
-- `regions/DE.csv`, `regions/SG.csv`, `regions/TH.csv` - species-per-month
-  country tables (the GPS+time prior). Shipped as curated seeds; `--download`
-  regenerates them in place from real eBird observations with an API key.
-- `regions/SEA.csv`, `regions/EUROPE.csv` - wider regional pools used by the
-  two-tier expansion above (the "neighbouring countries" fallback).
-  Species names in every table are the canonical eBird common names.
+- `eBird-Clements_Integrated_Checklist.csv` - the bundled Clements checklist
+  (version-agnostic name, so a newer release simply replaces the file). Besides
+  being the taxonomy fallback it is the source of the Avibase ids: its
+  `taxon concept ID` column (`avibase-XXXX...`) maps every species to its
+  Avibase page (`https://avibase.ca/<id>`), surfaced for the highest-confidence
+  guess.
+- `regions/EUROPE.csv`, `regions/SEA.csv` - **committed curated seeds** for the
+  two no-key pools (the GPS+time prior and the two-tier expansion target).
+  Species names are the canonical eBird common names. A region without its own
+  table (e.g. `DE`) falls back to its pool automatically.
+- `regions_generated/*.csv` - **gitignored** API-derived tables written by
+  `birdid --download <code>` (preferred over the seeds while present; never
+  committed - eBird API data may not be redistributed).
 
 ## Known limits
 
