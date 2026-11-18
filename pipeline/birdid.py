@@ -774,7 +774,7 @@ def write_folder_reports(root: Path, manifest: dict, report_rows: list[dict]):
             species = set()
             for r in rows.values():
                 st = r.get("status", "")
-                if st == "done":
+                if st in ("done", "non-bird"):
                     counts["done"] += 1
                 elif st == "error":
                     counts["error"] += 1
@@ -850,8 +850,11 @@ class BioclipClassifier(Classifier):
       stage 2 (fine):
         - bird   -> CustomLabelsClassifier over the eBird candidate list
                     (region/month/checklist priors) -> ranked percentages.
-        - non-bird (macro reptiles/insects) -> TreeOfLifeClassifier at SPECIES
-                    rank, covering the whole tree of life (~1.6M species).
+        - non-bird -> by default the bird pre-filter records the coarse
+                    category (status 'non-bird') and SKIPS the fine stage, so
+                    non-bird shots cost almost nothing. With --analyze-all the
+                    subject is fully analysed via TreeOfLifeClassifier at
+                    SPECIES rank (whole tree of life, ~1.6M species).
 
     Requires:  pip install pybioclip   (pulls torch + torchvision; the
     BioCLIP 2 weights and TreeOfLife datafiles download on first use).
@@ -915,12 +918,29 @@ class BioclipClassifier(Classifier):
         if isinstance(res, list):
             res = res[0]
         cat = str(res.get("classification", "")).replace("a photo of a ", "").replace("a photo of ", "")
+        coarse_conf = float(res.get("score", 0.0))
 
         # --- stage 2: fine species ---
         if cat == "bird":
             return self._classify_bird(image, candidates, expanded)
 
-        # non-bird (macro reptiles / insects / ...) - whole tree of life
+        # non-bird subject (landscape / person / macro ...). The bird pre-filter
+        # records the coarse category cheaply and skips the full analysis, so a
+        # big collection of non-bird shots is handled without the expensive
+        # tree-of-life search. --analyze-all disables this and analyses the
+        # subject fully (whole tree of life) as before.
+        if not getattr(self.args, "analyze_all", False):
+            return {
+                "species": cat if cat else "unknown",
+                "scientific": "",
+                "confidence": round(coarse_conf, 4),
+                "alternatives": [],
+                "status": "non-bird",
+                "reasoning": (f"BioCLIP-2: subject category '{cat}' (non-bird); "
+                              f"skipped by the bird pre-filter - rerun with "
+                              f"--analyze-all to identify it"),
+            }
+
         tol = self._load_tol()
         rows = tol.predict(image, rank=self._Rank.SPECIES, k=3)
         if isinstance(rows, list):
@@ -1124,7 +1144,9 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
             note += f" | Avibase: {avibase_url}"
         _set_text(desc, "description", _nsmap()["dc"], note)
 
-        # dc:subject -> Birds/<species> keywords (convenience, IMatch-managed)
+        # dc:subject -> Birds/<species> keywords (convenience, IMatch-managed);
+        # non-bird subjects get Non-bird/<category> so they stay separate.
+        kw_prefix = "Non-bird" if status == "non-bird" else "Birds"
         for old in _find(root, "//dc:subject"):
             old.getparent().remove(old)
         subj = etree.SubElement(desc, f"{{{_nsmap()['dc']}}}subject")
@@ -1134,7 +1156,7 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
             if s not in seen:
                 seen.add(s)
                 li = etree.SubElement(bag, f"{{{_nsmap()['rdf']}}}li")
-                li.text = f"Birds/{s}"
+                li.text = f"{kw_prefix}/{s}"
 
     out = io.BytesIO()
     etree.ElementTree(root).write(out, xml_declaration=True, encoding="UTF-8",
@@ -1212,7 +1234,7 @@ def scan_folder(root: Path, manifest: dict) -> list[Capture]:
 
 
 def sidecar_status(sidecar: Path):
-    """Return 'done' / 'error' / None by parsing the sidecar (not string search)."""
+    """Return 'done' / 'non-bird' / 'error' / None by parsing the sidecar."""
     if not sidecar.exists():
         return None
     try:
@@ -1221,6 +1243,8 @@ def sidecar_status(sidecar: Path):
         status = st[0].text.strip() if st and st[0].text else None
         if status == "error":
             return "error"
+        if status == "non-bird":
+            return "non-bird"
         if sidecar_done(sidecar):
             return "done"
     except Exception:
@@ -1363,6 +1387,8 @@ def stage_hint(stage: str) -> str:
 def fmt_result(result: dict, scientific: str = "", avibase_url: str = "") -> str:
     if not result:
         return "no result"
+    if result.get("status") == "non-bird":
+        return f"{result.get('species', '?')} (non-bird - skipped)"
     c = float(result.get("confidence", 0.0))
     name = result.get("species", "?")
     base = f"{name} ({scientific}) {c*100:.0f}%" if scientific else f"{name} ({c*100:.0f}%)"
@@ -1403,6 +1429,12 @@ def main():
                     help="below this top score, re-score against the wider "
                          "regional pool (neighbouring countries) - 0 disables "
                          "the expansion (default 0.35)")
+    ap.add_argument("--analyze-all", action="store_true",
+                    help="disable the bird pre-filter: also fully analyse "
+                         "non-bird subjects (landscapes, people, macro - via "
+                         "the whole tree of life) instead of recording them as "
+                         "'non-bird' and skipping them. Previously skipped "
+                         "non-bird photos are re-analysed on rerun.")
     ap.add_argument("--dry-run", action="store_true", help="scan + plan only, no model calls")
     ap.add_argument("--no-tui", action="store_true", help="plain log output, no fullscreen UI")
     ap.add_argument("--list-candidates", action="store_true",
@@ -1528,6 +1560,7 @@ def main():
 
         pending = []
         done_n = 0
+        nb_n = 0
         error_n = 0
         for cap in captures:
             status = classify_capture(cap)
@@ -1535,6 +1568,12 @@ def main():
                 pending.append(cap)
             elif status == "done":
                 done_n += 1
+            elif status == "non-bird":
+                if args.analyze_all:
+                    # --analyze-all: re-analyse photos the pre-filter skipped
+                    pending.append(cap)
+                else:
+                    nb_n += 1
             else:
                 error_n += 1
 
@@ -1543,7 +1582,8 @@ def main():
 
         if args.dry_run:
             summary_lines.append(
-                f"scan: {len(captures)} captures | {done_n} done | {error_n} error | {len(pending)} pending")
+                f"scan: {len(captures)} captures | {done_n} done | {nb_n} non-bird | "
+                f"{error_n} error | {len(pending)} pending")
             for cap in pending[:20]:
                 summary_lines.append(f"  [pending] {cap.primary()} -> {cap.sidecar()}")
             if len(pending) > 20:
@@ -1551,7 +1591,8 @@ def main():
             summary_lines.append("dry-run: nothing processed.")
         elif not pending:
             summary_lines.append(
-                f"scan: {len(captures)} captures | {done_n} done | {error_n} error | 0 pending - nothing to do.")
+                f"scan: {len(captures)} captures | {done_n} done | {nb_n} non-bird | "
+                f"{error_n} error | 0 pending - nothing to do.")
 
         if not summary_lines:
             # --- Phase 1.5: one batched EXIF read for ALL photos, then GPS means ---
@@ -1657,10 +1698,11 @@ def main():
                                                   scientific, species)
                     avibase_id = avibase_url[len(AVIBASE_URL):] if avibase_url else ""
                     confidence = float(result.get("confidence", 0.0))
-                    if species not in ("unknown", "") and scientific == "" and taxonomy:
+                    status = result.get("status") or (
+                        "done" if confidence >= args.min_confidence else "low-confidence")
+                    if (species not in ("unknown", "") and scientific == ""
+                            and taxonomy and status != "non-bird"):
                         tui.plain_line(f"  note: '{species}' not in eBird taxonomy - check spelling")
-
-                    status = "done" if confidence >= args.min_confidence else "low-confidence"
                     tui.set(stage="sidecar", message=f"writing {sidecar.name}")
                     write_sidecar(sidecar, result, region, month, dt, status, args,
                                   scientific=scientific, avibase_url=avibase_url,
@@ -1695,7 +1737,10 @@ def main():
                         "central_outside": "; ".join(central_outside),
                     })
                     last = fmt_result(result, scientific, avibase_url)
-                    done_n += 1
+                    if status == "non-bird":
+                        nb_n += 1
+                    else:
+                        done_n += 1
                 except Exception as e:  # noqa: BLE001
                     status = "error"
                     error_n += 1
@@ -1736,7 +1781,9 @@ def main():
                 _write_csv(flat, report_rows)
                 written.append(str(flat))
             tui.set(phase="done", message="finished")
-            summary_lines.append(f"\ndone: {done_n} tagged, {error_n} errors -> manifest {manifest_path}")
+            summary_lines.append(
+                f"\ndone: {done_n} tagged, {nb_n} non-bird, {error_n} errors -> "
+                f"manifest {manifest_path}")
             for p in written:
                 summary_lines.append(f"wrote: {p}")
             if central and central.loaded and not args.no_checklist:

@@ -25,6 +25,12 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
 - **Two-tier neighbour-region expansion**: birds don't respect borders - if the
   country list yields no confident answer, the photo is re-scored against the
   wider regional pool (Southeast Asia / Europe).
+- **Bird pre-filter**: every photo is first checked for "is this a bird?" with
+  a cheap coarse pass. Non-bird shots (landscapes, people, macro, ...) are
+  recorded as `non-bird` and skipped instead of running the expensive whole-tree
+  analysis - so a big mixed collection is handled fast. `--analyze-all`
+  disables the pre-filter and fully analyses every subject (previously skipped
+  non-birds are re-analysed on rerun).
 - **Resumable**: the manifest is saved after every capture; reruns skip done
   work and never redo model calls.
 - **RAW+JPEG pairs** = one capture → one model call → result mirrored to both

@@ -19,6 +19,7 @@ everything for you:
 birdid /path/to/photos            # BioCLIP 2 on CPU, fully offline
 birdid /path/to/photos --max 10   # extra birdid.py args pass straight through
 birdid /path/to/photos --dry-run  # plan only, no model work
+birdid /path/to/photos --analyze-all  # also analyse non-bird subjects (no pre-filter)
 birdid --list-candidates          # inspect the region/month tables
 birdid --list                     # what's available to download
 birdid --list downloadable        # every eBird country (offline reference)
@@ -159,6 +160,13 @@ the layout and a worked example.
   (only EUROPE and SEA ship seeds - every other region needs `--download`), the
   pool is used as the tier-1 list directly. The reasoning field records when
   this fired. `--expand-threshold 0` disables it.
+- **Bird pre-filter (default on)**: stage 1 classifies every subject into a
+  coarse category (bird / reptile / insect / ...). A non-bird capture is
+  recorded with status `non-bird` (species = the coarse category) and the
+  expensive whole-tree-of-life stage is **skipped**, so non-bird shots cost
+  almost nothing. `--analyze-all` disables the pre-filter: non-bird subjects
+  get the full TreeOfLife species analysis, and previously skipped non-bird
+  captures are re-analysed on the next run.
 - **Sidecars are merged**, never blind-rewritten: existing XMP elements are
   preserved and only the `bird:` fields (+ `dc:subject`, `dc:description`) are
   updated.
@@ -176,7 +184,7 @@ One sidecar per capture, `<base>.xmp` (e.g. `IMG_1234.xmp` for
 (e.g. `Parus major`), `bird:avibaseId` (e.g. `E15BC0CB`), `bird:avibaseUrl`
 (short link `https://avibase.ca/E15BC0CB` → the Avibase species page for the
 top guess), `bird:topConfidence`,
-`bird:status` (done / low-confidence / error), `bird:pipelineVersion`,
+`bird:status` (done / low-confidence / non-bird / error), `bird:pipelineVersion`,
 `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning`,
 `dc:description` (includes the scientific name, and the Avibase link), and
 `dc:subject` keywords
