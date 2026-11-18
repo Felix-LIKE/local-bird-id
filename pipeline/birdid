@@ -6,8 +6,10 @@
 #
 # Data management (no folder needed; these need the network once):
 #   birdid --list [country|region]     # what's available to download
-#   birdid --download <code>           # regenerate a region table from real
-#                                      # eBird observations (needs --api key)
+#   birdid --download <code>           # write a real eBird table to the
+#                                      # gitignored regions_generated/ dir
+#                                      # (needs --api key; never committed)
+#   birdid --download taxonomy         # fetch the keyless eBird/Clements taxonomy
 #   birdid --api [<key>]               # store / show the eBird API key
 #   birdid --initialize                # one-time: taxonomy + BioCLIP 2 backends
 #   birdid --download-backends         # (same backend part as --initialize)
@@ -39,11 +41,16 @@ if [ "$#" -eq 0 ]; then
     say ""
     say "data management (no folder):"
     say "  birdid --list [country|region]     what's available to download"
-    say "  birdid --download <code>           regenerate a region table from real"
-    say "                                     eBird observations (needs --api key)"
+    say "  birdid --download <code>           write a real eBird table to the"
+    say "                                     gitignored regions_generated/ dir"
+    say "                                     (needs --api key; never committed)"
+    say "  birdid --download taxonomy         fetch the keyless eBird/Clements"
+    say "                                     taxonomy (no key needed)"
     say "  birdid --api [<key>]               store / show the eBird API key"
     say "  birdid --initialize                one-time: taxonomy + BioCLIP 2 backends"
     say "  birdid --list-candidates           inspect the region/month tables"
+    say ""
+    say "run 'birdid --help' for all options"
     exit 2
 fi
 

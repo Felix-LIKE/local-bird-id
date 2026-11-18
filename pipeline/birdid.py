@@ -65,7 +65,9 @@ from ebird_data import COARSE_LABELS, TAXONOMY_2023, TAXONOMY_2026   # shared wi
 # Config / defaults
 # --------------------------------------------------------------------------
 
-DEFAULT_DATA_DIR = "/data/offline-data/bird/ebird"
+# data dir: defaults to <repo>/ebird (the bundled eBird data), so a fresh
+# clone works without any --data-dir override. Override with --data-dir.
+DEFAULT_DATA_DIR = str(Path(__file__).resolve().parent.parent / "ebird")
 DEFAULT_REGION = "DE"
 PIPELINE_VERSION = "1"
 
@@ -1047,8 +1049,13 @@ def main():
     ap = argparse.ArgumentParser(
         description="Offline bird-photo identification (BioCLIP 2, single XMP sidecar per capture).")
     ap.add_argument("folder", nargs="?", default=None, help="folder (recursive) of photos to scan")
-    ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR, help="dir containing eBird data (regions/, taxonomy)")
-    ap.add_argument("--region", default=DEFAULT_REGION, help="default region when no GPS can be resolved (DE/SG/TH)")
+    ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
+                    help="dir containing eBird data (regions/, regions_generated/, "
+                         "taxonomy). Default: <repo>/ebird")
+    ap.add_argument("--region", default=DEFAULT_REGION,
+                    help="default region when no GPS can be resolved; DE/SG/TH "
+                         "have no country seed and fall back to their EUROPE/SEA "
+                         "pool")
     ap.add_argument("--no-checklist", action="store_true",
                     help="ignore optional eBird *_observations.csv exports in photo folders")
     ap.add_argument("--manifest", default=None, help="manifest path (default <folder>/birdid_manifest.json)")
@@ -1067,13 +1074,15 @@ def main():
 
     # --- data management commands (no photo folder needed) ---
     ap.add_argument("-d", "--download", nargs="+", metavar="SPEC",
-                    help="regenerate a region table from real eBird observations, "
-                         "in place. SPEC is a code (SG/TH/DE/SEA/EUROPE), optionally "
-                         "as 'country CODE' or 'region CODE'; bare 'country'/'region' "
-                         "use the defaults; 'taxonomy' (or any no-key run) fetches "
-                         "the keyless eBird/Clements taxonomy. Needs an API key "
-                         "(--api) for region tables; without one the curated seed "
-                         "is kept (no-key fallback).")
+                    help="write a real eBird region table to the gitignored "
+                         "regions_generated/ dir (preferred over the curated "
+                         "seeds; never committed). SPEC is a region code "
+                         "(e.g. SG/DE/SEA/EUROPE), optionally as 'country CODE' "
+                         "or 'region CODE'; bare 'country'/'region' use the "
+                         "defaults; 'taxonomy' (keyless) fetches the "
+                         "eBird/Clements taxonomy. Region tables need an API "
+                         "key (--api); without one only the curated seeds "
+                         "(EUROPE/SEA) apply.")
     ap.add_argument("--list", nargs="*", metavar="KIND",
                     help="list countries/regions available for download "
                          "(optional filter: country | region; or 'downloadable' "

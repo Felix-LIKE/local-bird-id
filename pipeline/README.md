@@ -71,14 +71,20 @@ folder**; they manage the eBird data used as the classifier's prior.
 
 ## Prerequisites (one time)
 
+First-time setup on a fresh machine — full, distro-specific, beginner-friendly
+instructions (Ubuntu / Fedora / Arch) are in the top-level `README.md`
+(Installation). The short version:
+
 ```bash
 python3 -m venv --system-site-packages pipeline/.venv
 pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pipeline/.venv/bin/pip install pybioclip
+pipeline/.venv/bin/pip install pybioclip lxml requests
 pipeline/birdid --initialize
 ```
 
-Needs `exiftool` and python3 with `PIL`, `lxml`, `requests` (all present).
+Needs `exiftool` and python3 with `PIL`, `lxml`, `requests` (see the top-level
+README for the per-distro package names, e.g. `perl-image-exiftool` on Arch,
+`libimage-exiftool-perl` on Ubuntu/Debian, `perl-Image-ExifTool` on Fedora).
 
 ## Usage (direct)
 

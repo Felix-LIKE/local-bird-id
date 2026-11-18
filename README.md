@@ -51,6 +51,189 @@ Generated tables are API-derived and therefore **never committed** (they live
 in the gitignored `ebird/regions_generated/`); the curated seeds stay as the
 fallback.
 
+## Installation
+
+Written for people who have never used git, Python or a terminal before. You
+will, in order:
+
+1. install a few small programs (git, Python, exiftool),
+2. copy this project onto your computer,
+3. install the project's Python libraries into a private folder,
+4. run one setup command that downloads the AI models (~4 GB, one time),
+5. point `birdid` at a folder of photos.
+
+`sudo` in the commands below asks for your password — that is normal (it is the
+same password you log in with). If a command says `command not found`, a
+previous step has not finished yet — re-run it.
+
+### Step 1 — Install the basic tools
+
+Open a terminal (most distros: press `Ctrl+Alt+T`). Pick the block for your
+distro and paste the whole thing in, then press Enter.
+
+<details>
+<summary><b>Ubuntu / Debian</b></summary>
+
+```bash
+sudo apt update
+sudo apt install -y git python3 python3-venv python3-pip libimage-exiftool-perl
+```
+</details>
+
+<details>
+<summary><b>Fedora</b></summary>
+
+```bash
+sudo dnf install -y git python3 python3-pip perl-Image-ExifTool python3-devel
+```
+</details>
+
+<details>
+<summary><b>Arch, Manjaro, EndeavourOS, CachyOS (and other Arch-based)</b></summary>
+
+```bash
+sudo pacman -S --needed git python python-pip perl-image-exiftool
+```
+</details>
+
+What you just installed:
+
+- `git` — downloads the project and tracks its files;
+- `python3` — the language the project is written in (you don't need to learn it);
+- `exiftool` (`libimage-exiftool-perl` / `perl-Image-ExifTool` /
+  `perl-image-exiftool`) — reads the GPS + date information out of your photos.
+
+Not sure which family your distro belongs to? Run `cat /etc/os-release` and
+look at the `ID=` line: `ubuntu`/`debian` → first block, `fedora` → second,
+`arch`/`manjaro`/`endeavouros`/`cachyos` → third.
+
+### Step 2 — Get the code
+
+The project lives on GitHub. Two ways to get it onto your computer.
+
+**Option A — with git (recommended):** paste this, then move into the new
+folder:
+
+```bash
+git clone https://github.com/Felix-LIKE/local-bird-id.git
+cd local-bird-id
+```
+
+**Option B — no git, download a ZIP:** open the GitHub page, click the green
+**Code** button → **Download ZIP**, unpack it, then `cd` into the unpacked
+folder (the one that contains a subfolder called `pipeline/`).
+
+> **Note — the repo is currently private.** You need to be invited first
+> (GitHub → Settings → Collaborators). If the clone asks for a username and
+> password, either you don't have access yet, or use your GitHub **personal
+> access token** as the password (Settings → Developer settings → Personal
+> access tokens). With an SSH key set up, use
+> `git clone git@github.com:Felix-LIKE/local-bird-id.git` instead.
+
+Run `pwd` afterwards and make sure it ends in `local-bird-id` — the remaining
+steps assume you are in that folder.
+
+### Step 3 — Create the Python environment
+
+This installs the project's Python libraries into a private folder
+(`pipeline/.venv`) instead of touching your system Python — so nothing else on
+your computer can break. Paste these four lines:
+
+```bash
+python3 -m venv --system-site-packages pipeline/.venv
+pipeline/.venv/bin/pip install --upgrade pip
+pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+pipeline/.venv/bin/pip install pybioclip lxml requests
+```
+
+This downloads a few hundred MB and can take several minutes.
+
+> The `--index-url .../cpu` part installs the **CPU-only** PyTorch build, which
+> keeps the environment small (~1.5–2 GB). Without it, pip installs the default
+> build that bundles ~3 GB of NVIDIA GPU libraries — useless unless you have an
+> NVIDIA graphics card.
+
+### Step 4 — One-time setup (downloads the AI models)
+
+```bash
+pipeline/birdid --initialize
+```
+
+This downloads the **BioCLIP 2** image classifier and the **TreeOfLife**
+datafile (~4.2 GB) into `~/.cache/huggingface`, plus the eBird taxonomy. It is
+needed exactly once — afterwards, identification runs are **fully offline**.
+Nothing here needs an API key.
+
+### Step 5 — (optional) Put `birdid` on your PATH
+
+To just type `birdid` instead of `pipeline/birdid`, link it into a folder that
+is already on your PATH:
+
+```bash
+mkdir -p ~/.local/bin
+ln -s "$(pwd)/pipeline/birdid" ~/.local/bin/birdid
+```
+
+If `birdid` is still not found afterwards, add `~/.local/bin` to your PATH (for
+bash):
+
+```bash
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Step 6 — Test it
+
+```bash
+birdid --list          # shows the built-in data (no key needed)
+birdid --help          # all options
+```
+
+If you get a `Permission denied` when running `pipeline/birdid`, make it
+executable first: `chmod +x pipeline/birdid`.
+
+### How much disk space do I need?
+
+| Component | Size (approx) |
+|---|---|
+| The code (git history + working files) | ~5 MB |
+| Bundled data in the repo (taxonomy CSV + curated region seeds) | ~15 MB |
+| Python environment (torch CPU + pybioclip, in `pipeline/.venv`) | ~1.5–2 GB |
+| AI model weights (BioCLIP 2 + TreeOfLife, in `~/.cache/huggingface`) | ~4.2 GB |
+| **Total for a working, fully offline install** | **~6 GB** |
+
+The AI model weights dominate — the code itself is tiny. These are the sizes
+for the keyless, bundled install described above.
+
+### First-time troubleshooting
+
+- `command not found: git` (or `sudo: apt: command not found` when you are sure
+  you are on Ubuntu) → the Step 1 block for your distro did not finish; check
+  the password prompt and re-run it.
+- `pip ... externally-managed-environment` → you installed into the system
+  Python by accident; always use `pipeline/.venv/bin/pip`, never `pip` alone.
+- `ModuleNotFoundError: No module named 'torch'` → Step 3 did not finish; re-run
+  it.
+- `exiftool: command not found` → the exiftool package from Step 1 is missing.
+- `Permission denied` on `pipeline/birdid` → `chmod +x pipeline/birdid`.
+- The clone asks for a password → you don't have access to the private repo yet,
+  or you need a personal access token / SSH key (see Step 2).
+
+## Quick start
+
+If you haven't installed yet, do **Installation** above first. Then:
+
+```bash
+# one time: cache the eBird taxonomy + BioCLIP 2 + TreeOfLife backends
+# (needs network once; everything else works offline from here on)
+pipeline/birdid --initialize
+
+# run (fully offline) — works from any folder, not just the repo
+pipeline/birdid ~/Pictures/birds            # BioCLIP 2, no server
+pipeline/birdid ~/Pictures/birds --dry-run  # plan only
+pipeline/birdid --list-candidates           # inspect region/month tables
+```
+
 ## Layout
 
 | Path | What it is |
@@ -65,19 +248,6 @@ fallback.
 
 See `pipeline/README.md` for usage and behaviour, and `ebird/README.md` for the
 data schema and how `--download` upgrades the tables with real eBird data.
-
-## Quick start
-
-```bash
-# one time: cache the eBird taxonomy + BioCLIP 2 + TreeOfLife backends
-# (needs network once; everything else works offline from here on)
-pipeline/birdid --initialize
-
-# run (fully offline)
-pipeline/birdid ~/Pictures/birds            # BioCLIP 2, no server
-pipeline/birdid ~/Pictures/birds --dry-run  # plan only
-pipeline/birdid --list-candidates           # inspect region/month tables
-```
 
 ## Data management (eBird)
 
@@ -126,17 +296,6 @@ pipeline/birdid --download taxonomy
 > Re-tagging a folder: a capture is *done* once its `<base>.xmp` exists, so a
 > rerun skips it. Delete the stale sidecars (+ `birdid_manifest.json` +
 > `birdid_report.csv`) to force a fresh run - originals are never touched.
-
-## Requirements
-
-Arch Linux, `exiftool`, and python3 with `PIL`, `lxml`, `requests` and
-`pybioclip` (BioCLIP 2; pulls torch + torchvision). Install once:
-
-```bash
-python3 -m venv --system-site-packages pipeline/.venv
-pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-pipeline/.venv/bin/pip install pybioclip
-```
 
 ## Status
 
