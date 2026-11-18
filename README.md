@@ -22,9 +22,18 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
 - **Common + scientific names**: every result is normalised against the official
   eBird taxonomy (e.g. `Great Tit` / *`Parus major`*), and the top guess links
   to its **Avibase** species page (`https://avibase.ca/<id>`).
-- **Two-tier neighbour-region expansion**: birds don't respect borders - if the
-  country list yields no confident answer, the photo is re-scored against the
-  wider regional pool (Southeast Asia / Europe).
+- **Two-tier neighbour-region expansion that walks up the region tree**: birds
+  don't respect borders - if the country list yields no confident answer, the
+  photo is re-scored against the wider pools, **repeating until certain**:
+  country → subcontinent (e.g. `AS-SOUTHEAST`) → continent (e.g. `AS`).
+- **±1-month grace** (`--month-grace 1`, default on): a species whose
+  presence is recorded a month earlier or later still counts as a candidate,
+  so a photo taken just before/after the typical season isn't mis-identified
+  (birds rarely carry a calendar).
+- **Live background feedback**: the TUI shows what is happening right now
+  (loading the model, encoding, scoring N candidates, expanding a pool level,
+  writing the sidecar) with a "working on this step for MM:SS" timer - a long
+  first-run model build (~2-4 min) reads as *working*, not *crashed*.
 - **Bird pre-filter**: every photo is first checked for "is this a bird?" with
   a cheap coarse pass. Non-bird shots (landscapes, people, macro, ...) are
   recorded as `non-bird` and skipped instead of running the expensive whole-tree
@@ -290,7 +299,7 @@ A recommended layout (trip → location → photos):
 | `pipeline/birdid.py` | the pipeline (scan → manifest → EXIF → region → candidates → classify → sidecar → report) + data-management CLI |
 | `pipeline/ebird_data.py` | eBird data management: registry, API key store, `--download` / `--list` / `--initialize` |
 | `ebird/regions/*.csv` | **Committed curated seeds** (EUROPE + SEA, the two no-key regions) — the GPS+time prior. |
-| `ebird/regions_generated/*.csv` | **Gitignored** API-derived tables from `birdid --download <code>` (preferred over the seeds; never committed — eBird API data may not be redistributed) |
+| `ebird/regions_generated/` | **Gitignored** API-derived tables from `birdid --download <code>` (preferred over the seeds; never committed — eBird API data may not be redistributed). The smallest division is written into a continent/subcontinent tree: `AS/AS-SOUTHEAST/SG.csv` (a country with subnational tables becomes `SG/<SUB>.csv`), with a pooled `<REGION>.csv` kept alongside. |
 | `ebird/continents.csv` | **Committed** static continent/subcontinent reference (250 codes) — builds the continent/subcontinent pools + country→pool map (feature 3) |
 | `ebird/eBird-Clements_Integrated_Checklist.csv` | Bundled Clements checklist (version-agnostic name): offline taxonomy fallback + Avibase ids |
 | `ebird/` | eBird data + schema docs |
@@ -335,15 +344,19 @@ pipeline/birdid --list downloadable subnational1 DE   # a country's subregions (
 pipeline/birdid --api               # show current key status
 pipeline/birdid --api <your-key>    # store it (~/.config/birdid/ebird_api_key, mode 600)
 
-# regenerate a region table from real eBird historic observations
+# regenerate region tables from real eBird historic observations (smallest
+# division, grouped into a continent/subcontinent folder tree in
+# ebird/regions_generated/; a pooled <REGION>.csv is kept alongside)
 pipeline/birdid --download SG       # country  (or: --download country SG)
 pipeline/birdid --download SEA      # region   (or: --download region SEA)
 pipeline/birdid --download region   # default region's pool (DE -> EUROPE)
+pipeline/birdid --download country SG --subnational   # SG/<SUB>.csv per subregion
 
-# batch-download a whole continent or subcontinent (from ebird/continents.csv)
-pipeline/birdid --download region SA          # South America
-pipeline/birdid --download region AS-SOUTHEAST  # = SEA (alias)
-pipeline/birdid --download region EU-NORTH    # Northern Europe
+# batch-download a whole continent or subcontinent (from ebird/continents.csv);
+# a continent creates subregion folders for every country as needed
+pipeline/birdid --download region SA            # South America
+pipeline/birdid --download region AS-SOUTHEAST  # fills AS/AS-SOUTHEAST/ with the 11 country files
+pipeline/birdid --download region EU-NORTH      # Northern Europe
 
 # no key needed - fetch the keyless eBird/Clements taxonomy
 pipeline/birdid --download taxonomy
@@ -363,10 +376,14 @@ pipeline/birdid --download taxonomy
   NA-CARIBBEAN; SA-NORTH/SA-BRAZIL/SA-SOUTH; AF-NORTH/WEST/CENTRAL/EAST/SOUTH;
   AS-EAST/AS-SOUTHEAST/AS-SOUTH/AS-CENTRAL/AS-WEST/AS-NORTH; OC-AUSTRALASIA/
   MELANESIA/MICRONESIA/POLYNESIA) as `--download region <code>` batches.
-  `AS-SOUTHEAST` is an alias for the existing SEA pool (no duplicate table);
-  `--list region` shows them all with member counts. Photos are also resolved
-  straight to the widest pool via new GPS bounding boxes, and every country
-  maps to its continent pool for the two-tier fallback.
+  Downloading **always writes the smallest division**: the country files go
+  into `regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv`, a
+  continent download creates the subcontinent folders for every country on
+  demand, and a pooled `<REGION>.csv` is kept alongside (`AS.csv`,
+  `AS/AS-SOUTHEAST/AS-SOUTHEAST.csv`). `SEA` is the curated name of
+  `AS-SOUTHEAST` (same 11 countries). `--list region` shows them all with
+  member counts. Every country maps to its subcontinent (else continent) pool
+  for the two-tier fallback, which walks the same folder tree up to certainty.
 - **No-key coverage**: only EUROPE and SEA have committed seeds. A photo that
   resolves to a region without a table (or Germany/Singapore/Thailand, which
   ship no country seed) falls back to its pool (EUROPE / SEA, or the country's

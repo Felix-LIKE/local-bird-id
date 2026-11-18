@@ -139,6 +139,15 @@ class SpeciesDB:
       - `generated_dir` (gitignored, API-derived from `birdid --download`).
     A generated table for a region REPLACES the curated one (preferred); the
     curated seed remains the fallback when no generated table exists.
+
+    Layout: CSVs are found recursively, and `--download` writes the smallest
+    division into a continent/subcontinent tree, e.g.
+    regions_generated/AS/AS-SOUTHEAST/SG.csv. A CSV's region is its `region`
+    field (not the filename). In addition, every directory that contains CSVs
+    acts as a region (its name, uppercased) whose candidate set is the union of
+    all CSVs beneath it - so AS-SOUTHEAST/, AS/ and a country stored as a
+    directory of subnational tables are all queryable, and the two-tier
+    fallback can walk country -> subcontinent -> continent.
     """
 
     def __init__(self, curated_dir: Path, generated_dir: Path | None = None):
@@ -148,31 +157,86 @@ class SpeciesDB:
         self._table: dict[str, dict[int, list[tuple[str, str]]]] = {}
         # region -> "curated" | "generated"
         self._source: dict[str, str] = {}
+        # region -> file (or dir) it came from + which base it lives under
+        self._region_file: dict[str, Path] = {}
+        self._region_base: dict[str, Path] = {}
+
+    @staticmethod
+    def _parse_csv(csv_path: Path) -> tuple[str, list[tuple[int, str, str]]]:
+        """(region, [(month_index, species, status), ...]) from one CSV.
+
+        The region is the first non-comment `region` field; comment lines may
+        contain commas so we always key off the first field.
+        """
+        region = ""
+        rows: list[tuple[int, str, str]] = []
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if not row:
+                    continue
+                if (row.get("region") or "").lstrip().startswith("#"):
+                    continue
+                species = (row.get("species") or "").strip()
+                if not species:
+                    continue
+                if not region:
+                    region = (row.get("region") or "").strip().upper()
+                status = (row.get("status") or "resident").strip()
+                mask = (row.get("month_mask") or "").strip()
+                if len(mask) != 12:
+                    continue
+                for i, ch in enumerate(mask):
+                    if ch == "1":
+                        rows.append((i, species, status))
+        return region, rows
+
+    @staticmethod
+    def _add_rows(bucket: dict[int, list[tuple[str, str]]],
+                  rows: list[tuple[int, str, str]]):
+        for i, species, status in rows:
+            bucket.setdefault(i, []).append((species, status))
 
     def _load_dir(self, base_dir: Path, source: str, override: bool):
-        for csv_path in sorted(base_dir.glob("*.csv")):
-            region = csv_path.stem.upper()
+        if not base_dir.is_dir():
+            return
+        csv_paths = sorted(p for p in base_dir.rglob("*.csv") if p.is_file())
+        contents: dict[Path, tuple[str, list]] = {}
+        for p in csv_paths:
+            region, rows = self._parse_csv(p)
+            if region:
+                contents[p] = (region, rows)
+
+        # explicit CSV regions (a generated table replaces the curated one)
+        for p, (region, rows) in contents.items():
             if override:
-                self._table[region] = {}
-            with open(csv_path, newline="", encoding="utf-8") as f:
-                for row in csv.DictReader(f):
-                    if not row:
-                        continue
-                    # comment lines may contain commas, which csv splits into
-                    # later fields - always key off the first (region) field
-                    if (row.get("region") or "").lstrip().startswith("#"):
-                        continue
-                    species = (row.get("species") or "").strip()
-                    if not species:
-                        continue
-                    status = (row.get("status") or "resident").strip()
-                    mask = (row.get("month_mask") or "").strip()
-                    if len(mask) != 12:
-                        continue
-                    for i, ch in enumerate(mask):
-                        if ch == "1":
-                            self._table.setdefault(region, {}).setdefault(i, []).append((species, status))
+                self._table.pop(region, None)
+            self._add_rows(self._table.setdefault(region, {}), rows)
+            self._region_file[region] = p
+            self._region_base[region] = base_dir
             self._source[region] = source
+
+        # dir-union regions: every directory below the base that contains CSVs
+        # is a region = union of all CSVs beneath it. An explicit CSV for the
+        # same name (e.g. a pooled AS-SOUTHEAST.csv) takes precedence.
+        dirs: dict[str, Path] = {}
+        for p in contents:
+            for anc in p.parents:
+                if anc == base_dir:
+                    break
+                dirs.setdefault(anc.name.upper(), anc)
+        for region in sorted(dirs):
+            if region in self._table:
+                continue
+            rows: list[tuple[int, str, str]] = []
+            d = dirs[region]
+            for p, (_, pr) in contents.items():
+                if d in p.parents:
+                    rows.extend(pr)
+            if rows:
+                self._add_rows(self._table.setdefault(region, {}), rows)
+                self._region_file[region] = d
+                self._region_base[region] = base_dir
+                self._source[region] = source
 
     def load(self):
         if self.curated_dir.is_dir():
@@ -184,26 +248,79 @@ class SpeciesDB:
                 f"no region tables loaded from {self.curated_dir} "
                 f"(expected curated seeds like EUROPE.csv / SEA.csv)")
 
-    def candidates(self, region: str, month: int) -> list[tuple[str, str]]:
-        """Species plausibly present in `region` during `month` (1..12)."""
-        return self._table.get(region.upper(), {}).get(month - 1, [])
+    def candidates(self, region: str, month: int, grace: int = 0
+                   ) -> list[tuple[str, str]]:
+        """Species plausibly present in `region` during `month` (1..12).
 
-    def expanded(self, region: str, month: int) -> list[tuple[str, str]]:
-        """Base region candidates + the neighbouring regional pool, deduped.
+        `grace` widens the window to months [month-grace, month+grace],
+        wrapping across the year - a species whose month_mask is off by a month
+        or two still counts (birds rarely carry a calendar).
+        """
+        region = region.upper()
+        months = self._table.get(region, {})
+        grace = max(0, int(grace))
+        seen = set()
+        out: list[tuple[str, str]] = []
+        for i in range(month - 1 - grace, month + grace):
+            for sp, st in months.get(i % 12, []):
+                if sp.lower() not in seen:
+                    seen.add(sp.lower())
+                    out.append((sp, st))
+        return out
+
+    def pool_tiers(self, region: str, month: int, grace: int = 0
+                   ) -> list[list[tuple[str, str]]]:
+        """Ordered wider candidate lists, walking up the directory tree.
+
+        For a country table stored at <CONT>/<SUB>/<COUNTRY>.csv this yields
+        the subcontinent union, then the continent union - so the two-tier
+        fallback can 'go up a directory and try again, repeating until
+        certainty approves'. Regions without a tree placement fall back to the
+        REGION_POOLS map (country -> continent pool).
+        """
+        region = region.upper()
+        base_dir = self._region_base.get(region)
+        path = self._region_file.get(region)
+        if path is None or base_dir is None:
+            pool_code = REGION_POOLS.get(region)
+            if pool_code and pool_code in self._table:
+                return [self.candidates(pool_code, month, grace)]
+            return []
+        p = path.parent if path.is_file() else path
+        tiers = []
+        seen = set()
+        for anc in [p] + list(p.parents):
+            if anc == base_dir:
+                break
+            r = anc.name.upper()
+            if r in self._table and r != region and r not in seen:
+                seen.add(r)
+                tiers.append(self.candidates(r, month, grace))
+        if not tiers:
+            # flat file at the base level (legacy layout) or no tree ancestors
+            # (e.g. a country whose table only exists as a curated flat seed) ->
+            # fall back to the REGION_POOLS map (country -> continent pool).
+            pool_code = REGION_POOLS.get(region)
+            if pool_code and pool_code in self._table:
+                tiers.append(self.candidates(pool_code, month, grace))
+        return tiers
+
+    def expanded(self, region: str, month: int, grace: int = 0
+                 ) -> list[tuple[str, str]]:
+        """Base candidates + all wider pools (walk up the tree), deduped.
 
         Used as the low-confidence fallback so species that occur just across a
         border (or were missed by the curated country table) still get a chance.
         """
         region = region.upper()
-        base = self._table.get(region, {}).get(month - 1, [])
-        pool_code = REGION_POOLS.get(region)
-        pool = self._table.get(pool_code, {}).get(month - 1, []) if pool_code else []
         seen = set()
-        out = []
-        for sp, st in list(base) + list(pool):
-            if sp.lower() not in seen:
-                seen.add(sp.lower())
-                out.append((sp, st))
+        out: list[tuple[str, str]] = []
+        grps = [self.candidates(region, month, grace)] + self.pool_tiers(region, month, grace)
+        for grp in grps:
+            for sp, st in grp:
+                if sp.lower() not in seen:
+                    seen.add(sp.lower())
+                    out.append((sp, st))
         return out
 
     def source(self, region: str) -> str:
@@ -828,6 +945,14 @@ class Classifier:
 
     def __init__(self, args):
         self.args = args
+        # optional callable(stage, message) for live background feedback (wired
+        # to the TUI in main()); long steps (model load, encoding, pool re-score)
+        # report so a run never looks stalled/crashed.
+        self.progress: "callable | None" = None
+
+    def _report(self, stage: str, message: str):
+        if self.progress:
+            self.progress(stage, message)
 
     def describe(self) -> str:
         return self.name
@@ -836,7 +961,7 @@ class Classifier:
         pass
 
     def classify(self, image: Path, candidates: list[tuple[str, str]],
-                 expanded: list[tuple[str, str]], tax: dict[str, str],
+                 tiers: list[list[tuple[str, str]]], tax: dict[str, str],
                  region: str, month: int, dt: datetime) -> dict:
         raise NotImplementedError
 
@@ -909,20 +1034,32 @@ class BioclipClassifier(Classifier):
             self._tol = TreeOfLifeClassifier()
         return self._tol
 
-    def classify(self, image, candidates, expanded, tax, region, month, dt):
+    def warm(self):
+        """Load the heavy BioCLIP 2 weights up front (not lazily on the first
+        photo), reporting progress + elapsed so the first-run ~2-4 min build
+        reads as 'working', not 'crashed'."""
+        t0 = time.time()
+        self._report("classify", "loading BioCLIP 2 model (first load ~2-4 min, "
+                                 "subsequent runs fast)...")
+        self._load_coarse()
+        self._report("classify", f"BioCLIP 2 model loaded in {time.time() - t0:.0f}s")
+
+    def classify(self, image, candidates, tiers, tax, region, month, dt):
         image = str(image)
 
         # --- stage 1: coarse category ---
+        self._report("classify", f"encoding {Path(image).name} (coarse pass)")
         coarse = self._load_coarse()
         res = coarse.predict(image, k=1)
         if isinstance(res, list):
             res = res[0]
         cat = str(res.get("classification", "")).replace("a photo of a ", "").replace("a photo of ", "")
         coarse_conf = float(res.get("score", 0.0))
+        self._report("classify", f"subject category '{cat}' ({coarse_conf*100:.0f}%)")
 
         # --- stage 2: fine species ---
         if cat == "bird":
-            return self._classify_bird(image, candidates, expanded)
+            return self._classify_bird(image, candidates, tiers, region, month)
 
         # non-bird subject (landscape / person / macro ...). The bird pre-filter
         # records the coarse category cheaply and skips the full analysis, so a
@@ -941,6 +1078,8 @@ class BioclipClassifier(Classifier):
                               f"--analyze-all to identify it"),
             }
 
+        self._report("classify", "non-bird subject + --analyze-all: searching "
+                                "whole tree of life")
         tol = self._load_tol()
         rows = tol.predict(image, rank=self._Rank.SPECIES, k=3)
         if isinstance(rows, list):
@@ -961,39 +1100,51 @@ class BioclipClassifier(Classifier):
         }
 
     def _classify_bird(self, image: str, candidates: list[tuple[str, str]],
-                       expanded: list[tuple[str, str]]) -> dict:
-        """Two-tier bird ID:
+                       tiers: list[list[tuple[str, str]]], region: str,
+                       month: int) -> dict:
+        """Two-tier bird ID that walks up the region tree until certain:
+
           tier 1 - score against the eBird candidate list (country + checklist).
-          tier 2 - if the top score is below --expand-threshold, re-score
-                   against the wider regional pool (neighbouring countries).
+          tier 2+ - if the top score is below --expand-threshold, add the next
+                    wider pool (subcontinent, then continent - see
+                    SpeciesDB.pool_tiers) and re-score, repeating until the
+                    score clears the threshold or no wider pool remains.
         """
         names = [s for s, _st in candidates]
-        if not names:
-            # no country table for this region (only EUROPE/SEA are shipped) -
-            # fall back to the expanded list (the regional pool) as tier 1.
-            names = [s for s, _st in expanded]
+        if not names and tiers:
+            names = [s for s, _st in tiers[0]]
         if not names:
             names = ["unknown"]
+        self._report("classify", f"scoring {len(names)} eBird candidates "
+                                 f"({region}, month {month:02d})")
         ranked = self._score_bird(image, names)
         if not ranked:
             raise RuntimeError("BioCLIP returned no bird scores")
         species, p = ranked[0]
-
-        pool_only = [s for s, _st in expanded if s not in names]
-        used_pool = False
         low_p = p
-        if p < self.args.expand_threshold and pool_only:
-            ranked2 = self._score_bird(image, names + pool_only)
+        used_tiers = 0
+        for ti, tier in enumerate(tiers, 1):
+            if p >= self.args.expand_threshold:
+                break
+            add = [s for s, _st in tier if s not in names]
+            if not add:
+                continue
+            used_tiers = ti
+            self._report("classify", f"top score {p*100:.0f}% below "
+                                     f"{self.args.expand_threshold:.2f} - expanding "
+                                     f"level {ti} of the region tree (+{len(add)} species)")
+            ranked2 = self._score_bird(image, names + add)
             if ranked2 and ranked2[0][1] > p:
                 species, p = ranked2[0]
                 ranked = ranked2
-                used_pool = True
+            names = names + add
 
         alts = [n for n, _ in ranked[1:4]]
-        if used_pool:
+        if used_tiers:
             reasoning = (f"BioCLIP-2: bird category; low confidence over the "
-                         f"country list ({low_p*100:.0f}% top), expanded to neighbouring "
-                         f"regions -> {species} {p*100:.0f}%")
+                         f"country list ({low_p*100:.0f}% top), expanded "
+                         f"{used_tiers} level(s) up the region tree "
+                         f"-> {species} {p*100:.0f}%")
         else:
             reasoning = (f"BioCLIP-2: bird category; softmax over {len(names)} "
                          f"eBird candidates -> {species} {p*100:.0f}%")
@@ -1277,6 +1428,8 @@ class State:
         self.start = time.time()
         self.elapsed = 0.0
         self.eta = ""
+        self.stage_start = time.time()   # reset whenever `message` changes
+        self.stage_elapsed = 0.0
 
 
 class TUI:
@@ -1312,6 +1465,7 @@ class TUI:
         st = self.state
         with st.lock:
             st.elapsed = time.time() - st.start
+            st.stage_elapsed = time.time() - st.stage_start
             if st.processed and st.total:
                 per = st.elapsed / st.processed
                 left = per * (st.total - st.processed)
@@ -1331,6 +1485,9 @@ class TUI:
         put("Bird Photo ID  (q: quit)", curses.A_BOLD)
         put("")
         put(f"phase: {st.phase:<9} stage: {st.stage:<12} message: {st.message}")
+        if st.message:
+            mm, ss = divmod(int(st.stage_elapsed), 60)
+            put(f"  working on this step for {mm:02d}:{ss:02d} - not stuck")
         put("")
         put(f"scanned {st.scanned}   pending {st.pending}   done {st.done}   error {st.error}")
         put(f"progress: {st.processed}/{st.total}    elapsed {int(st.elapsed//60):02d}:{int(st.elapsed%60):02d}   {st.eta}")
@@ -1349,6 +1506,8 @@ class TUI:
     def set(self, **kw):
         st = self.state
         with st.lock:
+            if "message" in kw:
+                st.stage_start = time.time()
             for k, v in kw.items():
                 setattr(st, k, v)
 
@@ -1429,6 +1588,10 @@ def main():
                     help="below this top score, re-score against the wider "
                          "regional pool (neighbouring countries) - 0 disables "
                          "the expansion (default 0.35)")
+    ap.add_argument("--month-grace", type=int, default=1,
+                    help="±N months around the photo's month a species still "
+                         "counts as a candidate - birds rarely carry a "
+                         "calendar (default 1; 0 disables the grace window)")
     ap.add_argument("--analyze-all", action="store_true",
                     help="disable the bird pre-filter: also fully analyse "
                          "non-bird subjects (landscapes, people, macro - via "
@@ -1442,18 +1605,20 @@ def main():
 
     # --- data management commands (no photo folder needed) ---
     ap.add_argument("-d", "--download", nargs="+", metavar="SPEC",
-                    help="write a real eBird region table to the gitignored "
-                         "regions_generated/ dir (preferred over the curated "
-                         "seeds; never committed). SPEC is a region code "
-                         "(e.g. SG/DE/SEA/EUROPE), optionally as 'country CODE' "
-                         "or 'region CODE'; bare 'country'/'region' use the "
-                         "defaults; 'taxonomy' (keyless) fetches the "
-                         "eBird/Clements taxonomy. Region tables need an API "
-                         "key (--api); without one only the curated seeds "
-                         "(EUROPE/SEA) apply. 'region CODE' also accepts whole "
-                         "continents/subcontinents for batch downloads "
-                         "(e.g. region SA, region NA, region AS-SOUTHEAST, "
-                         "region EU-NORTH; see --list region).")
+                    help="write real eBird region tables to the gitignored "
+                         "regions_generated/ tree (preferred over the curated "
+                         "seeds; never committed). The smallest division is "
+                         "always written: <CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv "
+                         "(or <COUNTRY>/<SUB>.csv with --subnational). SPEC is "
+                         "a country code (e.g. SG/DE), or 'country CODE'; a "
+                         "whole continent/subcontinent downloads every member "
+                         "country, creating subregion folders as needed "
+                         "(e.g. region AS, region AS-SOUTHEAST, region SEA, "
+                         "region EUROPE; see --list region). A pooled "
+                         "<REGION>.csv is kept alongside. 'taxonomy' (keyless) "
+                         "fetches the eBird/Clements taxonomy. Region tables "
+                         "need an API key (--api); without one only the "
+                         "curated seeds (EUROPE/SEA) apply.")
     ap.add_argument("--list", nargs="*", metavar="KIND",
                     help="list countries/regions available for download "
                          "(optional filter: country | region; or 'downloadable' "
@@ -1475,6 +1640,11 @@ def main():
                     help="sample dates per month for --download (default 2)")
     ap.add_argument("--year", type=int, default=2025,
                     help="historic-data year for --download (default 2025)")
+    ap.add_argument("--subnational", action="store_true",
+                    help="with --download country <CODE>: also fetch that "
+                         "country's subnational1 regions and write them as "
+                         "<COUNTRY>/<SUB>.csv (smallest division) instead of a "
+                         "single country table")
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -1500,7 +1670,8 @@ def main():
                 from ebird_data import set_api_delay, download
                 set_api_delay(args.api_delay)
                 download(data_dir, args.download, year=args.year,
-                         sample_dates=args.sample_dates)
+                         sample_dates=args.sample_dates,
+                         subnational=args.subnational)
         except (ValueError, RuntimeError, OSError, KeyError) as e:
             sys.exit(f"birdid: ERROR: {e}")
         return
@@ -1602,8 +1773,20 @@ def main():
             dir_gps = compute_dir_gps(meta_map)
 
             # --- Phase 2: classifier backend ---
-            tui.set(stage="classify", message="loading classifier (BioCLIP 2)")
+            # Explicit, timed model load BEFORE the loop - the BioCLIP 2 build
+            # can take ~2-4 min on first run, and doing it inside the first
+            # classify() used to leave the TUI stuck on "classifying <name>"
+            # (looking crashed). warm() reports progress + elapsed instead.
+            tui.set(stage="classify",
+                    message="loading BioCLIP 2 model (first load ~2-4 min, "
+                            "subsequent runs fast)...")
             classifier = make_classifier(args)
+            def on_progress(stage, msg):
+                tui.set(stage=stage, message=msg)
+                if not tui.enabled:      # plain log output: echo the step too
+                    print(f"  [{stage}] {msg}", flush=True)
+            classifier.progress = on_progress
+            classifier.warm()
             tui.plain_line(f"classifier: {classifier.describe()}")
 
             report_rows = []
@@ -1648,7 +1831,7 @@ def main():
                     date_src = "exif" if meta.get("datetime") else ("folder" if dt else "today")
 
                     tui.set(stage="candidates", message=f"{region} month {month:02d}")
-                    region_cands = db.candidates(region, month)
+                    region_cands = db.candidates(region, month, args.month_grace)
                     checklist = capture_checklist(cap)
                     cl_lower = {c[0].lower() for c in checklist}
                     # central checklists: species for this capture's (year, month)
@@ -1669,12 +1852,9 @@ def main():
                             if s.lower() not in seen:
                                 seen.add(s.lower())
                                 candidates.append((s, st))
-                    expanded = []
-                    for grp in (checklist, central_list, db.expanded(region, month)):
-                        for s, st in grp:
-                            if s.lower() not in seen:
-                                seen.add(s.lower())
-                                expanded.append((s, st))
+                    # wider pools to walk up into (subcontinent, then
+                    # continent) when the top score is not confident enough.
+                    tiers = db.pool_tiers(region, month, args.month_grace)
 
                     if central_outside:
                         tui.plain_line(
@@ -1683,7 +1863,7 @@ def main():
                             f"{', '.join(central_outside)} - region prior may be too narrow")
 
                     tui.set(stage="classify", message=f"classifying {primary.name}")
-                    result = classifier.classify(primary, candidates, expanded, taxonomy, region, month, dt)
+                    result = classifier.classify(primary, candidates, tiers, taxonomy, region, month, dt)
 
                     tui.set(stage="parse", message="normalising species")
                     if not isinstance(result, dict) or not result.get("species"):

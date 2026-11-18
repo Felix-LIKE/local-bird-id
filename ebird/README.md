@@ -30,7 +30,7 @@ never committed - the committed repo contains only the curated, non-API seeds.
 | File | What it is | Source |
 |---|---|---|
 | `regions/EUROPE.csv`, `regions/SEA.csv` | **Committed curated seeds** - the only two no-key regions. Species-per-month pools (Europe / Southeast Asia) used as the GPS+time prior; a region without its own table falls back to its pool. | Curated from field guides (Svensson / Collins; Robson / Mackinnon & Phillipps / Wells). No eBird API data. |
-| `regions_generated/*.csv` | **Gitignored** API-derived tables from `birdid --download <code>` - created locally, preferred over the seeds, never committed. | Real eBird API observations. |
+| `regions_generated/` | **Gitignored** API-derived tables from `birdid --download <code>` - created locally, preferred over the seeds, never committed. The smallest division is stored in a continent/subcontinent tree: `regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv` (a country with subnational tables becomes `<COUNTRY>/<SUB>.csv`), with a pooled `<REGION>.csv` kept alongside. | Real eBird API observations. |
 | `eBird_Taxonomy_v2023.csv` | Full eBird/Clements taxonomy (~18.6k rows): canonical names + codes, used to normalise species names. **Not committed** (gitignored, re-fetchable). `curl -o eBird_Taxonomy_v2023.csv "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=csv"` (no key). | eBird API (keyless). |
 | `eBird-Clements_Integrated_Checklist.csv` | **Committed** bundled Clements checklist (version-agnostic name). Offline taxonomy fallback (same 18,631 common→scientific pairs as v2023) and the source of the **Avibase ids** (`taxon concept ID` column, `https://avibase.ca/<id>`) for every top guess. To use a newer release, replace this file (see "Updating the taxonomy" below). | Cornell Clements checklist download. |
 | `countries.csv` | Bundled ISO country reference (250 codes) for `--list downloadable` (offline). | ISO 3166. |
@@ -67,26 +67,35 @@ The repo ships exactly two curated seeds: **EUROPE** and **SEA**. No-key runs:
 2. Import it: `birdid --api <your-key>` (stored in `~/.config/birdid/ebird_api_key`, mode 600).
 3. Download a table: `birdid --download SG` (or `--download country SG`,
    `--download region SEA`, `--download FR`, ...). Subnational codes work too
-   (`--download country DE-BY`).
+   (`--download country DE-BY`). `--download country SG --subnational` fetches
+   Singapore's subnational1 regions instead and stores them as
+   `regions_generated/AS/AS-SOUTHEAST/SG/<SUB>.csv`.
 
 Batch-download a whole continent or subcontinent at once (from the bundled
-`continents.csv` reference):
+`continents.csv` reference). **The smallest division is always written**: the
+country files land in a continent/subcontinent folder tree, and a continent
+download creates the subcontinent folders for every country on demand, with a
+pooled `<REGION>.csv` kept alongside each download:
 
 ```bash
-birdid --download region SA         # South America (14 countries)
-birdid --download region NA         # North America (41 countries)
-birdid --download region AF         # Africa (58 countries)
-birdid --download region AS         # Asia (52 countries)
-birdid --download region OC         # Oceania (28 countries)
-birdid --download region AS-SOUTHEAST   # = SEA (aliased; same pool)
-birdid --download region EU-NORTH       # Northern Europe subcontinent
-birdid --download region NA-CARIBBEAN   # Caribbean subcontinent
-birdid --download region SA-BRAZIL      # Brazil (1 country)
+birdid --download region SA            # South America -> regions_generated/SA/<SUB>/<country>.csv
+birdid --download region NA            # North America
+birdid --download region AF            # Africa
+birdid --download region AS            # Asia
+birdid --download region OC            # Oceania
+birdid --download region AS-SOUTHEAST  # 11 country files into regions_generated/AS/AS-SOUTHEAST/
+birdid --download region EU-NORTH      # Northern Europe subcontinent
+birdid --download region NA-CARIBBEAN  # Caribbean subcontinent
+birdid --download region SA-BRAZIL     # Brazil (1 country)
 ```
 
+So e.g. `regions_generated/AS/AS-SOUTHEAST/` ends up containing `SG.csv`,
+`MY.csv`, ... plus a pooled `AS-SOUTHEAST.csv`; downloading `region AS` later
+fills `AS/AS-EAST/`, `AS/AS-WEST/`, ... without touching the existing folders.
+
 `birdid --list region` shows every continent + subcontinent pool, how many
-member countries each has, and which have a local table. `AS-SOUTHEAST` is an
-alias for the existing `SEA` pool (no duplicate table); every other subcontinent
+member countries each has, and which have a local table. `SEA` is the curated
+name of `AS-SOUTHEAST` (same 11 countries); every other subcontinent
 (e.g. `EU-NORTH`, `NA-CARIBBEAN`, `AS-EAST`, `AF-WEST`, `OC-POLYNESIA`) is its
 own pool. Invalid member codes (ISO codes the eBird API doesn't know, or
 territories without an eBird region) are skipped gracefully during the download.
@@ -98,15 +107,16 @@ How the real data is fetched:
   segments) on `--sample-dates` (default 2) dates per month of `--year`
   (default 2025), and
 - aggregates which species were actually reported in each month → writes
-  `regions_generated/<code>.csv` (status `resident` if present all 12 sampled
-  months, else `seasonal`).
-- A country downloads that country; a pool (SEA / EUROPE) unions the monthly
-  presence of all its member countries.
+  `regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv` (status
+  `resident` if present all 12 sampled months, else `seasonal`).
+- A country downloads that country; a pool (SEA / EUROPE / a subcontinent /
+  a continent) unions the monthly presence of all its member countries and
+  keeps the union as a pooled `<REGION>.csv` alongside the country files.
 - Rate-limit guard: `--api-delay` seconds between calls (default 1.5).
 
 Generated tables are **API-derived and gitignored** - they are preferred over
 the seeds while present, but must never be committed (eBird API data may not be
-redistributed). Remove one with `rm ebird/regions_generated/<code>.csv`.
+redistributed). Remove one with `rm ebird/regions_generated/AS/AS-SOUTHEAST/SG.csv`.
 
 `birdid --list downloadable` shows every eBird country (from the bundled ISO
 reference) plus, with the API key, a country's subregions

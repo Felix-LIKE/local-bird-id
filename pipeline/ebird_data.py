@@ -14,12 +14,18 @@ pools      - wider regional unions used by the two-tier fallback
              (SEA = Southeast Asia, EUROPE = Europe), defined by member codes.
 regions/   - one CSV per country/pool:  region,species,status,month_mask
              (12 chars, Jan..Dec, '1' = plausibly present that month).
+regions_generated/  - gitignored API-derived tables (--download), stored as
+             the smallest division in a continent/subcontinent tree:
+             <CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv (a country with
+             subnationals becomes <COUNTRY>/<SUB>.csv), with a pooled
+             <REGION>.csv kept alongside each download.
 
 Commands
 --------
-- `--download country|region [id]`: with an API key, regenerates the region CSV
-  in place from real eBird historic observations (sampled dates per month).
-  Without a key it keeps the shipped curated seed (the no-key fallback).
+- `--download country|region [id]`: with an API key, writes real eBird
+  historic-observation tables (sampled dates per month) into the
+  regions_generated/ tree; every directory also acts as a queryable union
+  region. Without a key it keeps the shipped curated seed (the no-key fallback).
 - `--list [country|region]`: what is available to download (+ table status).
 - `--api [key]`: store the eBird API key under ~/.config/birdid/ebird_api_key
   (chmod 600); bare `--api` prints the current status.
@@ -200,6 +206,51 @@ def country_continent_map() -> dict[str, str]:
     return _country_continent
 
 
+_country_subcontinent: dict[str, str] | None = None
+
+
+def country_subcontinent_map() -> dict[str, str]:
+    """country code -> subcontinent pool code, from the bundled reference.
+
+    This drives the `regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv`
+    directory tree that `--download` writes into.
+    """
+    global _country_subcontinent
+    if _country_subcontinent is None:
+        m: dict[str, str] = {}
+        path = _bundled_continents_path()
+        if path.is_file():
+            with open(path, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    code = (row.get("code") or "").strip().upper()
+                    sub = (row.get("subcontinent") or "").strip().upper()
+                    if code and sub:
+                        m[code] = sub
+        _country_subcontinent = m
+    return _country_subcontinent
+
+
+_subcontinent_continent: dict[str, str] | None = None
+
+
+def subcontinent_continent_map() -> dict[str, str]:
+    """subcontinent pool code -> its continent code, from the bundled reference."""
+    global _subcontinent_continent
+    if _subcontinent_continent is None:
+        m: dict[str, str] = {}
+        path = _bundled_continents_path()
+        if path.is_file():
+            with open(path, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    code = (row.get("code") or "").strip().upper()
+                    sub = (row.get("subcontinent") or "").strip().upper()
+                    cont = (row.get("continent") or "").strip().upper()
+                    if code and sub and cont:
+                        m[sub] = cont
+        _subcontinent_continent = m
+    return _subcontinent_continent
+
+
 _countries_cache: dict[Path, dict[str, str]] = {}
 
 
@@ -256,6 +307,9 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
             return "country", u, COUNTRIES[u]["name"]
         if u in POOLS:
             return "region", u, POOLS[u]["name"]
+        if u in SUB_NAMES:
+            # subcontinent (e.g. AS-SOUTHEAST, EU-WEST) - downloadable directly
+            return "region", u, SUB_NAMES[u]
         if u in POOL_ALIASES:
             tgt = POOL_ALIASES[u]
             return "region", tgt, POOLS[tgt]["name"]
@@ -275,6 +329,8 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
         if kind == "region":
             if u in POOLS:
                 return "region", u, POOLS[u]["name"]
+            if u in SUB_NAMES:
+                return "region", u, SUB_NAMES[u]
             if u in POOL_ALIASES:
                 tgt = POOL_ALIASES[u]
                 return "region", tgt, POOLS[tgt]["name"]
@@ -543,8 +599,156 @@ def write_region_csv(path: Path, region: str, sp_months: dict[str, set[int]],
 # --download
 # ---------------------------------------------------------------------------
 
+# Smallest-division layout of the gitignored regions_generated/ tree:
+#   regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv
+#   regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>/<SUB>.csv  (opt-in)
+#   regions_generated/<CONTINENT>/<SUBCONTINENT>/<SUBCONTINENT>.csv   (pooled)
+#   regions_generated/<CONTINENT>.csv                                  (pooled)
+# A continent download creates subcontinent folders for every not-yet-existing
+# subregion and drops the country files into them; a subcontinent download
+# fills its own folder. Pooled files are kept alongside ("keep both"), so a
+# flat union table stays available while the smallest division is also there.
+
+
+def _country_rel_dir(code: str) -> Path:
+    """Relative directory for a country's files in regions_generated/, e.g.
+    SG -> AS/AS-SOUTHEAST. Falls back to '.' when the geography is unknown."""
+    cont = country_continent_map().get(code)
+    sub = country_subcontinent_map().get(code)
+    if cont and sub:
+        return Path(cont) / sub
+    if cont:
+        return Path(cont)
+    return Path(".")
+
+
+def _pool_tree_code(code: str) -> str:
+    """Map a pool code to the subcontinent/continent it represents in the tree
+    (SEA is the curated name of AS-SOUTHEAST; every other code is already a
+    tree name)."""
+    return "AS-SOUTHEAST" if code == "SEA" else code
+
+
+def _download_members(generated_dir: Path, members: list[str], key: str,
+                      year: int, sample_dates: int,
+                      override_dir: Path | None) -> dict[str, set[int]]:
+    """Sample every member country and write its table into the tree.
+
+    With `override_dir` (subcontinent download) every member lands in that
+    folder; otherwise each member goes into its own
+    <CONTINENT>/<SUBCONTINENT>/ folder (continent download - creates the
+    subregion folders). Returns the unioned {species: months} for the pooled file.
+    """
+    pool_months: dict[str, set[int]] = defaultdict(set)
+    for member in members:
+        if not region_exists(member, key):
+            print(f"birdid:   warning: skipping invalid member code {member}")
+            continue
+        sp = _sample_with_progress(member, key, year, sample_dates)
+        for name, months in sp.items():
+            pool_months[name].update(months)
+        dest_dir = override_dir or (generated_dir / _country_rel_dir(member))
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        write_region_csv(dest_dir / f"{member}.csv", member, sp,
+                         member, year, sample_dates)
+    return pool_months
+
+
+def _download_country(generated_dir: Path, code: str, label: str, year: int,
+                      sample_dates: int, key: str, subnational: bool):
+    """Write one country's table into <CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv
+    (or, with --subnational, its subnational1 tables into
+    <CONTINENT>/<SUBCONTINENT>/<COUNTRY>/<SUB>.csv - the smallest division)."""
+    if not region_exists(code, key):
+        raise RuntimeError(f"eBird region code '{code}' is not valid "
+                           f"(check your key / the code).")
+    if subnational:
+        try:
+            subs = ebird_region_list("subnational1", code, key)
+        except RuntimeError as e:
+            print(f"birdid:   note: could not list subnational1 regions "
+                  f"({e}); falling back to a country table")
+            subs = []
+        if subs:
+            country_dir = generated_dir / _country_rel_dir(code) / code
+            country_dir.mkdir(parents=True, exist_ok=True)
+            # the subnational tables replace the flat country file (smallest
+            # division): drop the superseded <COUNTRY>.csv so the loader's
+            # dir-union is used, not the old pooled file.
+            flat = generated_dir / _country_rel_dir(code) / f"{code}.csv"
+            if flat.is_file():
+                flat.unlink()
+                print(f"birdid:   removed superseded flat table {flat} "
+                      f"(replaced by {len(subs)} subnational tables)")
+            for sub in subs:
+                sub_code = sub["code"]
+                sp = _sample_with_progress(sub_code, key, year, sample_dates)
+                write_region_csv(country_dir / f"{sub_code}.csv", sub_code, sp,
+                                 sub.get("name", sub_code), year, sample_dates)
+            print(f"birdid: wrote {len(subs)} subnational tables for {code} "
+                  f"under {country_dir}/ (smallest division; no pooled file - "
+                  f"the {code} region is the union of these).")
+            print(f"birdid: done. eBird data written to {country_dir} "
+                  f"(API-derived, gitignored - not committed).")
+            return
+        print(f"birdid:   note: {code} has no subnational1 regions - writing a "
+              f"country table instead.")
+    dest = generated_dir / _country_rel_dir(code)
+    dest.mkdir(parents=True, exist_ok=True)
+    sp_months = _sample_with_progress(code, key, year, sample_dates)
+    write_region_csv(dest / f"{code}.csv", code, sp_months, label, year, sample_dates)
+    print(f"birdid: done. eBird data written to {dest / f'{code}.csv'} "
+          f"(API-derived, gitignored - not committed).")
+
+
+def _download_pool(generated_dir: Path, code: str, label: str, year: int,
+                   sample_dates: int, key: str):
+    """Write the smallest division for a continent/subcontinent pool: every
+    member country table in the <CONTINENT>/<SUBCONTINENT>/ tree, plus a pooled
+    union table (kept alongside, per the 'keep both' choice)."""
+    tgt = _pool_tree_code(code)
+    if tgt in SUB_NAMES:
+        # subcontinent (AS-SOUTHEAST, EU-WEST, ...): fill its own folder
+        cont = subcontinent_continent_map().get(tgt)
+        members = sorted(c for c, s in country_subcontinent_map().items() if s == tgt)
+        if not members:
+            raise ValueError(f"no countries found for subcontinent {tgt}")
+        print(f"birdid: downloading subcontinent {tgt} ({label}) over "
+              f"{len(members)} member countries -> regions_generated/{cont}/{tgt}/ ...")
+        sub_dir = generated_dir / cont / tgt
+        pool_months = _download_members(generated_dir, members, key, year,
+                                        sample_dates, override_dir=sub_dir)
+        write_region_csv(sub_dir / f"{tgt}.csv", tgt, dict(pool_months),
+                         label, year, sample_dates, members=members)
+        print(f"birdid: wrote pooled {tgt}.csv ({len(pool_months)} spp) "
+              f"alongside {len(members)} country tables in {sub_dir}/")
+        print(f"birdid: done. eBird data written to {sub_dir} (API-derived, "
+              f"gitignored - not committed).")
+    elif tgt in CONTINENT_NAMES:
+        # continent (AS, AF, NA, SA, OC, EUROPE): create subcontinent folders
+        # for every member country and drop the country files into them.
+        members = sorted(c for c, cont in country_continent_map().items() if cont == tgt)
+        if not members:
+            raise ValueError(f"no countries found for continent {tgt}")
+        print(f"birdid: downloading continent {tgt} ({label}) over "
+              f"{len(members)} member countries; subcontinent folders under "
+              f"regions_generated/{tgt}/ are created on demand ...")
+        pool_months = _download_members(generated_dir, members, key, year,
+                                        sample_dates, override_dir=None)
+        write_region_csv(generated_dir / f"{tgt}.csv", tgt, dict(pool_months),
+                         label, year, sample_dates, members=members)
+        print(f"birdid: wrote pooled {tgt}.csv ({len(pool_months)} spp) "
+              f"alongside the country tables under regions_generated/{tgt}/")
+        print(f"birdid: done. eBird data written to regions_generated/{tgt}/ "
+              f"(API-derived, gitignored - not committed).")
+    else:
+        raise ValueError(f"unknown region/pool: {code} "
+                         f"(known: {', '.join(sorted(POOLS))})")
+
+
 def download(data_dir: Path, tokens: list[str], year: int = DEFAULT_YEAR,
-             sample_dates: int = DEFAULT_SAMPLE_DATES, key: str | None = None):
+             sample_dates: int = DEFAULT_SAMPLE_DATES, key: str | None = None,
+             subnational: bool = False):
     kind, code, label = resolve_spec(tokens, load_countries(data_dir))
     data_dir = Path(data_dir)
     key = key or get_api_key()
@@ -580,33 +784,10 @@ def download(data_dir: Path, tokens: list[str], year: int = DEFAULT_YEAR,
     generated_dir.mkdir(parents=True, exist_ok=True)
 
     if kind == "country":
-        if not region_exists(code, key):
-            raise RuntimeError(f"eBird region code '{code}' is not valid "
-                               f"(check your key / the code).")
-        sp_months = _sample_with_progress(code, key, year, sample_dates)
-        write_region_csv(generated_dir / f"{code}.csv", code, sp_months,
-                         label, year, sample_dates)
+        _download_country(generated_dir, code, label, year, sample_dates,
+                          key, subnational)
     else:
-        members = POOLS[code]["members"]
-        print(f"birdid: downloading pool {code} ({label}) over "
-              f"{len(members)} member countries ...")
-        pool_months: dict[str, set[int]] = defaultdict(set)
-        for member in members:
-            if not region_exists(member, key):
-                print(f"birdid:   warning: skipping invalid member code {member}")
-                continue
-            sp = _sample_with_progress(member, key, year, sample_dates)
-            for name, months in sp.items():
-                pool_months[name].update(months)
-        write_region_csv(generated_dir / f"{code}.csv", code, dict(pool_months),
-                         label, year, sample_dates, members=members)
-        print("birdid: note: pool tables cover many countries - expect a large "
-              "species count.")
-
-    print("birdid: done. Real eBird data written to "
-          f"{generated_dir / f'{code}.csv'} (API-derived, gitignored - not "
-          "committed). The curated seed in regions/ remains the fallback; the "
-          "pipeline prefers this generated table when present.")
+        _download_pool(generated_dir, code, label, year, sample_dates, key)
 
 
 def _sample_with_progress(region_code: str, key: str, year: int, sample_dates: int):
@@ -628,26 +809,49 @@ def _sample_with_progress(region_code: str, key: str, year: int, sample_dates: i
 # --list
 # ---------------------------------------------------------------------------
 
+def _count_rows(path: Path) -> int:
+    n = 0
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in f:
+                line = row.lstrip()
+                if not line or line.startswith("#") or line.startswith("region,"):
+                    continue
+                n += 1
+    except OSError:
+        return 0
+    return n
+
+
+def _find_region_csv(base: Path, region: str) -> Path | None:
+    """Locate <region>.csv anywhere under `base` (tree + flat legacy)."""
+    if not base.is_dir():
+        return None
+    for p in base.rglob(f"{region}.csv"):
+        if p.is_file():
+            return p
+    return None
+
+
 def region_table_info(curated_dir: Path, generated_dir: Path, region: str
                       ) -> tuple[str, int]:
     """(source, n_species) for a region table, "" when none.
 
     source is "generated" (API-derived, preferred), "curated" (committed seed)
-    or "" (no table).
+    or "" (no table). Handles the nested regions_generated/ tree and a country
+    stored as a directory of subnational tables (region = union of the dir).
     """
     for source, base in (("generated", generated_dir), ("curated", curated_dir)):
-        path = Path(base) / f"{region}.csv"
-        if path.is_file():
-            n = 0
-            with open(path, newline="", encoding="utf-8") as f:
-                for row in f:
-                    line = row.lstrip()
-                    if not line or line.startswith("#"):
-                        continue
-                    if line.startswith("region,"):
-                        continue
-                    n += 1
-            return source, n
+        if not Path(base).is_dir():
+            continue
+        path = _find_region_csv(Path(base), region)
+        if path:
+            return source, _count_rows(path)
+        d = Path(base) / region
+        if d.is_dir():
+            n = sum(_count_rows(p) for p in sorted(d.rglob("*.csv")) if p.is_file())
+            if n:
+                return source, n
     return "", 0
 
 
@@ -672,9 +876,11 @@ def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
     generated_dir = data_dir / GENERATED_DIR
 
     member_of: dict[str, str] = {}
-    # most specific pool wins: iterate largest first so the smallest pool a
-    # country belongs to is assigned last (e.g. SG shows SEA, not whole AS).
-    for pool in sorted(POOLS, key=lambda c: len(POOLS[c]["members"]), reverse=True):
+    # smallest pool a country belongs to: its subcontinent (e.g. SG -> 
+    # AS-SOUTHEAST), else its continent. Curated pools (SEA/EUROPE) override.
+    for code in country_continent_map():
+        member_of[code] = country_subcontinent_map().get(code) or country_continent_map()[code]
+    for pool in ("SEA", "EUROPE"):
         for m in POOLS[pool]["members"]:
             member_of[m] = pool
 
@@ -721,7 +927,7 @@ def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
     print()
     print("  local = a region CSV already in the data dir: 'curated' = committed "
           "seed (no key), 'generated' = API-derived (gitignored, preferred);")
-    print("  pool = member of a --download pool (e.g. SEA, EUROPE, NA, AS-EAST).")
+    print("  pool = member of a --download pool (e.g. SEA, EUROPE, AS-SOUTHEAST).")
     print("  subnational regions:  birdid --list downloadable subnational1 <CODE>")
 
 
@@ -758,24 +964,27 @@ def list_regions(data_dir: Path, filter_tokens: list[str]):
 
     if show_pools:
         continents = sorted(c for c in POOLS if c in CONTINENT_NAMES)
-        subcons = sorted(c for c in POOLS if c not in CONTINENT_NAMES)
-        print("regions / pools (aggregate of member countries):")
+        subcons = sorted(set(country_subcontinent_map().values()))
+        print("regions / pools (smallest-division country files grouped by "
+              "continent / subcontinent folders):")
         print("  continent pools:")
         for code in continents:
             info = POOLS[code]
             src, n = region_table_info(curated_dir, generated_dir, code)
             tbl = f"{src} ({n} spp)" if src else "none"
+            n_mem = sum(1 for c, cc in country_continent_map().items() if cc == code)
             print(f"    {code:<10} {info['name']:<22} table: {tbl:<18} "
-                  f"members: {len(info['members'])} countries")
+                  f"members: {n_mem} countries (all subregions)")
         if subcons:
             print("  subcontinent pools:")
             for code in subcons:
-                info = POOLS[code]
-                cont = code.split("-")[0] if "-" in code else ""
+                name = SUB_NAMES.get(code, code)
+                cont = subcontinent_continent_map().get(code, "")
                 src, n = region_table_info(curated_dir, generated_dir, code)
                 tbl = f"{src} ({n} spp)" if src else "none"
-                print(f"    {code:<14} {info['name']:<24} table: {tbl:<18} "
-                      f"members: {len(info['members'])} countries")
+                n_mem = sum(1 for s in country_subcontinent_map().values() if s == code)
+                print(f"    {code:<14} {name:<24} table: {tbl:<18} "
+                      f"members: {n_mem} countries   (under {cont}/)")
         if POOL_ALIASES:
             print(f"  alias: {', '.join(f'{a} -> {t}' for a, t in sorted(POOL_ALIASES.items()))} "
                   f"(no separate table; downloads/uses the target pool)")

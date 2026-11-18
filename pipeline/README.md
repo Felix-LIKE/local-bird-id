@@ -19,12 +19,15 @@ everything for you:
 birdid /path/to/photos            # BioCLIP 2 on CPU, fully offline
 birdid /path/to/photos --max 10   # extra birdid.py args pass straight through
 birdid /path/to/photos --dry-run  # plan only, no model work
+birdid /path/to/photos --month-grace 0   # strict month, no ±1-month grace
 birdid /path/to/photos --analyze-all  # also analyse non-bird subjects (no pre-filter)
 birdid --list-candidates          # inspect the region/month tables
 birdid --list                     # what's available to download
 birdid --list downloadable        # every eBird country (offline reference)
 birdid --api [<key>]              # store / show the eBird API key
-birdid --download <code>          # write a real eBird table to regions_generated/ (needs --api)
+birdid --download <code>          # write real eBird tables to regions_generated/ (needs --api)
+birdid --download country SG --subnational  # SG/<SUB>.csv per subnational1 region
+birdid --download region AS-SOUTHEAST      # all 11 country files into AS/AS-SOUTHEAST/
 birdid --download taxonomy        # fetch the keyless eBird/Clements taxonomy
 birdid --initialize               # one-time: taxonomy + BioCLIP 2 backends
 ```
@@ -53,14 +56,22 @@ folder**; they manage the eBird data used as the classifier's prior.
   `--download country <CODE>`.
 - `--api <key>` stores your eBird API key in
   `~/.config/birdid/ebird_api_key` (chmod 600); bare `--api` shows the status.
-- `--download <code>` writes a real-eBird table to the **gitignored**
-  `ebird/regions_generated/` directory: for each month it samples dates
+- `--download <code>` writes real-eBird tables to the **gitignored**
+  `ebird/regions_generated/` **folder tree**. It always writes the **smallest
+  division**: a country lands in
+  `regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv` (e.g.
+  `AS/AS-SOUTHEAST/SG.csv`), a subcontinent fills its own folder with every
+  member country, and a continent creates the subcontinent folders for every
+  member country on demand. `--subnational` replaces a country table with a
+  `COUNTRY/<SUB>.csv` per subnational1 region (opt-in - fetching subregions for
+  every country would be thousands of API calls). A pooled `<REGION>.csv`
+  union table is kept alongside each download. For each month it samples dates
   (`--sample-dates 2` by default, `--year 2025`) and unions the species
-  actually reported that month. A country downloads that country; a pool
-  aggregates its member countries. Generated tables are **API-derived and
-  never committed** (eBird API data may not be redistributed); the pipeline
-  prefers them over the curated seeds while present. No key = no generated
-  table; only the curated seeds apply.
+  actually reported that month. Generated tables are **API-derived and never
+  committed** (eBird API data may not be redistributed); the pipeline prefers
+  them over the curated seeds while present, and every directory in the tree
+  also acts as a queryable union region (so `AS-SOUTHEAST`/`AS` work without a
+  pooled file). No key = no generated table; only the curated seeds apply.
 - `--download taxonomy` (and any no-key `--download`) fetches the **keyless**
   eBird/Clements taxonomy: it tries the Clements v2026 integrated checklist
   (Cornell) first, then the eBird API v2023 taxonomy (neither needs a key). If
@@ -151,15 +162,29 @@ the layout and a worked example.
   `central_outside` columns) - a signal that the region prior may be too narrow
   and should be expanded (or a wider pool downloaded). `--no-checklist` disables
   both local and central checklists.
-- **Two-tier neighbour-region expansion**: birds don't respect borders. If the
-  top score over the base region list falls below `--expand-threshold`
-  (default 0.35), the photo is re-scored against the *union* of the region
-  list and a wider regional pool - `SEA` (Southeast Asia) for `SG`/`TH`,
-  `EUROPE` for `DE` - so a species photographed just across a border (or missed
-  by the curated table) still gets a chance. If a region has **no table at all**
-  (only EUROPE and SEA ship seeds - every other region needs `--download`), the
-  pool is used as the tier-1 list directly. The reasoning field records when
-  this fired. `--expand-threshold 0` disables it.
+- **Two-tier neighbour-region expansion that walks up the region tree**: birds
+  don't respect borders. If the top score over the base region list falls below
+  `--expand-threshold` (default 0.35), the photo is re-scored against the next
+  wider pool, **repeating until certain** - for a `SG` photo that is
+  `SG` → `AS-SOUTHEAST` (its subcontinent folder = the SEA pool) → `AS`
+  (continent), for `DE` it is `DE` → `EU-WEST` → `EUROPE`. Species only present
+  just across a border (or missed by the curated table) still get a chance, and
+  the reasoning field records how many levels were walked.
+  `--expand-threshold 0` disables the expansion. Regions without a table fall
+  back to their `REGION_POOLS` pool as tier 1 directly.
+- **±1-month grace (`--month-grace 1`, default on)**: a species whose recorded
+  presence is off by a month or two still counts as a candidate - the month
+  window is widened to `[month-grace, month+grace]`, wrapping across the year.
+  This avoids mis-identifications at season boundaries (e.g. an Asian Openbill
+  in Singapore in early January, when its table marks it present Feb-Dec).
+  `--month-grace 0` restores a strict single month.
+- **Live background feedback**: before the first photo the model is loaded
+  explicitly with a "loading BioCLIP 2 model (first load ~2-4 min)..." message
+  and a running "working on this step for MM:SS" timer, so a long first-run
+  build reads as *working*, not *crashed*. During each capture the stage
+  message reports the granular step ("encoding image", "scoring N candidates
+  (SG, month 01)", "expanding level 2 of the region tree (+M species)",
+  "writing sidecar").
 - **Bird pre-filter (default on)**: stage 1 classifies every subject into a
   coarse category (bird / reptile / insect / ...). A non-bird capture is
   recorded with status `non-bird` (species = the coarse category) and the
@@ -242,9 +267,15 @@ explicit path on top of the per-folder files.
   two no-key pools (the GPS+time prior and the two-tier expansion target).
   Species names are the canonical eBird common names. A region without its own
   table (e.g. `DE`) falls back to its pool automatically.
-- `regions_generated/*.csv` - **gitignored** API-derived tables written by
+- `regions_generated/` - **gitignored** API-derived tables written by
   `birdid --download <code>` (preferred over the seeds while present; never
-  committed - eBird API data may not be redistributed).
+  committed - eBird API data may not be redistributed). The smallest division
+  is stored in a continent/subcontinent tree:
+  `regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv` (a country with
+  subnational tables becomes `<COUNTRY>/<SUB>.csv`), with a pooled
+  `<REGION>.csv` kept alongside. Every directory in the tree also acts as a
+  queryable union region, so `AS-SOUTHEAST`/`AS` resolve even without a pooled
+  file.
 - `continents.csv` - **committed** static continent/subcontinent reference
   (250 country codes). Builds the continent + subcontinent pools for
   batch `--download region <code>`, and maps every country to its continent
