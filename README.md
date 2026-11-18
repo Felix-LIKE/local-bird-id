@@ -243,6 +243,7 @@ pipeline/birdid --list-candidates           # inspect region/month tables
 | `pipeline/ebird_data.py` | eBird data management: registry, API key store, `--download` / `--list` / `--initialize` |
 | `ebird/regions/*.csv` | **Committed curated seeds** (EUROPE + SEA, the two no-key regions) — the GPS+time prior. |
 | `ebird/regions_generated/*.csv` | **Gitignored** API-derived tables from `birdid --download <code>` (preferred over the seeds; never committed — eBird API data may not be redistributed) |
+| `ebird/continents.csv` | **Committed** static continent/subcontinent reference (250 codes) — builds the continent/subcontinent pools + country→pool map (feature 3) |
 | `ebird/eBird-Clements_Integrated_Checklist.csv` | Bundled Clements checklist (version-agnostic name): offline taxonomy fallback + Avibase ids |
 | `ebird/` | eBird data + schema docs |
 
@@ -267,6 +268,11 @@ pipeline/birdid --download SG       # country  (or: --download country SG)
 pipeline/birdid --download SEA      # region   (or: --download region SEA)
 pipeline/birdid --download region   # default region's pool (DE -> EUROPE)
 
+# batch-download a whole continent or subcontinent (from ebird/continents.csv)
+pipeline/birdid --download region SA          # South America
+pipeline/birdid --download region AS-SOUTHEAST  # = SEA (alias)
+pipeline/birdid --download region EU-NORTH    # Northern Europe
+
 # no key needed - fetch the keyless eBird/Clements taxonomy
 pipeline/birdid --download taxonomy
 ```
@@ -278,10 +284,35 @@ pipeline/birdid --download taxonomy
   (`--download taxonomy`: Cornell Clements v2026 → eBird API v2023, both
   keyless; fully offline it prints the download link + filename + target path
   so the install can be completed by hand).
+- **Continent/subcontinent pools** (feature 3): besides the curated SEA/EUROPE
+  seeds, the bundled `ebird/continents.csv` (standard geography, safe to
+  commit) provides every continent (NA, SA, AF, AS, OC, AN + EUROPE) and
+  subcontinent (EU-NORTH/EU-WEST/EU-SOUTH/EU-EAST; NA-NORTH/NA-CENTRAL/
+  NA-CARIBBEAN; SA-NORTH/SA-BRAZIL/SA-SOUTH; AF-NORTH/WEST/CENTRAL/EAST/SOUTH;
+  AS-EAST/AS-SOUTHEAST/AS-SOUTH/AS-CENTRAL/AS-WEST/AS-NORTH; OC-AUSTRALASIA/
+  MELANESIA/MICRONESIA/POLYNESIA) as `--download region <code>` batches.
+  `AS-SOUTHEAST` is an alias for the existing SEA pool (no duplicate table);
+  `--list region` shows them all with member counts. Photos are also resolved
+  straight to the widest pool via new GPS bounding boxes, and every country
+  maps to its continent pool for the two-tier fallback.
 - **No-key coverage**: only EUROPE and SEA have committed seeds. A photo that
   resolves to a region without a table (or Germany/Singapore/Thailand, which
-  ship no country seed) falls back to its pool (EUROPE / SEA) automatically;
-  every other region needs `--download <code>` + a key.
+  ship no country seed) falls back to its pool (EUROPE / SEA, or the country's
+  continent pool) automatically; every other region needs `--download <code>` +
+  a key.
+- **Per-folder reports + parent index** (feature 1): every folder with captures
+  gets its own full-snapshot `birdid_report.csv` (this run + previously
+  recorded); every folder with subfolders gets a `birdid_index.csv` pointing to
+  each subfolder's report/index with counts. New folders are picked up on
+  rerun, running on a subfolder alone works, and `--report <path>` still writes
+  a flat aggregate.
+- **Centralized eBird checklists** (feature 2): drop exported checklists
+  (e.g. `S296663962_observations.csv`) into `~/.config/birdid/checklists/`
+  (created by `--initialize`; override with `--checklists-dir` /
+  `$BIRDID_CHECKLISTS_DIR`). Species are keyed by their `Observation Date`
+  month and boost matching folders' candidate lists; species outside the GPS
+  region's table are flagged (`central_outside` in the report) as a sign the
+  region prior is too narrow. `--no-checklist` disables them.
 - Tune the sampling: `--sample-dates 2` (dates/month), `--year 2025`,
   `--api-delay 1.5` (seconds between calls, rate-limit guard).
 - The species tables use the canonical eBird names; the bundled
@@ -295,7 +326,8 @@ pipeline/birdid --download taxonomy
 
 > Re-tagging a folder: a capture is *done* once its `<base>.xmp` exists, so a
 > rerun skips it. Delete the stale sidecars (+ `birdid_manifest.json` +
-> `birdid_report.csv`) to force a fresh run - originals are never touched.
+> the per-folder `birdid_report.csv`/`birdid_index.csv` files) to force a fresh
+> run - originals are never touched.
 
 ## Status
 

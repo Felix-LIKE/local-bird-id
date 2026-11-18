@@ -50,6 +50,7 @@ import argparse
 import csv
 import io
 import json
+import os
 import re
 import subprocess
 import sys
@@ -59,7 +60,8 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from ebird_data import COARSE_LABELS, TAXONOMY_2023, TAXONOMY_2026   # shared with --initialize/--download (single source of truth)
+from ebird_data import (COARSE_LABELS, TAXONOMY_2023, TAXONOMY_2026,
+                        country_continent_map)   # shared with --initialize/--download
 
 # --------------------------------------------------------------------------
 # Config / defaults
@@ -70,6 +72,12 @@ from ebird_data import COARSE_LABELS, TAXONOMY_2023, TAXONOMY_2026   # shared wi
 DEFAULT_DATA_DIR = str(Path(__file__).resolve().parent.parent / "ebird")
 DEFAULT_REGION = "DE"
 PIPELINE_VERSION = "1"
+
+# Centralized eBird checklist exports (one file per checklist, e.g.
+# S296663962_observations.csv). Override with --checklists-dir or
+# BIRDID_CHECKLISTS_DIR; created by --initialize.
+DEFAULT_CHECKLISTS_DIR = os.environ.get(
+    "BIRDID_CHECKLISTS_DIR") or str(Path.home() / ".config" / "birdid" / "checklists")
 
 # Avibase species-page URL. The Clements v2026 checklist carries each species'
 # 'taxon concept ID' (e.g. 'avibase-0DF27D63'); we surface the link for the
@@ -84,22 +92,38 @@ RAW_EXTS = {".cr2", ".cr3", ".nef", ".arw", ".dng", ".orf", ".rw2", ".tif", ".ti
 ALL_EXTS = VIEWABLE_EXTS | RAW_EXTS
 
 # Region bounding boxes (lat, lon). Photos without GPS fall back to --region.
+# Order matters: `region_for` returns the FIRST box that contains the point, so
+# the tightest (country -> subcontinent -> continent) must come first.
 REGION_BBOXES = {
     "DE": (47.0, 55.0, 5.5, 15.0),     # Germany
     "SG": (1.1, 1.5, 103.5, 104.2),    # Singapore
     "TH": (5.5, 20.5, 97.0, 106.0),    # Thailand
+    # subcontinent / continent pools (GPS resolves to the widest pool)
+    "SEA": (-11.0, 29.0, 92.0, 141.0),    # Southeast Asia
+    "EUROPE": (34.0, 72.0, -11.0, 45.0),  # Europe
+    "NA": (5.0, 84.0, -170.0, -50.0),     # North America
+    "SA": (-56.0, 12.5, -82.0, -34.0),    # South America
+    "AF": (-35.0, 37.5, -18.0, 52.0),     # Africa
+    "AS": (-11.0, 78.0, 26.0, 180.0),     # Asia
+    "OC": (-50.0, 22.0, 110.0, 180.0),    # Oceania (excl. Antarctica)
 }
 
 # Low-confidence fallback: when the base country list yields no confident
 # answer, re-score against the union with a wider regional pool. Birds don't
 # respect borders, so a species photographed just across a border (or missed by
 # the curated country table) still gets a chance. Pools are ordinary region
-# tables (same CSV format) covering the surrounding countries.
-REGION_POOLS = {
+# tables (same CSV format) covering the surrounding countries. Explicit country
+# -> pool overrides come first; every other country then maps to its continent
+# pool via the bundled continents reference (ebird/continents.csv).
+REGION_POOLS = dict(country_continent_map())   # every country -> its continent pool
+# Explicit country -> tighter pool overrides win over the continent default
+# (Singapore/Thailand are Southeast Asia, Germany is Europe - not the whole
+# continent pool, so the two-tier fallback uses the curated SEA/EUROPE seeds).
+REGION_POOLS.update({
     "SG": "SEA",     # Singapore -> Southeast Asia pool (MY/ID/TH/...)
     "TH": "SEA",     # Thailand   -> Southeast Asia pool
     "DE": "EUROPE",  # Germany    -> European pool
-}
+})
 
 BIRD_NS = "http://ns.birdpipeline/1.0/"
 
@@ -482,6 +506,311 @@ def load_checklist(path: Path) -> list[str]:
     except OSError:
         pass
     return species
+
+
+# --------------------------------------------------------------------------
+# Centralized eBird checklist exports (one file per checklist, with a date)
+# --------------------------------------------------------------------------
+
+def _parse_checklist_date(s: str) -> datetime | None:
+    """Parse an eBird 'Observation Date' cell, e.g. 'Jan 28, 2026'."""
+    s = (s or "").strip()
+    if not s:
+        return None
+    for fmt in ("%b %d, %Y", "%B %d, %Y", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+class CentralChecklists:
+    """Centralized eBird checklist exports: species by (year, month).
+
+    One file per exported checklist (e.g. ``S296663962_observations.csv``) in a
+    single folder (default ``~/.config/birdid/checklists/``). Each row carries a
+    ``Species`` and an ``Observation Date``. A persistent index
+    (``<dir>/index.json``) remembers each file's mtime+size and its parsed
+    entries, so on reruns only new/changed files are re-read; the rest are
+    served from the cached index. Folders are usually one-per-date, so entries
+    are keyed by the checklist's (year, month) and matched to a capture's
+    ``folder_date()`` (feature 2).
+    """
+
+    INDEX_NAME = "index.json"
+
+    def __init__(self, checklists_dir: Path | None, taxonomy: dict[str, str]):
+        self.dir = Path(checklists_dir) if checklists_dir else None
+        self.taxonomy = taxonomy
+        # (year, month) -> list[(species, status)]
+        self.by_month: dict[tuple[int, int], list[tuple[str, str]]] = {}
+        self.loaded = 0          # species loaded from central checklists
+        self.index: dict = {}    # path -> {mtime, size, entries}
+        self._changed = False
+        if self.dir:
+            self._load()
+
+    # -- persistence -------------------------------------------------------
+
+    def _index_path(self) -> Path:
+        return self.dir / self.INDEX_NAME
+
+    def _read_index(self):
+        try:
+            return json.loads(self._index_path().read_text()) or {}
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def _write_index(self):
+        try:
+            self._index_path().write_text(
+                json.dumps(self.index, indent=1, ensure_ascii=False))
+        except OSError:
+            pass
+
+    # -- loading -----------------------------------------------------------
+
+    def _load(self):
+        if not self.dir.is_dir():
+            return
+        self.index = self._read_index()
+        try:
+            for pat in CHECKLIST_PATTERNS:
+                for p in sorted(self.dir.glob(pat)):
+                    self._load_file(p)
+        except OSError:
+            pass
+        if self._changed:
+            self._write_index()
+
+    def _load_file(self, path: Path):
+        try:
+            st = path.stat()
+            sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return
+        key = str(path)
+        cached = self.index.get(key)
+        if cached and (cached.get("mtime_ns"), cached.get("size")) == sig:
+            self._apply_entries(cached.get("entries") or [])
+            return
+        entries = self._parse_file(path)
+        self.index[key] = {"mtime_ns": sig[0], "size": sig[1], "entries": entries}
+        self._changed = True
+        self._apply_entries(entries)
+
+    def _parse_file(self, path: Path) -> list[list]:
+        """-> [[species, 'YYYY-MM-DD', status], ...] (raw, for the index)."""
+        rows: list[list] = []
+        try:
+            with open(path, newline="", encoding="utf-8-sig") as f:
+                for row in csv.DictReader(f):
+                    name = (row.get("Species") or "").strip()
+                    d = _parse_checklist_date(row.get("Observation Date"))
+                    if not name or d is None:
+                        continue
+                    rows.append([name, d.strftime("%Y-%m-%d"), "central-checklist"])
+        except OSError:
+            pass
+        return rows
+
+    def _apply_entries(self, entries: list[list]):
+        for name, date_str, status in entries:
+            try:
+                d = datetime.strptime(date_str, "%Y-%m-%d")
+            except ValueError:
+                continue
+            common = normalize_species(name, self.taxonomy)[0]
+            self.by_month.setdefault((d.year, d.month), []).append((common, status))
+            self.loaded += 1
+
+    def species_for(self, year: int, month: int) -> list[tuple[str, str]]:
+        """Central-checklist species for a (year, month), deduped."""
+        return self.by_month.get((year, month), [])
+
+    def report(self) -> str:
+        if not self.dir or not self.dir.is_dir():
+            return "central checklists: none"
+        return (f"central checklists: {len(self.index)} file(s), "
+                f"{self.loaded} species (index: {self._index_path()})")
+
+
+# --------------------------------------------------------------------------
+# Per-folder reports + parent index (feature 1)
+# --------------------------------------------------------------------------
+
+def _report_cols() -> list[str]:
+    return ["capture", "file", "viewable", "region", "month", "species",
+            "scientific_name", "confidence", "status", "gps", "date_source",
+            "alternatives", "reasoning", "avibase_url", "datetime",
+            "central_added", "central_outside"]
+
+
+def _write_csv(path: Path, rows: list[dict]):
+    if not rows:
+        return
+    cols = _report_cols()
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        w.writerows(rows)
+
+
+def _read_existing_report(path: Path) -> dict[str, dict]:
+    """Existing per-folder report rows keyed by capture base name."""
+    rows: dict[str, dict] = {}
+    if not path.is_file():
+        return rows
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                base = (r.get("capture") or "").strip()
+                if base:
+                    rows[base] = r
+    except OSError:
+        pass
+    return rows
+
+
+def _manifest_to_row(base: str, entry: dict) -> dict:
+    files = entry.get("files") or []
+    primary = files[0] if files else ""
+    viewable = Path(primary).name if primary else ""
+    month = entry.get("month")
+    conf = entry.get("confidence")
+    return {
+        "capture": base, "file": primary, "viewable": viewable,
+        "region": entry.get("region", ""),
+        "month": f"{month:02d}" if isinstance(month, int) else "",
+        "species": entry.get("species", ""),
+        "scientific_name": entry.get("scientific", ""),
+        "confidence": f"{conf:.2f}" if isinstance(conf, (int, float)) else "",
+        "status": entry.get("status", ""),
+        "gps": entry.get("gps", ""),
+        "date_source": entry.get("date_source", ""),
+        "alternatives": "; ".join(entry.get("alternatives") or []),
+        "reasoning": entry.get("reasoning", ""),
+        "avibase_url": entry.get("avibase_url", ""),
+        "datetime": entry.get("datetime", ""),
+        "central_added": entry.get("central_added", ""),
+        "central_outside": entry.get("central_outside", ""),
+    }
+
+
+def write_folder_reports(root: Path, manifest: dict, report_rows: list[dict]):
+    """Write a full-snapshot report per folder + a parent index per subfolder.
+
+    Feature 1: every folder that has captures gets its own ``birdid_report.csv``
+    (a full snapshot: this run + previously recorded). Every folder that has
+    subfolders-with-reports gets a ``birdid_index.csv`` pointing at each
+    subfolder's report/index with summary counts, so a rerun picks up new
+    folders and running on a subfolder alone also works. The run-root manifest
+    stays the resumable store; ``--report <path>`` still writes a flat
+    aggregate on top.
+    """
+    written: list[str] = []
+
+    # this run's rows, keyed by capture base per folder
+    run_by_folder: dict[Path, dict[str, dict]] = defaultdict(dict)
+    for row in report_rows:
+        folder = Path(row["file"]).parent
+        run_by_folder[folder][row["capture"]] = row
+
+    # manifest entries grouped by folder (captures ever processed for this root)
+    manifest_by_folder: dict[Path, dict[str, dict]] = defaultdict(dict)
+    for sidecar_str, entry in manifest.items():
+        sidecar = Path(sidecar_str)
+        manifest_by_folder[sidecar.parent][sidecar.stem] = entry
+
+    # folders of interest: this run's folders + manifest folders + root
+    folders = set(run_by_folder) | set(manifest_by_folder)
+    # include existing report/index folders under root (from earlier runs)
+    if root.is_dir():
+        for p in root.rglob("birdid_report.csv"):
+            folders.add(p.parent)
+        for p in root.rglob("birdid_index.csv"):
+            folders.add(p.parent)
+    folders = {f for f in folders if f == root or root in f.parents}
+
+    # 1) per-folder full snapshots: existing report <- manifest <- this run
+    for folder in sorted(folders):
+        merged = _read_existing_report(folder / "birdid_report.csv")
+        for base, entry in manifest_by_folder.get(folder, {}).items():
+            merged.setdefault(base, _manifest_to_row(base, entry))
+        for base, row in run_by_folder.get(folder, {}).items():
+            merged[base] = row
+        if not merged:
+            continue
+        path = folder / "birdid_report.csv"
+        _write_csv(path, [merged[b] for b in sorted(merged)])
+        written.append(str(path))
+
+    # 2) parent index: every folder with subfolders that have a report/index
+    report_dirs = {f for f in folders if (f / "birdid_report.csv").is_file()}
+    index_dirs = {f for f in folders if (f / "birdid_index.csv").is_file()}
+    all_dirs = set()
+    for d in report_dirs | index_dirs:
+        p = d
+        while True:
+            all_dirs.add(p)
+            if p == root or p.parent == p:
+                break
+            p = p.parent
+    # a folder gets an index iff it has a subfolder in all_dirs
+    will_index = {f for f in all_dirs
+                  if any(d.parent == f and d != f for d in all_dirs)}
+    # deepest first so a child index exists before the parent references it
+    for folder in sorted(all_dirs, key=lambda p: -len(p.parts)):
+        subdirs = sorted({d for d in all_dirs if d.parent == folder and d != folder})
+        if not subdirs:
+            continue
+
+        def subtree_counts(folder_d: Path) -> dict:
+            """Aggregate report counts over folder_d and its whole subtree."""
+            rows = _read_existing_report(folder_d / "birdid_report.csv")
+            counts = {"captures": len(rows), "done": 0, "error": 0,
+                      "pending": 0, "species": 0}
+            species = set()
+            for r in rows.values():
+                st = r.get("status", "")
+                if st == "done":
+                    counts["done"] += 1
+                elif st == "error":
+                    counts["error"] += 1
+                else:
+                    counts["pending"] += 1
+                if r.get("species"):
+                    species.add(r["species"])
+            counts["species"] = len(species)
+            for child in {d for d in all_dirs if d.parent == folder_d}:
+                c = subtree_counts(child)
+                for k in ("captures", "done", "error", "pending"):
+                    counts[k] += c[k]
+                counts["species"] += c["species"]
+            return counts
+
+        rows = []
+        for sub in subdirs:
+            report = sub / "birdid_report.csv"
+            index = sub / "birdid_index.csv"
+            counts = subtree_counts(sub)
+            rows.append({
+                "folder": sub.name,
+                "report": report.relative_to(folder).as_posix() if sub in report_dirs else "",
+                "index": index.relative_to(folder).as_posix() if sub in will_index else "",
+                **counts,
+            })
+        path = folder / "birdid_index.csv"
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=["folder", "report", "index",
+                                              "captures", "done", "error",
+                                              "pending", "species"])
+            w.writeheader()
+            w.writerows(rows)
+        written.append(str(path))
+
+    return written
 
 # --------------------------------------------------------------------------
 # Classifier backends
@@ -1057,9 +1386,16 @@ def main():
                          "have no country seed and fall back to their EUROPE/SEA "
                          "pool")
     ap.add_argument("--no-checklist", action="store_true",
-                    help="ignore optional eBird *_observations.csv exports in photo folders")
+                    help="ignore optional eBird *_observations.csv exports "
+                         "(both in photo folders and the centralized checklists dir)")
+    ap.add_argument("--checklists-dir", default=DEFAULT_CHECKLISTS_DIR,
+                    help="centralized eBird checklist exports (one file per "
+                         "checklist, e.g. S296663962_observations.csv); "
+                         "entries are keyed by Observation Date and boost the "
+                         "candidate list for matching folders. Default: "
+                         "~/.config/birdid/checklists (or $BIRDID_CHECKLISTS_DIR)")
     ap.add_argument("--manifest", default=None, help="manifest path (default <folder>/birdid_manifest.json)")
-    ap.add_argument("--report", default=None, help="CSV report path (default <folder>/birdid_report.csv)")
+    ap.add_argument("--report", default=None, help="additionally write a flat CSV aggregate of the current run to this path (per-folder reports are always written as <folder>/birdid_report.csv)")
     ap.add_argument("--max", type=int, default=0, help="stop after this many captures (0 = all)")
     ap.add_argument("--min-confidence", type=float, default=0.5,
                     help="below this, status is 'low-confidence' (default 0.5)")
@@ -1082,7 +1418,10 @@ def main():
                          "defaults; 'taxonomy' (keyless) fetches the "
                          "eBird/Clements taxonomy. Region tables need an API "
                          "key (--api); without one only the curated seeds "
-                         "(EUROPE/SEA) apply.")
+                         "(EUROPE/SEA) apply. 'region CODE' also accepts whole "
+                         "continents/subcontinents for batch downloads "
+                         "(e.g. region SA, region NA, region AS-SOUTHEAST, "
+                         "region EU-NORTH; see --list region).")
     ap.add_argument("--list", nargs="*", metavar="KIND",
                     help="list countries/regions available for download "
                          "(optional filter: country | region; or 'downloadable' "
@@ -1116,6 +1455,9 @@ def main():
             if args.initialize or args.download_backends:
                 from ebird_data import initialize
                 initialize(data_dir, data_dir / "regions")
+                Path(args.checklists_dir).mkdir(parents=True, exist_ok=True)
+                print(f"birdid: central checklists dir: {args.checklists_dir} "
+                      "(drop eBird exports like S296663962_observations.csv there)")
             elif args.api is not None:
                 from ebird_data import handle_api
                 handle_api(args.api)
@@ -1170,7 +1512,6 @@ def main():
         return
 
     manifest_path = Path(args.manifest) if args.manifest else root / "birdid_manifest.json"
-    report_path = Path(args.report) if args.report else root / "birdid_report.csv"
     manifest = load_manifest(manifest_path)
 
     tui = TUI(enabled=not args.no_tui)
@@ -1227,6 +1568,9 @@ def main():
             report_rows = []
             stop = tui.stop_flag
             checklist_cache: dict[str, list[tuple[str, str]]] = {}
+            central = (CentralChecklists(Path(args.checklists_dir), taxonomy)
+                       if not args.no_checklist else CentralChecklists(None, taxonomy))
+            tui.plain_line(central.report())
 
             def capture_checklist(cap: Capture) -> list[tuple[str, str]]:
                 if args.no_checklist:
@@ -1266,11 +1610,36 @@ def main():
                     region_cands = db.candidates(region, month)
                     checklist = capture_checklist(cap)
                     cl_lower = {c[0].lower() for c in checklist}
-                    candidates = checklist + [
-                        (s, st) for (s, st) in region_cands if s.lower() not in cl_lower]
-                    expanded = checklist + [
-                        (s, st) for (s, st) in db.expanded(region, month)
-                        if s.lower() not in cl_lower]
+                    # central checklists: species for this capture's (year, month)
+                    central_list: list[tuple[str, str]] = []
+                    if dt:
+                        central_list = central.species_for(dt.year, dt.month)
+                    # region-table species (for the "region too narrow" flag)
+                    region_names = {s.lower() for s, _ in region_cands}
+                    central_outside = sorted(
+                        {c[0] for c in central_list
+                         if c[0].lower() not in region_names})
+                    central_added = sorted({c[0] for c in central_list})
+
+                    seen = set()
+                    candidates = []
+                    for grp in (checklist, central_list, region_cands):
+                        for s, st in grp:
+                            if s.lower() not in seen:
+                                seen.add(s.lower())
+                                candidates.append((s, st))
+                    expanded = []
+                    for grp in (checklist, central_list, db.expanded(region, month)):
+                        for s, st in grp:
+                            if s.lower() not in seen:
+                                seen.add(s.lower())
+                                expanded.append((s, st))
+
+                    if central_outside:
+                        tui.plain_line(
+                            f"  note: {len(central_outside)} central-checklist "
+                            f"species outside {region} table: "
+                            f"{', '.join(central_outside)} - region prior may be too narrow")
 
                     tui.set(stage="classify", message=f"classifying {primary.name}")
                     result = classifier.classify(primary, candidates, expanded, taxonomy, region, month, dt)
@@ -1305,6 +1674,11 @@ def main():
                         "status": status, "classifier": classifier.describe(),
                         "pipelineVersion": PIPELINE_VERSION,
                         "ts": datetime.now().isoformat(timespec="seconds"),
+                        "alternatives": result.get("alternatives", []),
+                        "reasoning": result.get("reasoning", ""),
+                        "datetime": dt.strftime("%Y-%m-%d %H:%M") if dt else "",
+                        "central_added": "; ".join(central_added),
+                        "central_outside": "; ".join(central_outside),
                     }
                     save_manifest(manifest_path, manifest)   # resumable: save after every capture
 
@@ -1317,6 +1691,8 @@ def main():
                         "reasoning": result.get("reasoning", ""),
                         "avibase_url": avibase_url,
                         "datetime": dt.strftime("%Y-%m-%d %H:%M") if dt else "",
+                        "central_added": "; ".join(central_added),
+                        "central_outside": "; ".join(central_outside),
                     })
                     last = fmt_result(result, scientific, avibase_url)
                     done_n += 1
@@ -1331,13 +1707,17 @@ def main():
                                                   "sidecar": str(sidecar),
                                                   "status": "error", "error": str(e),
                                                   "pipelineVersion": PIPELINE_VERSION,
-                                                  "ts": datetime.now().isoformat(timespec="seconds")}
+                                                  "ts": datetime.now().isoformat(timespec="seconds"),
+                                                  "alternatives": [], "reasoning": str(e)[:500],
+                                                  "datetime": "",
+                                                  "central_added": "", "central_outside": ""}
                         save_manifest(manifest_path, manifest)
                         report_rows.append({"capture": cap.base, "file": str(primary), "viewable": primary.name,
                                             "region": "", "month": "", "species": "", "scientific_name": "",
                                             "confidence": "", "status": "error", "gps": "", "date_source": "",
                                             "alternatives": "", "reasoning": str(e)[:500], "avibase_url": "",
-                                            "datetime": ""})
+                                            "datetime": "",
+                                            "central_added": "", "central_outside": ""})
                     except Exception as e2:  # noqa: BLE001
                         last = f"ERROR (write failed too): {e2}"
                         tui.plain_line(f"  {last}")
@@ -1347,18 +1727,30 @@ def main():
                 tui.plain_line(f"[{i}/{len(pending)}] {rel}: {last}")
 
             # --- report ---
-            if report_rows:
-                with open(report_path, "w", newline="", encoding="utf-8") as f:
-                    w = csv.DictWriter(f, fieldnames=list(report_rows[0].keys()))
-                    w.writeheader()
-                    w.writerows(report_rows)
+            # Per-folder full-snapshot reports + a parent index (feature 1).
+            written = write_folder_reports(root, manifest, report_rows)
+            # --report <path> still writes a flat aggregate of this run.
+            if args.report and report_rows:
+                flat = Path(args.report)
+                flat.parent.mkdir(parents=True, exist_ok=True)
+                _write_csv(flat, report_rows)
+                written.append(str(flat))
             tui.set(phase="done", message="finished")
             summary_lines.append(f"\ndone: {done_n} tagged, {error_n} errors -> manifest {manifest_path}")
-            if report_rows:
-                summary_lines.append(f"report: {report_path}")
+            for p in written:
+                summary_lines.append(f"wrote: {p}")
+            if central and central.loaded and not args.no_checklist:
+                summary_lines.append(central.report())
 
         else:
-            # early exit (dry-run / nothing to do) - summary_lines already filled
+            # early exit (dry-run / nothing to do) - summary_lines already filled.
+            # Still refresh the per-folder reports + parent index from the
+            # manifest, so running a parent after its subfolders were processed
+            # in separate runs still yields the hierarchical index.
+            if not args.dry_run:
+                written = write_folder_reports(root, manifest, [])
+                for p in written:
+                    summary_lines.append(f"wrote: {p}")
             tui.set(phase="done", message="nothing to process")
     except KeyboardInterrupt:
         tui.set(phase="interrupted", message="interrupted - manifest is resume-safe")

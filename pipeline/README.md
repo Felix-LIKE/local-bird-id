@@ -126,6 +126,20 @@ Defaults are fine: data in `/data/offline-data/bird/ebird`, region `DE`.
 - **Optional eBird checklist**: a `*_observations.csv` export in a photo folder
   adds that day's observed species to the candidate list (highest priority).
   Use `--no-checklist` to ignore. Works fully offline - it is just a CSV.
+- **Centralized checklist exports** (feature 2): drop your exported eBird
+  checklists (one file per checklist, e.g. `S296663962_observations.csv`) into
+  the central folder (`~/.config/birdid/checklists/`, or `--checklists-dir` /
+  `$BIRDID_CHECKLISTS_DIR`; created by `--initialize`). Each row's
+  `Observation Date` (e.g. `Jan 28, 2026`) keys the species by (year, month),
+  so a capture whose folder name resolves to that month gets those species
+  added to its candidate list - a helper when the export may miss some birds or
+  include birds that weren't photographed. A persistent `index.json` (mtime +
+  size per file) means reruns only re-read new/changed checklist files. Species
+  from the central checklists that are **not** in the GPS region's table are
+  flagged in the console and recorded in the report (`central_added` /
+  `central_outside` columns) - a signal that the region prior may be too narrow
+  and should be expanded (or a wider pool downloaded). `--no-checklist` disables
+  both local and central checklists.
 - **Two-tier neighbour-region expansion**: birds don't respect borders. If the
   top score over the base region list falls below `--expand-threshold`
   (default 0.35), the photo is re-scored against the *union* of the region
@@ -171,13 +185,27 @@ stored in the report + manifest.
 
 ## Report (CSV)
 
-`<folder>/birdid_report.csv` has one row per capture: `capture, file,
-viewable, region, month, species, scientific_name, confidence, status, gps,
-date_source, alternatives, reasoning, avibase_url, datetime`. Both `species`
-(common) and `scientific_name` are always recorded; `gps` / `date_source` say
-where the location and date came from (embedded / folder-mean / none and exif /
-folder / today), and `avibase_url` is the Avibase page for the top guess
-(blank when the bundled Clements file is unavailable).
+Every folder that has captures gets its own full-snapshot report
+`<folder>/birdid_report.csv` with one row per capture (this run + previously
+recorded, merged from the manifest): `capture, file, viewable, region, month,
+species, scientific_name, confidence, status, gps, date_source, alternatives,
+reasoning, avibase_url, datetime, central_added, central_outside`. Both
+`species` (common) and `scientific_name` are always recorded; `gps` /
+`date_source` say where the location and date came from (embedded / folder-mean
+/ none and exif / folder / today), `avibase_url` is the Avibase page for the top
+guess (blank when the bundled Clements file is unavailable), and
+`central_added` / `central_outside` list the central-checklist species used and
+those missing from the region's table (feature 2).
+
+Every folder that has subfolders-with-captures gets a **parent index**
+`<folder>/birdid_index.csv` (feature 1): one row per immediate subfolder with a
+pointer to that subfolder's report (or its own index) and summary counts
+(`captures, done, error, pending, species`, aggregated over the subtree). The
+hierarchy is therefore navigable top-down, new folders added to a parent are
+picked up on rerun, and running on a subfolder alone also writes that
+subfolder's report (its parent's index is refreshed the next time the parent is
+run). `--report <path>` still writes a flat aggregate of the current run to an
+explicit path on top of the per-folder files.
 
 ## Data
 
@@ -199,6 +227,12 @@ folder / today), and `avibase_url` is the Avibase page for the top guess
 - `regions_generated/*.csv` - **gitignored** API-derived tables written by
   `birdid --download <code>` (preferred over the seeds while present; never
   committed - eBird API data may not be redistributed).
+- `continents.csv` - **committed** static continent/subcontinent reference
+  (250 country codes). Builds the continent + subcontinent pools for
+  batch `--download region <code>`, and maps every country to its continent
+  pool for the two-tier fallback (see `ebird/README.md`).
+- `~/.config/birdid/checklists/` (or `--checklists-dir`) - your centralized
+  eBird checklist exports, one file per checklist (feature 2).
 
 ## Known limits
 

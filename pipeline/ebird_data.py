@@ -101,6 +101,104 @@ POOLS = {
     },
 }
 
+# Continent / subcontinent pools derived from the bundled reference
+# (ebird/continents.csv, standard geography - not eBird API data). Derived
+# pools never override the curated SEA/EUROPE pools above; a derived
+# subcontinent that is really an existing pool is aliased to it.
+POOL_ALIASES = {"AS-SOUTHEAST": "SEA"}   # derived subcontinent -> existing pool
+
+CONTINENT_NAMES = {
+    "EUROPE": "Europe", "NA": "North America", "SA": "South America",
+    "AF": "Africa", "AS": "Asia", "OC": "Oceania", "AN": "Antarctica",
+}
+SUB_NAMES = {
+    "EU-NORTH": "Northern Europe", "EU-WEST": "Western Europe",
+    "EU-SOUTH": "Southern Europe", "EU-EAST": "Eastern Europe",
+    "NA-NORTH": "Northern America", "NA-CENTRAL": "Central America",
+    "NA-CARIBBEAN": "Caribbean",
+    "SA-NORTH": "Northern South America", "SA-BRAZIL": "Brazil",
+    "SA-SOUTH": "Southern South America",
+    "AF-NORTH": "Northern Africa", "AF-WEST": "Western Africa",
+    "AF-CENTRAL": "Central Africa", "AF-EAST": "Eastern Africa",
+    "AF-SOUTH": "Southern Africa",
+    "AS-EAST": "Eastern Asia", "AS-SOUTHEAST": "Southeast Asia",
+    "AS-SOUTH": "Southern Asia", "AS-CENTRAL": "Central Asia",
+    "AS-WEST": "Western Asia", "AS-NORTH": "Northern Asia",
+    "OC-AUSTRALASIA": "Australasia", "OC-MELANESIA": "Melanesia",
+    "OC-MICRONESIA": "Micronesia", "OC-POLYNESIA": "Polynesia",
+    "AN": "Antarctica",
+}
+
+
+def _bundled_continents_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "ebird" / "continents.csv"
+
+
+def _load_continent_pools() -> dict[str, dict]:
+    """Build continent + subcontinent pools from the bundled continents.csv.
+
+    Skips a pool whose code already exists (SEA, EUROPE) or whose member set
+    duplicates an existing pool (AS-SOUTHEAST is the SEA pool); aliased
+    subcontinents (POOL_ALIASES) are not re-created either.
+    """
+    pools: dict[str, dict] = {}
+    path = _bundled_continents_path()
+    if not path.is_file():
+        return pools
+    by_cont: dict[str, set[str]] = defaultdict(set)
+    by_sub: dict[str, set[str]] = defaultdict(set)
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            code = (row.get("code") or "").strip().upper()
+            cont = (row.get("continent") or "").strip().upper()
+            sub = (row.get("subcontinent") or "").strip().upper()
+            if not code:
+                continue
+            if cont:
+                by_cont[cont].add(code)
+            if sub:
+                by_sub[sub].add(code)
+
+    existing_member_sets = {frozenset(info["members"]) for info in POOLS.values()}
+
+    def add(code: str, name: str, members: set[str]):
+        ms = frozenset(members)
+        if code in POOLS or ms in existing_member_sets:
+            return
+        pools[code] = {"name": name, "members": sorted(members)}
+        existing_member_sets.add(ms)
+
+    for cont, members in sorted(by_cont.items()):
+        add(cont, CONTINENT_NAMES.get(cont, cont), members)
+    for sub, members in sorted(by_sub.items()):
+        if sub in POOL_ALIASES:
+            continue                     # AS-SOUTHEAST is the SEA pool
+        add(sub, SUB_NAMES.get(sub, sub), members)
+    return pools
+
+
+POOLS.update(_load_continent_pools())
+
+
+_country_continent: dict[str, str] | None = None
+
+
+def country_continent_map() -> dict[str, str]:
+    """country code -> continent pool code, from the bundled reference."""
+    global _country_continent
+    if _country_continent is None:
+        m: dict[str, str] = {}
+        path = _bundled_continents_path()
+        if path.is_file():
+            with open(path, newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    code = (row.get("code") or "").strip().upper()
+                    cont = (row.get("continent") or "").strip().upper()
+                    if code and cont:
+                        m[code] = cont
+        _country_continent = m
+    return _country_continent
+
 
 _countries_cache: dict[Path, dict[str, str]] = {}
 
@@ -158,10 +256,13 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
             return "country", u, COUNTRIES[u]["name"]
         if u in POOLS:
             return "region", u, POOLS[u]["name"]
+        if u in POOL_ALIASES:
+            tgt = POOL_ALIASES[u]
+            return "region", tgt, POOLS[tgt]["name"]
         if u in countries:
             return "country", u, countries[u]          # any ISO country
         raise ValueError(f"unknown country/region code: {t[0]!r} "
-                         f"(registry: {', '.join(sorted(set(COUNTRIES) | set(POOLS)))}; "
+                         f"(registry: {', '.join(sorted(set(COUNTRIES) | set(POOLS) | set(POOL_ALIASES)))}; "
                          f"see `birdid --list downloadable` for all eBird countries)")
     if len(t) == 2:
         kind, u = t[0].lower(), t[1].upper()
@@ -174,6 +275,9 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
         if kind == "region":
             if u in POOLS:
                 return "region", u, POOLS[u]["name"]
+            if u in POOL_ALIASES:
+                tgt = POOL_ALIASES[u]
+                return "region", tgt, POOLS[tgt]["name"]
             raise ValueError(f"unknown region/pool: {t[1]!r} "
                              f"(known: {', '.join(sorted(POOLS))})")
         raise ValueError("--download's first value must be 'country' or 'region' "
@@ -568,8 +672,10 @@ def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
     generated_dir = data_dir / GENERATED_DIR
 
     member_of: dict[str, str] = {}
-    for pool, info in POOLS.items():
-        for m in info["members"]:
+    # most specific pool wins: iterate largest first so the smallest pool a
+    # country belongs to is assigned last (e.g. SG shows SEA, not whole AS).
+    for pool in sorted(POOLS, key=lambda c: len(POOLS[c]["members"]), reverse=True):
+        for m in POOLS[pool]["members"]:
             member_of[m] = pool
 
     rest = [t for t in tokens if t != "downloadable"]
@@ -615,7 +721,7 @@ def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
     print()
     print("  local = a region CSV already in the data dir: 'curated' = committed "
           "seed (no key), 'generated' = API-derived (gitignored, preferred);")
-    print("  pool = member of a --download pool (SEA/EUROPE).")
+    print("  pool = member of a --download pool (e.g. SEA, EUROPE, NA, AS-EAST).")
     print("  subnational regions:  birdid --list downloadable subnational1 <CODE>")
 
 
@@ -651,13 +757,28 @@ def list_regions(data_dir: Path, filter_tokens: list[str]):
         print()
 
     if show_pools:
+        continents = sorted(c for c in POOLS if c in CONTINENT_NAMES)
+        subcons = sorted(c for c in POOLS if c not in CONTINENT_NAMES)
         print("regions / pools (aggregate of member countries):")
-        for code in sorted(POOLS):
+        print("  continent pools:")
+        for code in continents:
             info = POOLS[code]
             src, n = region_table_info(curated_dir, generated_dir, code)
             tbl = f"{src} ({n} spp)" if src else "none"
-            print(f"  {code:<5} {info['name']:<22} table: {tbl:<20} "
+            print(f"    {code:<10} {info['name']:<22} table: {tbl:<18} "
                   f"members: {len(info['members'])} countries")
+        if subcons:
+            print("  subcontinent pools:")
+            for code in subcons:
+                info = POOLS[code]
+                cont = code.split("-")[0] if "-" in code else ""
+                src, n = region_table_info(curated_dir, generated_dir, code)
+                tbl = f"{src} ({n} spp)" if src else "none"
+                print(f"    {code:<14} {info['name']:<24} table: {tbl:<18} "
+                      f"members: {len(info['members'])} countries")
+        if POOL_ALIASES:
+            print(f"  alias: {', '.join(f'{a} -> {t}' for a, t in sorted(POOL_ALIASES.items()))} "
+                  f"(no separate table; downloads/uses the target pool)")
         print()
 
     key = get_api_key()

@@ -9,6 +9,9 @@
 #   birdid --download <code>           # write a real eBird table to the
 #                                      # gitignored regions_generated/ dir
 #                                      # (needs --api key; never committed)
+#   birdid --download region SA        # batch: whole continent/subcontinent
+#                                      # (NA/SA/AF/AS/OC, EU-NORTH, AS-SOUTHEAST,
+#                                      # NA-CARIBBEAN, ...) -- see --list region
 #   birdid --download taxonomy         # fetch the keyless eBird/Clements taxonomy
 #   birdid --api [<key>]               # store / show the eBird API key
 #   birdid --initialize                # one-time: taxonomy + BioCLIP 2 backends
@@ -46,6 +49,9 @@ if [ "$#" -eq 0 ]; then
     say "                                     (needs --api key; never committed)"
     say "  birdid --download taxonomy         fetch the keyless eBird/Clements"
     say "                                     taxonomy (no key needed)"
+    say "  birdid --download region SA        batch: whole continent/subcontinent"
+    say "                                     (NA/SA/AF/AS/OC, EU-NORTH,"
+    say "                                     AS-SOUTHEAST, NA-CARIBBEAN, ...)"
     say "  birdid --api [<key>]               store / show the eBird API key"
     say "  birdid --initialize                one-time: taxonomy + BioCLIP 2 backends"
     say "  birdid --list-candidates           inspect the region/month tables"

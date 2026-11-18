@@ -34,6 +34,7 @@ never committed - the committed repo contains only the curated, non-API seeds.
 | `eBird_Taxonomy_v2023.csv` | Full eBird/Clements taxonomy (~18.6k rows): canonical names + codes, used to normalise species names. **Not committed** (gitignored, re-fetchable). `curl -o eBird_Taxonomy_v2023.csv "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=csv"` (no key). | eBird API (keyless). |
 | `eBird-Clements_Integrated_Checklist.csv` | **Committed** bundled Clements checklist (version-agnostic name). Offline taxonomy fallback (same 18,631 common→scientific pairs as v2023) and the source of the **Avibase ids** (`taxon concept ID` column, `https://avibase.ca/<id>`) for every top guess. To use a newer release, replace this file (see "Updating the taxonomy" below). | Cornell Clements checklist download. |
 | `countries.csv` | Bundled ISO country reference (250 codes) for `--list downloadable` (offline). | ISO 3166. |
+| `continents.csv` | **Committed** static continent/subcontinent reference (250 codes): `code,continent,subcontinent`. Builds the continent + subcontinent **pools** (NA/SA/AF/AS/OC, EU-NORTH, AS-SOUTHEAST, ...) for `--download region <code>` batch downloads and maps every country to its continent pool for the two-tier fallback. Pure standard geography - **not** eBird API data. | ISO 3166 + standard geographic groupings. |
 
 ## Region CSV schema
 
@@ -67,6 +68,28 @@ The repo ships exactly two curated seeds: **EUROPE** and **SEA**. No-key runs:
 3. Download a table: `birdid --download SG` (or `--download country SG`,
    `--download region SEA`, `--download FR`, ...). Subnational codes work too
    (`--download country DE-BY`).
+
+Batch-download a whole continent or subcontinent at once (from the bundled
+`continents.csv` reference):
+
+```bash
+birdid --download region SA         # South America (14 countries)
+birdid --download region NA         # North America (41 countries)
+birdid --download region AF         # Africa (58 countries)
+birdid --download region AS         # Asia (52 countries)
+birdid --download region OC         # Oceania (28 countries)
+birdid --download region AS-SOUTHEAST   # = SEA (aliased; same pool)
+birdid --download region EU-NORTH       # Northern Europe subcontinent
+birdid --download region NA-CARIBBEAN   # Caribbean subcontinent
+birdid --download region SA-BRAZIL      # Brazil (1 country)
+```
+
+`birdid --list region` shows every continent + subcontinent pool, how many
+member countries each has, and which have a local table. `AS-SOUTHEAST` is an
+alias for the existing `SEA` pool (no duplicate table); every other subcontinent
+(e.g. `EU-NORTH`, `NA-CARIBBEAN`, `AS-EAST`, `AF-WEST`, `OC-POLYNESIA`) is its
+own pool. Invalid member codes (ISO codes the eBird API doesn't know, or
+territories without an eBird region) are skipped gracefully during the download.
 
 How the real data is fetched:
 
