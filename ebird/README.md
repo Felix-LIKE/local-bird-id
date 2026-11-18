@@ -6,7 +6,8 @@ What's here and where it comes from.
 
 | File | What it is | Source |
 |---|---|---|
-| `eBird_Taxonomy_v2023.csv` | The full eBird/Clements taxonomy (~18.6k rows): canonical species names + eBird codes, used to normalise species names in the pipeline. **Not committed to git** (gitignored) - it is a downloaded data artifact. Fetched by `birdid --initialize` / `birdid --download-backends`; regenerate with: `curl -o eBird_Taxonomy_v2023.csv "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=csv"` (no key needed). | Official eBird API. |
+| `eBird_Taxonomy_v2023.csv` | The full eBird/Clements taxonomy (~18.6k rows): canonical species names + eBird codes, used to normalise species names in the pipeline. **Not committed to git** (gitignored) - it is a downloaded data artifact. Fetched by `birdid --initialize`; regenerate with: `curl -o eBird_Taxonomy_v2023.csv "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=csv"` (no key needed). | Official eBird API. |
+| `eBird-Clements_v2026_integrated-checklist-October-2026.csv` | The full Clements v2026 integrated checklist (Oct 2026, ~36k rows incl. subspecies/families). **Committed to git** as the offline fallback: if the v2023 file isn't present, the pipeline uses this (its species-level names are identical: 18,631 common→scientific pairs), so installs with no API/network access still get scientific names. | Downloaded from the Cornell Clements checklist. |
 | `regions/DE.csv`, `regions/SG.csv`, `regions/TH.csv` | "Which species are present in which month" for each country — the GPS+time prior that narrows the classifier's candidate list. | Shipped as curated seed lists (field-guide knowledge); `birdid --download <code>` overwrites them **in place** with real eBird observation data when an API key is configured (see below). |
 | `regions/SEA.csv`, `regions/EUROPE.csv` | Wider regional pools (Southeast Asia / Europe) used by the pipeline's two-tier fallback when the country list yields no confident answer ("birds don't respect borders"). Same CSV schema. | Curated seed lists (Robson / Mackinnon & Phillipps / Svensson / Collins); `birdid --download` regenerates from the member countries. |
 
@@ -39,14 +40,20 @@ The curated lists cover only common species. To replace them with real data:
 How the real data is fetched:
 
 - for each month it calls the **historic observations** endpoint
-  (`GET /v2/data/obs/{regionCode}/historic/{date}`) on `--sample-dates`
-  (default 2) dates per month of `--year` (default 2025), and
+  (`GET /v2/data/obs/{regionCode}/historic/{y}/{m}/{d}` - the date is three path
+  segments) on `--sample-dates` (default 2) dates per month of `--year`
+  (default 2025), and
 - aggregates which species were actually reported in each month → rewrites the
   `regions/<code>.csv` table in place (status `resident` if present all 12
   sampled months, else `seasonal`).
 - A country downloads that country; a pool (SEA / EUROPE) unions the monthly
   presence of all its member countries.
 - Rate-limit guard: `--api-delay` seconds between calls (default 1.5).
+
+`birdid --list downloadable` shows every eBird country (from the bundled ISO
+reference) plus, with the API key, a country's subregions
+(`--list downloadable subnational1 DE`); any listed code works with
+`birdid --download country <CODE>`.
 
 Generated tables are real eBird data and become the new committed source for
 that region (curated seeds remain the no-key fallback). Revert with

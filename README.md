@@ -64,6 +64,8 @@ pipeline/birdid --list-candidates           # inspect region/month tables
 pipeline/birdid --list              # what countries/regions can be downloaded
 pipeline/birdid --list country      # countries only
 pipeline/birdid --list region       # pools (SEA / EUROPE) only
+pipeline/birdid --list downloadable # every eBird country (offline reference)
+pipeline/birdid --list downloadable subnational1 DE   # a country's subregions (API)
 
 # optional: bring your own eBird API key to prefer real data
 pipeline/birdid --api               # show current key status
@@ -80,6 +82,9 @@ pipeline/birdid --download region   # default region's pool (DE -> EUROPE)
   shipped curated seed - the no-key fallback.
 - Tune the sampling: `--sample-dates 2` (dates/month), `--year 2025`,
   `--api-delay 1.5` (seconds between calls, rate-limit guard).
+- The species tables use the canonical eBird names; the bundled Clements v2026
+  checklist (`ebird/eBird-Clements_v2026_integrated-checklist-October-2026.csv`)
+  serves as the scientific-name taxonomy for installs with no API/network access.
 
 > Re-tagging a folder: a capture is *done* once its `<base>.xmp` exists, so a
 > rerun skips it. Delete the stale sidecars (+ `birdid_manifest.json` +

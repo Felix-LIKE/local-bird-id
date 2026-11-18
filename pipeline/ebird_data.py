@@ -29,6 +29,7 @@ Commands
 
 from __future__ import annotations
 
+import csv
 import os
 import time
 from collections import defaultdict
@@ -47,6 +48,10 @@ KEY_PATH = CONFIG_DIR / "ebird_api_key"
 DEFAULT_YEAR = 2025                   # complete year with good coverage
 DEFAULT_SAMPLE_DATES = 2              # sample dates per month
 DEFAULT_API_DELAY = 1.5               # seconds between API calls (rate limit)
+
+# taxonomy file names (single source of truth; birdid.py imports these)
+TAXONOMY_2023 = "eBird_Taxonomy_v2023.csv"          # eBird API download (gitignored)
+TAXONOMY_2026 = "eBird-Clements_v2026_integrated-checklist-October-2026.csv"  # bundled offline fallback
 
 # BioCLIP 2 coarse stage-1 categories (single source of truth; birdid.py's
 # BioclipClassifier imports this so --initialize pre-downloads the same model).
@@ -84,16 +89,42 @@ POOLS = {
 }
 
 
-def resolve_spec(tokens: list[str]):
+_countries_cache: dict[Path, dict[str, str]] = {}
+
+
+def load_countries(data_dir: Path) -> dict[str, str]:
+    """code -> country name, from the bundled ISO reference (ebird/countries.csv).
+
+    Covers every eBird country code (`birdid --list downloadable` shows them).
+    """
+    data_dir = Path(data_dir)
+    if data_dir in _countries_cache:
+        return _countries_cache[data_dir]
+    out: dict[str, str] = {}
+    path = data_dir / "countries.csv"
+    if path.is_file():
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                code = (row.get("code") or "").strip().upper()
+                name = (row.get("name") or code).strip()
+                if code and len(code) == 2:
+                    out[code] = name
+    _countries_cache[data_dir] = out
+    return out
+
+
+def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
     """Turn `--download` args into (kind, code, label).
 
     Accepted forms:
-      ['SG']                  bare registry code (country or pool)
+      ['SG']                  bare code (registry country, pool, or any ISO
+                              country in the bundled reference)
       ['country']             default country (DEFAULT_REGION)
       ['region']              pool of the default country
-      ['country', 'SG']       explicit country (any eBird country code)
+      ['country', 'SG']       explicit country (any eBird country/subnational code)
       ['region', 'SEA']       explicit pool
     """
+    countries = countries or {}
     t = [x.strip() for x in tokens if x.strip()]
     if not t:
         raise ValueError("--download needs a country/region code (try: --download SG, "
@@ -110,14 +141,19 @@ def resolve_spec(tokens: list[str]):
             return "country", u, COUNTRIES[u]["name"]
         if u in POOLS:
             return "region", u, POOLS[u]["name"]
+        if u in countries:
+            return "country", u, countries[u]          # any ISO country
         raise ValueError(f"unknown country/region code: {t[0]!r} "
-                         f"(known: {', '.join(sorted(set(COUNTRIES) | set(POOLS)))})")
+                         f"(registry: {', '.join(sorted(set(COUNTRIES) | set(POOLS)))}; "
+                         f"see `birdid --list downloadable` for all eBird countries)")
     if len(t) == 2:
         kind, u = t[0].lower(), t[1].upper()
         if kind == "country":
             if u in COUNTRIES:
                 return "country", u, COUNTRIES[u]["name"]
-            return "country", u, u          # arbitrary eBird country code
+            if u in countries:
+                return "country", u, countries[u]
+            return "country", u, u          # arbitrary eBird country/subnational code
         if kind == "region":
             if u in POOLS:
                 return "region", u, POOLS[u]["name"]
@@ -235,12 +271,21 @@ def region_exists(code: str, key: str) -> bool:
 
 
 def download_taxonomy(data_dir: Path) -> Path:
+    """Ensure a taxonomy is available. Prefers the eBird API v2023 file; falls
+    back to the bundled Clements v2026 checklist (offline installs with no API
+    access); only downloads if neither is present."""
     import requests
-    dest = Path(data_dir) / "eBird_Taxonomy_v2023.csv"
+    data_dir = Path(data_dir)
+    dest = data_dir / TAXONOMY_2023
     if dest.exists() and dest.stat().st_size > 100_000:
         print(f"birdid: taxonomy already present: {dest} "
               f"({dest.stat().st_size // 1024} KiB) - keeping it.")
         return dest
+    bundled = data_dir / TAXONOMY_2026
+    if bundled.exists():
+        print(f"birdid: no download needed - using the bundled taxonomy "
+              f"{bundled.name} (Clements v2026) for offline installs.")
+        return bundled
     print(f"birdid: downloading eBird taxonomy -> {dest} ...", flush=True)
     r = requests.get(TAXONOMY_URL, timeout=120)
     r.raise_for_status()
@@ -253,20 +298,24 @@ def download_taxonomy(data_dir: Path) -> Path:
 # Historic-observation sampling -> species-per-month
 # ---------------------------------------------------------------------------
 
-def sample_dates_for_month(year: int, month: int, n: int) -> list[str]:
-    """`n` roughly-even dates within a month, returned as YYYY-MM-DD strings."""
+def sample_dates_for_month(year: int, month: int, n: int) -> list[tuple[int, int, int]]:
+    """`n` roughly-even dates within a month, returned as (year, month, day)."""
     import calendar
     last = calendar.monthrange(year, month)[1]
     days = []
     for i in range(n):
         d = int(round((i + 1) * (last + 1) / (n + 1)))
         days.append(max(1, min(last, d)))
-    return [f"{year}-{month:02d}-{d:02d}" for d in days]
+    return [(year, month, d) for d in days]
 
 
-def historic_obs(region_code: str, date: str, key: str) -> list[str]:
-    """Species common names reported in `region_code` on `date`."""
-    url = f"{API_BASE}/data/obs/{region_code}/historic/{date}"
+def historic_obs(region_code: str, year: int, month: int, day: int, key: str) -> list[str]:
+    """Species common names reported in `region_code` on a historic date.
+
+    URL shape: /v2/data/obs/{regionCode}/historic/{y}/{m}/{d}
+    (the date is three path segments, not a single YYYY-MM-DD string).
+    """
+    url = f"{API_BASE}/data/obs/{region_code}/historic/{year}/{month}/{day}"
     data = http_get_json(url, {"X-eBirdApiToken": key})
     names = [d.get("comName") for d in data if isinstance(d, dict) and d.get("comName")]
     return [n for n in names if n]
@@ -283,12 +332,12 @@ def sample_months(region_code: str, key: str, year: int, sample_dates: int,
     total = 12 * sample_dates
     done = 0
     for month in range(1, 13):
-        for date in sample_dates_for_month(year, month, sample_dates):
-            for name in historic_obs(region_code, date, key):
+        for y, m, d in sample_dates_for_month(year, month, sample_dates):
+            for name in historic_obs(region_code, y, m, d, key):
                 sp_months[name].add(month)
             done += 1
             if progress:
-                progress(region_code, done, total, date)
+                progress(region_code, done, total, f"{y}-{m:02d}-{d:02d}")
     return dict(sp_months)
 
 
@@ -306,7 +355,7 @@ def write_region_csv(path: Path, region: str, sp_months: dict[str, set[int]],
         f"Generated from real eBird API historic observations by `birdid --download` "
         f"on {datetime.now():%Y-%m-%d}.",
         f"Region: {region} ({label}). Source: "
-        f"{API_BASE}/data/obs/.../historic/<date>.",
+        f"{API_BASE}/data/obs/.../historic/{{y}}/{{m}}/{{d}}.",
         f"Sample strategy: {sample_dates} date(s) per month in {year}; a species is "
         f"'present' in a month if reported on any sampled date of that month.",
     ]
@@ -336,7 +385,7 @@ def write_region_csv(path: Path, region: str, sp_months: dict[str, set[int]],
 
 def download(data_dir: Path, tokens: list[str], year: int = DEFAULT_YEAR,
              sample_dates: int = DEFAULT_SAMPLE_DATES, key: str | None = None):
-    kind, code, label = resolve_spec(tokens)
+    kind, code, label = resolve_spec(tokens, load_countries(data_dir))
     data_dir = Path(data_dir)
     key = key or get_api_key()
 
@@ -417,10 +466,86 @@ def region_table_info(regions_dir: Path, region: str) -> tuple[bool, int]:
     return True, n
 
 
+def ebird_region_list(region_type: str, parent_code: str | None, key: str) -> list[dict]:
+    """eBird region reference list: GET /v2/ref/region/list/{type}[/{parent}]."""
+    url = f"{API_BASE}/ref/region/list/{region_type}"
+    if parent_code:
+        url += f"/{parent_code}"
+    data = http_get_json(url, {"X-eBirdApiToken": key})
+    return [d for d in data if isinstance(d, dict) and d.get("code")]
+
+
+def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
+    """`--list downloadable [subnational1 <CODE>]` - what can be downloaded.
+
+    Plain `downloadable` lists every eBird country from the bundled ISO
+    reference (offline, no key needed). `subnational1 <CODE>` /
+    `subnational2 <CODE>` lists a country's subregions via the API (needs key).
+    """
+    data_dir = Path(data_dir)
+    regions_dir = data_dir / "regions"
+
+    member_of: dict[str, str] = {}
+    for pool, info in POOLS.items():
+        for m in info["members"]:
+            member_of[m] = pool
+
+    rest = [t for t in tokens if t != "downloadable"]
+    if rest:
+        rtype = rest[0]
+        if rtype in ("subnational1", "subnational2"):
+            if not key:
+                print("birdid: --list downloadable %s needs your eBird API key "
+                      "(birdid --api <your-key>)" % rtype)
+                return
+            if len(rest) < 2:
+                print(f"birdid: --list downloadable {rtype} needs a parent country "
+                      f"code, e.g.  birdid --list downloadable {rtype} DE")
+                return
+            parent = rest[1].upper()
+            try:
+                rows = ebird_region_list(rtype, parent, key)
+            except RuntimeError as e:
+                print(f"birdid: ERROR: {e}")
+                return
+            print(f"eBird {rtype} regions of {parent} available to download "
+                  f"({len(rows)}):   birdid --download country <CODE>")
+            for r in sorted(rows, key=lambda d: d["code"]):
+                print(f"  {r['code']:<5} {r['name']}")
+            print()
+            print("  subnational codes download via:  birdid --download country <CODE>")
+            return
+        print(f"birdid: unknown downloadable filter {rest[0]!r} "
+              f"(use 'country' or 'subnational1 <CODE>'/'subnational2 <CODE>')")
+        return
+
+    # plain `downloadable` -> bundled ISO country reference (offline)
+    countries = load_countries(data_dir)
+    keyline = f" (API key ....{key[-4:]})" if key else " (no key - local reference)"
+    print(f"eBird countries available to download ({len(countries)}){keyline}:")
+    print("  birdid --download <CODE>   or   --download country <CODE>")
+    for code in sorted(countries):
+        name = countries[code]
+        present, n = region_table_info(regions_dir, code)
+        local = f"yes ({n} spp)" if present else "-"
+        pool = member_of.get(code, "-")
+        print(f"  {code:<5} {name:<34} local: {local:<13} pool: {pool}")
+    print()
+    print("  local = a region CSV already exists in the data dir; "
+          "pool = member of a --download pool (SEA/EUROPE).")
+    print("  subnational regions:  birdid --list downloadable subnational1 <CODE>")
+
+
 def list_regions(data_dir: Path, filter_tokens: list[str]):
     data_dir = Path(data_dir)
     regions_dir = data_dir / "regions"
-    kinds = {t.lower() for t in filter_tokens if t.strip().lower() in ("country", "region")}
+    lowered = [t.lower() for t in filter_tokens]
+
+    if "downloadable" in lowered:
+        list_downloadable(data_dir, lowered, get_api_key())
+        return
+
+    kinds = {t for t in lowered if t in ("country", "region")}
     show_countries = not kinds or "country" in kinds
     show_pools = not kinds or "region" in kinds
 

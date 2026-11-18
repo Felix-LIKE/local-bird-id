@@ -21,6 +21,7 @@ birdid /path/to/photos --max 10   # extra birdid.py args pass straight through
 birdid /path/to/photos --dry-run  # plan only, no model work
 birdid --list-candidates          # inspect the region/month tables
 birdid --list                     # what's available to download
+birdid --list downloadable        # every eBird country (offline reference)
 birdid --api [<key>]              # store / show the eBird API key
 birdid --download <code>          # regenerate a region table from real eBird data
 birdid --initialize               # one-time: taxonomy + BioCLIP 2 backends
@@ -43,6 +44,11 @@ folder**; they manage the eBird data used as the classifier's prior.
 - `--list [country|region]` prints the registry: the countries we ship seeds
   for (SG / TH / DE), the wider pools (SEA / EUROPE, by member countries),
   whether each table exists locally, and the API-key status.
+  `--list downloadable` shows every eBird country from the bundled ISO
+  reference (offline, no key); with the API key,
+  `--list downloadable subnational1 <CODE>` (or `subnational2`) lists a
+  country's subregions - any listed code works with
+  `--download country <CODE>`.
 - `--api <key>` stores your eBird API key in
   `~/.config/birdid/ebird_api_key` (chmod 600); bare `--api` shows the status.
 - `--download <code>` regenerates a region table **in place** from real eBird
@@ -150,13 +156,16 @@ today).
 ## Data
 
 - `eBird_Taxonomy_v2023.csv` - full official taxonomy (downloaded from the
-  eBird API, no key) used to normalise species names.
+  eBird API, no key) used to normalise species names; if absent, the bundled
+  Clements v2026 checklist (`eBird-Clements_v2026_integrated-checklist-October-2026.csv`)
+  is used instead (same 18,631 common→scientific pairs), so installs with no
+  API/network access still get scientific names.
 - `regions/DE.csv`, `regions/SG.csv`, `regions/TH.csv` - species-per-month
   country tables (the GPS+time prior). Shipped as curated seeds; `--download`
   regenerates them in place from real eBird observations with an API key.
 - `regions/SEA.csv`, `regions/EUROPE.csv` - wider regional pools used by the
   two-tier expansion above (the "neighbouring countries" fallback).
-  Species names in every table are the canonical eBird v2023 common names.
+  Species names in every table are the canonical eBird common names.
 
 ## Known limits
 

@@ -59,7 +59,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from ebird_data import COARSE_LABELS   # shared with --initialize (single source of truth)
+from ebird_data import COARSE_LABELS, TAXONOMY_2023, TAXONOMY_2026   # shared with --initialize/--download (single source of truth)
 
 # --------------------------------------------------------------------------
 # Config / defaults
@@ -161,14 +161,45 @@ class SpeciesDB:
         return sorted(self._table)
 
 
-def load_taxonomy(path: Path) -> dict[str, str]:
-    """Common-name -> scientific-name map from the eBird taxonomy CSV (optional)."""
+# v2026 'category' values that carry a real English common name for a bird
+# taxon; everything else in the integrated checklist is noise for name lookup
+# (subspecies rows, family rows, the citation header).
+_V2026_SKIP_CATEGORIES = {"subspecies", "family", ""}
+
+
+def find_taxonomy(data_dir: Path) -> Path | None:
+    """Best available taxonomy: the eBird API v2023 file, else the bundled
+    Clements v2026 integrated checklist (for installs without API access)."""
+    for name in (TAXONOMY_2023, TAXONOMY_2026):
+        p = Path(data_dir) / name
+        if p.is_file():
+            return p
+    return None
+
+
+def load_taxonomy(path: Path | None) -> dict[str, str]:
+    """Common-name -> scientific-name map from either eBird taxonomy format.
+
+    Handles both the eBird API CSV (COMMON_NAME / SCIENTIFIC_NAME, v2023) and
+    the Clements v2026 integrated checklist (English name / scientific name +
+    category), so installs without API/network access can use the bundled file.
+    """
     tax: dict[str, str] = {}
+    if not path:
+        return tax
     try:
-        with open(path, newline="", encoding="utf-8") as f:
+        with open(path, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
-                if row and row.get("COMMON_NAME") and row.get("SCIENTIFIC_NAME"):
-                    tax[row["COMMON_NAME"].strip()] = row["SCIENTIFIC_NAME"].strip()
+                if not row:
+                    continue
+                common = (row.get("COMMON_NAME") or row.get("English name") or "").strip()
+                sci = (row.get("SCIENTIFIC_NAME") or row.get("scientific name") or "").strip()
+                if not common or not sci:
+                    continue
+                if row.get("COMMON_NAME") is None:   # Clements v2026 format
+                    if (row.get("category") or "").strip() in _V2026_SKIP_CATEGORIES:
+                        continue
+                tax[common] = sci
     except OSError:
         pass
     return tax
@@ -954,7 +985,10 @@ def main():
                          "the curated seed is kept (no-key fallback).")
     ap.add_argument("--list", nargs="*", metavar="KIND",
                     help="list countries/regions available for download "
-                         "(optional filter: country | region)")
+                         "(optional filter: country | region; or 'downloadable' "
+                         "to show every eBird country via the API key, "
+                         "'downloadable subnational1 <CODE>' for a country's "
+                         "subregions)")
     ap.add_argument("--api", nargs="?", const="__show__", metavar="KEY",
                     help="store your eBird API key (--api <key>); bare --api shows status")
     ap.add_argument("--initialize", action="store_true",
@@ -1010,12 +1044,14 @@ def main():
 
     data_dir = Path(args.data_dir)
     regions_dir = data_dir / "regions"
-    taxonomy_path = data_dir / "eBird_Taxonomy_v2023.csv"
+    taxonomy_path = find_taxonomy(data_dir)
 
     db = SpeciesDB(regions_dir)
     db.load()
     taxonomy = load_taxonomy(taxonomy_path)
-    print(f"eBird tables: {', '.join(db.regions())}   taxonomy names: {len(taxonomy)}")
+    tax_src = taxonomy_path.name if taxonomy_path else "none"
+    print(f"eBird tables: {', '.join(db.regions())}   taxonomy: "
+          f"{tax_src} ({len(taxonomy)} names)")
 
     if args.list_candidates:
         for reg in db.regions():
