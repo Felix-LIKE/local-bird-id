@@ -53,6 +53,13 @@ DEFAULT_API_DELAY = 1.5               # seconds between API calls (rate limit)
 TAXONOMY_2023 = "eBird_Taxonomy_v2023.csv"          # eBird API download (gitignored)
 TAXONOMY_2026 = "eBird-Clements_v2026_integrated-checklist-October-2026.csv"  # bundled offline fallback
 
+# keyless taxonomy sources (no API key needed)
+CLEMENTS_V2026_URL = (
+    "https://www.birds.cornell.edu/clementschecklist/wp-content/uploads/"
+    "2026/11/eBird-Clements_v2026_integrated-checklist-October-2026.csv")
+_BROWSER_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+
 # BioCLIP 2 coarse stage-1 categories (single source of truth; birdid.py's
 # BioclipClassifier imports this so --initialize pre-downloads the same model).
 COARSE_LABELS = [
@@ -121,6 +128,7 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
                               country in the bundled reference)
       ['country']             default country (DEFAULT_REGION)
       ['region']              pool of the default country
+      ['taxonomy']            the eBird/Clements taxonomy (no key needed)
       ['country', 'SG']       explicit country (any eBird country/subnational code)
       ['region', 'SEA']       explicit pool
     """
@@ -128,7 +136,8 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
     t = [x.strip() for x in tokens if x.strip()]
     if not t:
         raise ValueError("--download needs a country/region code (try: --download SG, "
-                         "--download country SG, --download region SEA)")
+                         "--download country SG, --download region SEA, "
+                         "--download taxonomy)")
     if len(t) == 1:
         u = t[0].upper()
         if u == "COUNTRY":
@@ -137,6 +146,8 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
         if u == "REGION":
             code = COUNTRIES[DEFAULT_REGION]["pool"]
             return "region", code, POOLS[code]["name"]
+        if u == "TAXONOMY":
+            return "taxonomy", "", "eBird/Clements taxonomy"
         if u in COUNTRIES:
             return "country", u, COUNTRIES[u]["name"]
         if u in POOLS:
@@ -270,28 +281,66 @@ def region_exists(code: str, key: str) -> bool:
         return False
 
 
+def _taxonomy_present(path: Path) -> bool:
+    try:
+        return path.is_file() and path.stat().st_size > 100_000
+    except OSError:
+        return False
+
+
 def download_taxonomy(data_dir: Path) -> Path:
-    """Ensure a taxonomy is available. Prefers the eBird API v2023 file; falls
-    back to the bundled Clements v2026 checklist (offline installs with no API
-    access); only downloads if neither is present."""
+    """Ensure a taxonomy is available - every source is KEYLESS (no API key).
+
+    Preference: an existing v2023/v2026 file, then the Clements v2026
+    integrated checklist (Cornell), then the eBird API v2023 taxonomy, then -
+    if fully offline - clear manual download instructions (the Cornell page is
+    Cloudflare-protected and sometimes blocks scripted access).
+    """
     import requests
     data_dir = Path(data_dir)
-    dest = data_dir / TAXONOMY_2023
-    if dest.exists() and dest.stat().st_size > 100_000:
-        print(f"birdid: taxonomy already present: {dest} "
-              f"({dest.stat().st_size // 1024} KiB) - keeping it.")
-        return dest
-    bundled = data_dir / TAXONOMY_2026
-    if bundled.exists():
-        print(f"birdid: no download needed - using the bundled taxonomy "
-              f"{bundled.name} (Clements v2026) for offline installs.")
-        return bundled
-    print(f"birdid: downloading eBird taxonomy -> {dest} ...", flush=True)
-    r = requests.get(TAXONOMY_URL, timeout=120)
-    r.raise_for_status()
-    dest.write_bytes(r.content)
-    print(f"birdid: taxonomy saved: {dest} ({len(r.content) // 1024} KiB).")
-    return dest
+    v23 = data_dir / TAXONOMY_2023
+    v26 = data_dir / TAXONOMY_2026
+
+    if _taxonomy_present(v23):
+        print(f"birdid: taxonomy already present: {v23} "
+              f"({v23.stat().st_size // 1024} KiB) - keeping it.")
+        return v23
+    if _taxonomy_present(v26):
+        print(f"birdid: taxonomy already present: {v26} "
+              f"({v26.stat().st_size // 1024} KiB) - keeping it.")
+        return v26
+
+    # 1) newest + richest: Clements v2026 integrated checklist (Cornell, keyless)
+    try:
+        print("birdid: downloading the Clements v2026 checklist (no key needed) ...",
+              flush=True)
+        r = requests.get(CLEMENTS_V2026_URL, headers={"User-Agent": _BROWSER_UA},
+                         timeout=120)
+        r.raise_for_status()
+        v26.write_bytes(r.content)
+        print(f"birdid: saved {v26} ({len(r.content) // 1024} KiB, Clements v2026).")
+        return v26
+    except Exception as e:  # Cloudflare etc.
+        print(f"birdid: note: Cornell download not reachable "
+              f"({e.__class__.__name__}); trying the eBird API taxonomy instead.")
+
+    # 2) eBird API v2023 taxonomy (keyless, reliable)
+    try:
+        print("birdid: downloading the eBird API taxonomy (no key needed) ...",
+              flush=True)
+        r = requests.get(TAXONOMY_URL, timeout=120)
+        r.raise_for_status()
+        v23.write_bytes(r.content)
+        print(f"birdid: saved {v23} ({len(r.content) // 1024} KiB).")
+        return v23
+    except Exception as e:
+        print("birdid: ERROR: could not download a taxonomy - network unavailable.")
+        print("birdid: manual fallback (no API key needed):")
+        print(f"birdid:   1. open  {CLEMENTS_V2026_URL}")
+        print(f"birdid:   2. save the CSV as  {v26.name}")
+        print(f"birdid:   3. put it at  {v26}")
+        print("birdid: then rerun this command - it will use the file as-is.")
+        raise RuntimeError(f"no taxonomy available (network error: {e})") from e
 
 
 # ---------------------------------------------------------------------------
@@ -389,11 +438,29 @@ def download(data_dir: Path, tokens: list[str], year: int = DEFAULT_YEAR,
     data_dir = Path(data_dir)
     key = key or get_api_key()
 
+    if kind == "taxonomy":
+        # keyless: the eBird/Clements taxonomy (region tables still need a key)
+        try:
+            download_taxonomy(data_dir)
+        except RuntimeError as e:
+            print(f"birdid: ERROR: {e}")
+            return
+        if not key:
+            print("birdid: taxonomy is ready; region tables need an API key - "
+                  "get a free one at https://ebird.org/api/keygen, then "
+                  "birdid --api <your-key> and rerun --download <code>.")
+        return
+
     if not key:
+        # still fetch the keyless taxonomy so a no-key user gets at least that
+        try:
+            download_taxonomy(data_dir)
+        except RuntimeError as e:
+            print(f"birdid: ERROR: {e}")
         print(f"birdid: no API key configured - keeping the curated seed for "
               f"{code} ({label}).")
-        print("        without a key, --download uses the curated no-key data "
-              "(already in place).")
+        print("        without a key, --download can only fetch the taxonomy "
+              "(above); the species tables keep the curated no-key data.")
         print("        to fetch real eBird observations instead:")
         print("          birdid --api <your-ebird-key>   then rerun --download")
         return

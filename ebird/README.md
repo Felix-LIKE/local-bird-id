@@ -7,7 +7,7 @@ What's here and where it comes from.
 | File | What it is | Source |
 |---|---|---|
 | `eBird_Taxonomy_v2023.csv` | The full eBird/Clements taxonomy (~18.6k rows): canonical species names + eBird codes, used to normalise species names in the pipeline. **Not committed to git** (gitignored) - it is a downloaded data artifact. Fetched by `birdid --initialize`; regenerate with: `curl -o eBird_Taxonomy_v2023.csv "https://api.ebird.org/v2/ref/taxonomy/ebird?fmt=csv"` (no key needed). | Official eBird API. |
-| `eBird-Clements_v2026_integrated-checklist-October-2026.csv` | The full Clements v2026 integrated checklist (Oct 2026, ~36k rows incl. subspecies/families). **Committed to git** as the offline fallback: if the v2023 file isn't present, the pipeline uses this (its species-level names are identical: 18,631 common→scientific pairs), so installs with no API/network access still get scientific names. | Downloaded from the Cornell Clements checklist. |
+| `eBird-Clements_v2026_integrated-checklist-October-2026.csv` | The full Clements v2026 integrated checklist (Oct 2026, ~36k rows incl. subspecies/families). **Committed to git** as the offline fallback: if the v2023 file isn't present, the pipeline uses this (its species-level names are identical: 18,631 common→scientific pairs), so installs with no API/network access still get scientific names. Its `taxon concept ID` column (`avibase-XXXX...`) is also the source of the **Avibase ids** the pipeline surfaces for each top guess (`https://avibase.ca/<id>`). | Downloaded from the Cornell Clements checklist. |
 | `regions/DE.csv`, `regions/SG.csv`, `regions/TH.csv` | "Which species are present in which month" for each country — the GPS+time prior that narrows the classifier's candidate list. | Shipped as curated seed lists (field-guide knowledge); `birdid --download <code>` overwrites them **in place** with real eBird observation data when an API key is configured (see below). |
 | `regions/SEA.csv`, `regions/EUROPE.csv` | Wider regional pools (Southeast Asia / Europe) used by the pipeline's two-tier fallback when the country list yields no confident answer ("birds don't respect borders"). Same CSV schema. | Curated seed lists (Robson / Mackinnon & Phillipps / Svensson / Collins); `birdid --download` regenerates from the member countries. |
 
@@ -36,6 +36,21 @@ The curated lists cover only common species. To replace them with real data:
 3. Regenerate a table: `birdid --download SG` (or `--download country SG`,
    `--download region SEA`, ...). Without a key, `--download` keeps the
    curated seed (the no-key fallback); with a key it is preferred.
+
+### No API key? You still get the taxonomy
+
+The taxonomy never needs a key. `birdid --download taxonomy` (and any no-key
+`birdid --download ...`) ensures a taxonomy is present, trying in order:
+
+1. an existing `eBird_Taxonomy_v2023.csv` / bundled `eBird-Clements_v2026...csv`,
+2. the Clements v2026 integrated checklist direct from Cornell (keyless),
+3. the eBird API v2023 taxonomy (keyless),
+4. if the machine is fully offline: prints the download link
+   (`https://www.birds.cornell.edu/clementschecklist/download/`), the exact
+   filename to save (`eBird-Clements_v2026_integrated-checklist-October-2026.csv`)
+   and where to put it (`<data-dir>/`), so even a first-time user can complete
+   the install by hand. Region tables still need an API key (they keep the
+   curated seed without one).
 
 How the real data is fetched:
 

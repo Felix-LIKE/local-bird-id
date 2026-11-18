@@ -20,7 +20,8 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
 - **Data management built in**: `birdid --list`, `--download`, `--api` and
   `--initialize` turn `birdid` into a small eBird data CLI (see below).
 - **Common + scientific names**: every result is normalised against the official
-  eBird taxonomy (e.g. `Great Tit` / *`Parus major`*).
+  eBird taxonomy (e.g. `Great Tit` / *`Parus major`*), and the top guess links
+  to its **Avibase** species page (`https://avibase.ca/<id>`).
 - **Two-tier neighbour-region expansion**: birds don't respect borders - if the
   country list yields no confident answer, the photo is re-scored against the
   wider regional pool (Southeast Asia / Europe).
@@ -75,16 +76,25 @@ pipeline/birdid --api <your-key>    # store it (~/.config/birdid/ebird_api_key, 
 pipeline/birdid --download SG       # country  (or: --download country SG)
 pipeline/birdid --download SEA      # region   (or: --download region SEA)
 pipeline/birdid --download region   # default region's pool (DE -> EUROPE)
+
+# no key needed - fetch the keyless eBird/Clements taxonomy
+pipeline/birdid --download taxonomy
 ```
 
 - With an API key, `--download` overwrites the region CSV **in place** with real
   eBird data (it becomes the new committed source). Without a key it keeps the
-  shipped curated seed - the no-key fallback.
+  shipped curated seed - the no-key fallback, and fetches the **keyless
+  taxonomy** instead (`--download taxonomy`: Cornell Clements v2026 → eBird API
+  v2023, both keyless; fully offline it prints the download link + filename +
+  target path so the install can be completed by hand).
 - Tune the sampling: `--sample-dates 2` (dates/month), `--year 2025`,
   `--api-delay 1.5` (seconds between calls, rate-limit guard).
 - The species tables use the canonical eBird names; the bundled Clements v2026
   checklist (`ebird/eBird-Clements_v2026_integrated-checklist-October-2026.csv`)
-  serves as the scientific-name taxonomy for installs with no API/network access.
+  serves as the scientific-name taxonomy for installs with no API/network access,
+  and its `taxon concept ID` column provides the **Avibase link**
+  (`https://avibase.ca/<id>`) recorded for every top guess (sidecar + report +
+  manifest + console).
 
 > Re-tagging a folder: a capture is *done* once its `<base>.xmp` exists, so a
 > rerun skips it. Delete the stale sidecars (+ `birdid_manifest.json` +

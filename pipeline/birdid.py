@@ -69,6 +69,12 @@ DEFAULT_DATA_DIR = "/data/offline-data/bird/ebird"
 DEFAULT_REGION = "DE"
 PIPELINE_VERSION = "1"
 
+# Avibase species-page URL. The Clements v2026 checklist carries each species'
+# 'taxon concept ID' (e.g. 'avibase-0DF27D63'); we surface the link for the
+# highest-confidence guess so the user can look up full details there.
+# Short form https://avibase.ca/<id> redirects to the full bsc-eoc.org page.
+AVIBASE_URL = "https://avibase.ca/"
+
 # Image extensions the scanner understands. Keep the first two groups as the
 # "viewable" set used for vision input; the rest are RAW-only (embedded preview).
 VIEWABLE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
@@ -229,6 +235,54 @@ def normalize_species(name: str, tax: dict[str, str]):
             if cl != nl and cl.endswith(nl):
                 return common, sci
     return name, ""
+
+
+# --------------------------------------------------------------------------
+# Avibase (from the bundled Clements v2026 checklist)
+# --------------------------------------------------------------------------
+
+def load_avibase(data_dir: Path) -> tuple[dict[str, str], dict[str, str]]:
+    """(sci-name -> Avibase id, common-name -> Avibase id).
+
+    The Avibase taxon concept ID only exists in the bundled Clements v2026
+    integrated checklist ('taxon concept ID' column, e.g. 'avibase-0DF27D63');
+    the eBird API v2023 taxonomy has no such column. The stored id is the bare
+    form ('0DF27D63') used by both the short link (avibase.ca/<id>) and the
+    full page (species.jsp?avibaseid=<id>). Both dicts are empty when the v2026
+    file isn't present, so the link is simply omitted.
+    """
+    by_sci: dict[str, str] = {}
+    by_common: dict[str, str] = {}
+    p = Path(data_dir) / TAXONOMY_2026
+    if not p.is_file():
+        return by_sci, by_common
+    try:
+        with open(p, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                if not row:
+                    continue
+                if (row.get("category") or "").strip() != "species":
+                    continue
+                cid = (row.get("taxon concept ID") or "").strip()
+                if not cid.startswith("avibase-"):
+                    continue
+                cid = cid[len("avibase-"):]        # store the bare id (0DF27D63)
+                sci = (row.get("scientific name") or "").strip()
+                common = (row.get("English name") or "").strip()
+                if sci:
+                    by_sci[sci] = cid
+                if common:
+                    by_common[common] = cid
+    except OSError:
+        pass
+    return by_sci, by_common
+
+
+def avibase_url_for(by_sci: dict[str, str], by_common: dict[str, str],
+                    scientific: str, common: str) -> str:
+    """Avibase page URL for the top guess; '' when the id is unknown."""
+    cid = by_sci.get(scientific or "") or by_common.get(common or "") or ""
+    return f"{AVIBASE_URL}{cid}" if cid else ""
 
 # --------------------------------------------------------------------------
 # EXIF
@@ -653,7 +707,8 @@ def sidecar_done(sidecar: Path) -> bool:
 
 
 def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
-                  dt: datetime, status: str, cfg, error: str = None, scientific: str = ""):
+                  dt: datetime, status: str, cfg, error: str = None, scientific: str = "",
+                  avibase_url: str = "", avibase_id: str = ""):
     """Create/merge an XMP sidecar at `sidecar`. Originals are never touched."""
     from lxml import etree
     root = _xmp_tree(sidecar)
@@ -687,6 +742,10 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
         _set_text(desc, "topSpecies", BIRD_NS, species)
         if scientific:
             _set_text(desc, "scientificName", BIRD_NS, scientific)
+        if avibase_id:
+            _set_text(desc, "avibaseId", BIRD_NS, avibase_id)
+        if avibase_url:
+            _set_text(desc, "avibaseUrl", BIRD_NS, avibase_url)
         _set_text(desc, "topConfidence", BIRD_NS, f"{confidence:.2f}")
         _set_text(desc, "status", BIRD_NS, status)
         _set_text(desc, "pipelineVersion", BIRD_NS, PIPELINE_VERSION)
@@ -703,6 +762,8 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
             note += "; alternatives: " + ", ".join(alts[:3])
         if reasoning:
             note += f" - {reasoning}"
+        if avibase_url:
+            note += f" | Avibase: {avibase_url}"
         _set_text(desc, "description", _nsmap()["dc"], note)
 
         # dc:subject -> Birds/<species> keywords (convenience, IMatch-managed)
@@ -941,14 +1002,15 @@ def stage_hint(stage: str) -> str:
     return hints.get(stage, "")
 
 
-def fmt_result(result: dict, scientific: str = "") -> str:
+def fmt_result(result: dict, scientific: str = "", avibase_url: str = "") -> str:
     if not result:
         return "no result"
     c = float(result.get("confidence", 0.0))
     name = result.get("species", "?")
-    if scientific:
-        return f"{name} ({scientific}) {c*100:.0f}%"
-    return f"{name} ({c*100:.0f}%)"
+    base = f"{name} ({scientific}) {c*100:.0f}%" if scientific else f"{name} ({c*100:.0f}%)"
+    if avibase_url:
+        base += f" | avibase: {avibase_url}"
+    return base
 
 # --------------------------------------------------------------------------
 # Main pipeline
@@ -981,8 +1043,10 @@ def main():
                     help="regenerate a region table from real eBird observations, "
                          "in place. SPEC is a code (SG/TH/DE/SEA/EUROPE), optionally "
                          "as 'country CODE' or 'region CODE'; bare 'country'/'region' "
-                         "use the defaults. Needs an API key (--api); without one "
-                         "the curated seed is kept (no-key fallback).")
+                         "use the defaults; 'taxonomy' (or any no-key run) fetches "
+                         "the keyless eBird/Clements taxonomy. Needs an API key "
+                         "(--api) for region tables; without one the curated seed "
+                         "is kept (no-key fallback).")
     ap.add_argument("--list", nargs="*", metavar="KIND",
                     help="list countries/regions available for download "
                          "(optional filter: country | region; or 'downloadable' "
@@ -1052,6 +1116,11 @@ def main():
     tax_src = taxonomy_path.name if taxonomy_path else "none"
     print(f"eBird tables: {', '.join(db.regions())}   taxonomy: "
           f"{tax_src} ({len(taxonomy)} names)")
+
+    avibase_sci, avibase_common = load_avibase(data_dir)
+    if avibase_sci:
+        print(f"Avibase: {len(avibase_sci)} species ids loaded "
+              f"({AVIBASE_URL}<id>)")
 
     if args.list_candidates:
         for reg in db.regions():
@@ -1175,6 +1244,9 @@ def main():
                         scientific = result["scientific"]
                     if scientific:
                         result["scientific"] = scientific
+                    avibase_url = avibase_url_for(avibase_sci, avibase_common,
+                                                  scientific, species)
+                    avibase_id = avibase_url[len(AVIBASE_URL):] if avibase_url else ""
                     confidence = float(result.get("confidence", 0.0))
                     if species not in ("unknown", "") and scientific == "" and taxonomy:
                         tui.plain_line(f"  note: '{species}' not in eBird taxonomy - check spelling")
@@ -1182,12 +1254,14 @@ def main():
                     status = "done" if confidence >= args.min_confidence else "low-confidence"
                     tui.set(stage="sidecar", message=f"writing {sidecar.name}")
                     write_sidecar(sidecar, result, region, month, dt, status, args,
-                                  scientific=scientific)
+                                  scientific=scientific, avibase_url=avibase_url,
+                                  avibase_id=avibase_id)
                     manifest[str(sidecar)] = {
                         "files": [str(f) for f in cap_files],
                         "sidecar": str(sidecar), "region": region, "month": month,
                         "gps": gps_src, "date_source": date_src,
                         "species": species, "scientific": scientific, "confidence": confidence,
+                        "avibase_id": avibase_id, "avibase_url": avibase_url,
                         "status": status, "classifier": classifier.describe(),
                         "pipelineVersion": PIPELINE_VERSION,
                         "ts": datetime.now().isoformat(timespec="seconds"),
@@ -1201,9 +1275,10 @@ def main():
                         "status": status, "gps": gps_src, "date_source": date_src,
                         "alternatives": "; ".join(result.get("alternatives", [])),
                         "reasoning": result.get("reasoning", ""),
+                        "avibase_url": avibase_url,
                         "datetime": dt.strftime("%Y-%m-%d %H:%M") if dt else "",
                     })
-                    last = fmt_result(result, scientific)
+                    last = fmt_result(result, scientific, avibase_url)
                     done_n += 1
                 except Exception as e:  # noqa: BLE001
                     status = "error"
@@ -1221,7 +1296,8 @@ def main():
                         report_rows.append({"capture": cap.base, "file": str(primary), "viewable": primary.name,
                                             "region": "", "month": "", "species": "", "scientific_name": "",
                                             "confidence": "", "status": "error", "gps": "", "date_source": "",
-                                            "alternatives": "", "reasoning": str(e)[:500], "datetime": ""})
+                                            "alternatives": "", "reasoning": str(e)[:500], "avibase_url": "",
+                                            "datetime": ""})
                     except Exception as e2:  # noqa: BLE001
                         last = f"ERROR (write failed too): {e2}"
                         tui.plain_line(f"  {last}")

@@ -24,6 +24,7 @@ birdid --list                     # what's available to download
 birdid --list downloadable        # every eBird country (offline reference)
 birdid --api [<key>]              # store / show the eBird API key
 birdid --download <code>          # regenerate a region table from real eBird data
+birdid --download taxonomy        # fetch the keyless eBird/Clements taxonomy
 birdid --initialize               # one-time: taxonomy + BioCLIP 2 backends
 ```
 
@@ -56,6 +57,12 @@ folder**; they manage the eBird data used as the classifier's prior.
   by default, `--year 2025`) and unions the species actually reported that
   month. A country downloads that country; a pool aggregates its member
   countries. With no key it keeps the curated seed (the no-key fallback).
+- `--download taxonomy` (and any no-key `--download`) fetches the **keyless**
+  eBird/Clements taxonomy: it tries the Clements v2026 integrated checklist
+  (Cornell) first, then the eBird API v2023 taxonomy (neither needs a key). If
+  the machine is fully offline it prints the download link + the filename to
+  save + where to put it, so a no-experience user can still complete the
+  install manually.
 - `--initialize` downloads the eBird taxonomy (no key) and the BioCLIP 2 +
   TreeOfLife backends once, so everything afterwards works offline.
 
@@ -131,10 +138,13 @@ One sidecar per capture, `<base>.xmp` (e.g. `IMG_1234.xmp` for
 
 `bird:species` (Seq), `bird:confidence` (Seq), `bird:summary`
 ("Great Tit 95% | ..."), `bird:topSpecies`, `bird:scientificName`
-(e.g. `Parus major`), `bird:topConfidence`,
+(e.g. `Parus major`), `bird:avibaseId` (e.g. `E15BC0CB`), `bird:avibaseUrl`
+(short link `https://avibase.ca/E15BC0CB` → the Avibase species page for the
+top guess), `bird:topConfidence`,
 `bird:status` (done / low-confidence / error), `bird:pipelineVersion`,
 `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning`,
-`dc:description` (includes the scientific name), and `dc:subject` keywords
+`dc:description` (includes the scientific name, and the Avibase link), and
+`dc:subject` keywords
 `Birds/<species>`. Register `http://ns.birdpipeline/1.0/` as a custom metadata
 panel in IMatch.
 
@@ -142,16 +152,20 @@ Names are normalised against the official eBird taxonomy: the model's answer is
 matched case-insensitively, a scientific-name answer is converted back to the
 common name, and dropped leading qualifiers are restored (e.g. "Blue Tit" ->
 "Eurasian Blue Tit", *Cyanistes caeruleus*). Unmatched names keep a blank
-scientific field and a "check spelling" note.
+scientific field and a "check spelling" note. The Avibase id comes from the
+bundled Clements v2026 checklist ('taxon concept ID' column); when that file is
+missing the Avibase fields are simply omitted. The same link is printed on the
+per-capture console line and stored in the report + manifest.
 
 ## Report (CSV)
 
 `<folder>/birdid_report.csv` has one row per capture: `capture, file,
 viewable, region, month, species, scientific_name, confidence, status, gps,
-date_source, alternatives, reasoning, datetime`. Both `species` (common) and
-`scientific_name` are always recorded; `gps` / `date_source` say where the
-location and date came from (embedded / folder-mean / none and exif / folder /
-today).
+date_source, alternatives, reasoning, avibase_url, datetime`. Both `species`
+(common) and `scientific_name` are always recorded; `gps` / `date_source` say
+where the location and date came from (embedded / folder-mean / none and exif /
+folder / today), and `avibase_url` is the Avibase page for the top guess
+(blank when the v2026 file is unavailable).
 
 ## Data
 
@@ -160,6 +174,11 @@ today).
   Clements v2026 checklist (`eBird-Clements_v2026_integrated-checklist-October-2026.csv`)
   is used instead (same 18,631 common→scientific pairs), so installs with no
   API/network access still get scientific names.
+- `eBird-Clements_v2026_integrated-checklist-October-2026.csv` - the bundled
+  Clements v2026 integrated checklist. Besides being the taxonomy fallback it
+  is the source of the Avibase ids: its `taxon concept ID` column
+  (`avibase-XXXX...`) maps every species to its Avibase page
+  (`https://avibase.ca/<id>`), surfaced for the highest-confidence guess.
 - `regions/DE.csv`, `regions/SG.csv`, `regions/TH.csv` - species-per-month
   country tables (the GPS+time prior). Shipped as curated seeds; `--download`
   regenerates them in place from real eBird observations with an API key.
