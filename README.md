@@ -234,6 +234,48 @@ pipeline/birdid ~/Pictures/birds --dry-run  # plan only
 pipeline/birdid --list-candidates           # inspect region/month tables
 ```
 
+## Photo folder structure
+
+Point `birdid` at any folder — it scans all subfolders recursively, so you can
+just point it at your whole photo collection. The only rule: **all files that
+belong to one photo share the same base name in the same folder.**
+
+A recommended layout (trip → location → photos):
+
+```
+~/Pictures/birds/
+└── 2601-Singapur/                  ← one trip / event, often one month
+    ├── 260128-Botanic_Garden/      ← one location, usually one day
+    │   ├── 5M4_0001.CR2
+    │   ├── 5M4_0001.JPG            ← RAW+JPG pair = ONE capture
+    │   ├── 5M4_0002.JPG
+    │   └── S296663962_observations.csv   ← optional eBird checklist export
+    └── 260201-NewPlace/            ← new folders are picked up automatically
+        └── 5M4_0003.JPG
+```
+
+- **Dates from folder names**: a folder named `YYMMDD-Place` (e.g.
+  `260128-Botanic_Garden`) or `YYMM-Event` (e.g. `2601-Singapur`) lets the
+  program guess the date when a photo has no EXIF timestamp. The `date_source`
+  column in the report records where each date came from (`exif` / `folder` /
+  `today`).
+- **One capture = one base name**: `5M4_0001.CR2` + `5M4_0001.JPG` are treated
+  as one capture → one model call → one `<base>.xmp` sidecar (written for both
+  files). RAW-only files are classified from the embedded preview.
+- **What the program writes** next to your photos — your originals are **never
+  modified**:
+  - `<base>.xmp` — the result sidecar for every capture;
+  - `birdid_manifest.json` — resumable bookkeeping at the folder you pointed at;
+  - `birdid_report.csv` — one row per capture, in **every** folder that has any;
+  - `birdid_index.csv` — per-subfolder summary counts + links, in **every**
+    folder that has subfolders.
+  Delete the sidecars (+ the manifest and report/index files) to re-tag a
+  folder from scratch.
+- **eBird checklists**: a `*_observations.csv` export dropped into a photo
+  folder adds that day's species to the candidate list; a **central folder**
+  (`~/.config/birdid/checklists/`, see below) does the same for every matching
+  month. `--no-checklist` ignores both.
+
 ## Layout
 
 | Path | What it is |
@@ -251,6 +293,30 @@ See `pipeline/README.md` for usage and behaviour, and `ebird/README.md` for the
 data schema and how `--download` upgrades the tables with real eBird data.
 
 ## Data management (eBird)
+
+### eBird API key — where to get it and how to use it
+
+Everything works **without** a key: the curated EUROPE + SEA seeds, the
+taxonomy, and the Avibase links. A key is only needed to download **real,
+current per-month species tables for a specific country or region**
+(`birdid --download <code>`).
+
+1. **Get a key:** open <https://ebird.org/api/keygen> and click the button.
+   It is free and instant — you get a long token like `abc123...`.
+2. **Store it on your computer:**
+   ```bash
+   birdid --api <your-key>
+   ```
+   It is saved in `~/.config/birdid/ebird_api_key` (readable only by you) and
+   never shown again (bare `birdid --api` just shows the status).
+3. **Use it:** download a table for the region you photographed, e.g.
+   ```bash
+   birdid --download SG          # Singapore
+   birdid --download region SA   # the whole of South America
+   ```
+   The table lands in the **gitignored** `ebird/regions_generated/` and is
+   preferred over the bundled seeds from then on (it is API-derived and must
+   never be committed — see `ebird/README.md`).
 
 ```bash
 pipeline/birdid --list              # what countries/regions can be downloaded
@@ -323,6 +389,31 @@ pipeline/birdid --download taxonomy
   Clements release, download it from the Cornell checklist page and save it
   under the **same filename** (`eBird-Clements_Integrated_Checklist.csv`) in
   `ebird/` — see `ebird/README.md`.
+
+### `--list` — see what data you have and what you can download
+
+- `birdid --list` — the whole registry: every country and region/pool, whether
+  a local table exists and from which source (`curated` = committed no-key
+  seed, `generated` = made with your API key).
+- `birdid --list country` / `birdid --list region` — filter to just countries
+  or just the continent/subcontinent pools (with member counts).
+- `birdid --list downloadable` — every eBird country from the bundled offline
+  ISO reference (no key needed); with a key,
+  `birdid --list downloadable subnational1 DE` lists a country's subregions.
+  Any code it prints works with `birdid --download country <CODE>`.
+
+### Central checklists folder
+
+Drop your exported eBird checklists (one file per checklist, e.g.
+`S296663962_observations.csv`) into `~/.config/birdid/checklists/` — created by
+`--initialize`, or override with `--checklists-dir` / `$BIRDID_CHECKLISTS_DIR`.
+Each row's `Observation Date` (e.g. `Jan 28, 2026`) keys its species by month,
+so every capture whose folder resolves to that month gets those species added
+to its candidate list. A hidden `index.json` caches the files (keyed by size +
+modification time), so reruns only re-read new/changed checklists. Species from
+these checklists that are **not** in the GPS region's table are flagged on the
+console and recorded in the report's `central_outside` column — a sign the
+region prior may be too narrow (download a wider pool to cover them).
 
 > Re-tagging a folder: a capture is *done* once its `<base>.xmp` exists, so a
 > rerun skips it. Delete the stale sidecars (+ `birdid_manifest.json` +

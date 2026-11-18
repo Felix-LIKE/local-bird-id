@@ -105,6 +105,16 @@ python3 birdid.py --list-candidates
 
 Defaults are fine: data in `/data/offline-data/bird/ebird`, region `DE`.
 
+## Folder structure
+
+The pipeline scans the given folder **recursively**; files that belong to one
+photo share a base name in the same folder (a RAW+JPG pair = one capture, one
+sidecar). Date-prefixed folder names (`YYMMDD-Place`, `YYMM-Event`) are used to
+guess dates for photos without EXIF. Per-folder reports, parent indexes,
+sidecars and the manifest are all written *next to* the photos; originals are
+never touched. See **Photo folder structure** in the top-level `README.md` for
+the layout and a worked example.
+
 ## Behaviour (per the project plan)
 
 - **Scan → manifest → worklist → process**: the manifest
