@@ -22,14 +22,26 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
 - **Common + scientific names**: every result is normalised against the official
   eBird taxonomy (e.g. `Great Tit` / *`Parus major`*), and the top guess links
   to its **Avibase** species page (`https://avibase.ca/<id>`).
-- **Two-tier neighbour-region expansion that walks up the region tree**: birds
-  don't respect borders - if the country list yields no confident answer, the
-  photo is re-scored against the wider pools, **repeating until certain**:
-  country → subcontinent (e.g. `AS-SOUTHEAST`) → continent (e.g. `AS`).
+- **Staged candidate ladder** (fast + accurate): the base region is always
+  scored with the ±1-month grace window applied (a species at a season
+  boundary - e.g. Asian Openbill in early Jan, when its month record starts in
+  Feb - only shows up once the window is widened). Only if the top score stays
+  below `--expand-threshold` does it widen up the region tree (country →
+  subcontinent e.g. `AS-SOUTHEAST` → continent e.g. `AS`), each wider tier
+  likewise grace-widened. Confident photos never pay for the big pool;
+  low-confidence ones still get the whole ladder.
+- **Reusable on-disk embedding cache**: every species' BioCLIP 2 text embedding
+  (the 80-ImageNet-template mean) is computed once and cached under
+  `ebird/embeddings/` (gitignored), shared across runs and folders. After the
+  first photo the per-photo cost is a single image encode + softmax, no matter
+  how many species the candidate list holds - so 369-photo folders no longer
+  stall on their first photo.
 - **±1-month grace** (`--month-grace 1`, default on): a species whose
   presence is recorded a month earlier or later still counts as a candidate,
   so a photo taken just before/after the typical season isn't mis-identified
-  (birds rarely carry a calendar).
+  (birds rarely carry a calendar). The base region and every wider tier are
+  always scored with the grace applied - never gated by the confidence
+  threshold. `--month-grace 0` disables it.
 - **Live background feedback**: the TUI shows what is happening right now
   (loading the model, encoding, scoring N candidates, expanding a pool level,
   writing the sidecar) with a "working on this step for MM:SS" timer - a long
@@ -300,6 +312,7 @@ A recommended layout (trip → location → photos):
 | `pipeline/ebird_data.py` | eBird data management: registry, API key store, `--download` / `--list` / `--initialize` |
 | `ebird/regions/*.csv` | **Committed curated seeds** (EUROPE + SEA, the two no-key regions) — the GPS+time prior. |
 | `ebird/regions_generated/` | **Gitignored** API-derived tables from `birdid --download <code>` (preferred over the seeds; never committed — eBird API data may not be redistributed). The smallest division is written into a continent/subcontinent tree: `AS/AS-SOUTHEAST/SG.csv` (a country with subnational tables becomes `SG/<SUB>.csv`), with a pooled `<REGION>.csv` kept alongside. |
+| `ebird/embeddings/` | **Gitignored** per-species BioCLIP 2 text-embedding cache (`embeddings.npy` + `index.json`, regenerable on demand) — makes the classifier's fine stage a single cached softmax per photo. |
 | `ebird/continents.csv` | **Committed** static continent/subcontinent reference (250 codes) — builds the continent/subcontinent pools + country→pool map (feature 3) |
 | `ebird/eBird-Clements_Integrated_Checklist.csv` | Bundled Clements checklist (version-agnostic name): offline taxonomy fallback + Avibase ids |
 | `ebird/` | eBird data + schema docs |

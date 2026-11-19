@@ -162,29 +162,45 @@ the layout and a worked example.
   `central_outside` columns) - a signal that the region prior may be too narrow
   and should be expanded (or a wider pool downloaded). `--no-checklist` disables
   both local and central checklists.
-- **Two-tier neighbour-region expansion that walks up the region tree**: birds
-  don't respect borders. If the top score over the base region list falls below
-  `--expand-threshold` (default 0.35), the photo is re-scored against the next
-  wider pool, **repeating until certain** - for a `SG` photo that is
-  `SG` → `AS-SOUTHEAST` (its subcontinent folder = the SEA pool) → `AS`
-  (continent), for `DE` it is `DE` → `EU-WEST` → `EUROPE`. Species only present
-  just across a border (or missed by the curated table) still get a chance, and
-  the reasoning field records how many levels were walked.
-  `--expand-threshold 0` disables the expansion. Regions without a table fall
+- **Staged candidate ladder**: birds don't respect borders (or calendars). The
+  base region is **always** scored with the month window already widened by
+  `--month-grace` (strict month ∪ ±grace): a species photographed at a season
+  boundary - e.g. an Asian Openbill in early January, whose `month_mask`
+  starts in February - only appears once the window is widened, so stopping on
+  a strict-only softmax can mis-ID a confident-looking wrong species. The
+  `--expand-threshold` (default 0.35) therefore gates only widening to the
+  **wider region pools** (each likewise grace-widened), **repeating until
+  certain** - for a `SG` photo that is `SG ±1mo` → `AS-SOUTHEAST ±1mo` →
+  `AS ±1mo` (for `DE`, which has no country seed: `EUROPE ±1mo` directly). The
+  reasoning field records which stage won, and the image is encoded only once -
+  every stage is a cached-embedding softmax, so walking the ladder is nearly
+  free. `--expand-threshold 0` disables widening. Regions without a table fall
   back to their `REGION_POOLS` pool as tier 1 directly.
+- **Reusable species-embedding cache + one shared model**: the old code rebuilt
+  BioCLIP's per-species text encodings (80 ImageNet templates, ~2.7 s/species)
+  and re-loaded the model on every photo and pool expansion - the reason a
+  369-photo folder could stall for 26 min on its first photo. Now the whole run
+  shares a single compiled backbone, and each species' embedding is computed
+  once ever and cached on disk under `ebird/embeddings/` (gitignored, keyed by
+  model; `embeddings.npy` + `index.json`). Per photo the cost is one image
+  encode + a cached softmax, independent of candidate-list size. The first time
+  a region's species are seen the one-time per-species encode runs with visible
+  progress; later runs (any folder) reuse the cache.
 - **±1-month grace (`--month-grace 1`, default on)**: a species whose recorded
   presence is off by a month or two still counts as a candidate - the month
   window is widened to `[month-grace, month+grace]`, wrapping across the year.
-  This avoids mis-identifications at season boundaries (e.g. an Asian Openbill
-  in Singapore in early January, when its table marks it present Feb-Dec).
-  `--month-grace 0` restores a strict single month.
+  The base region is always scored with the grace applied (never gated by the
+  confidence threshold), and every wider region tier is grace-widened too, so
+  a season-boundary photo is never mis-identified. `--month-grace 0` restores
+  a strict single month.
 - **Live background feedback**: before the first photo the model is loaded
   explicitly with a "loading BioCLIP 2 model (first load ~2-4 min)..." message
   and a running "working on this step for MM:SS" timer, so a long first-run
   build reads as *working*, not *crashed*. During each capture the stage
-  message reports the granular step ("encoding image", "scoring N candidates
-  (SG, month 01)", "expanding level 2 of the region tree (+M species)",
-  "writing sidecar").
+  message reports the granular step ("encoding image", "scoring 227 eBird
+  candidates (SG ±1mo)", "encoding species embedding 42/85: Asian Openbill
+  (one-time)", "expanding to 'AS-SOUTHEAST ±1mo' (1500 candidates)", "writing
+  sidecar").
 - **Bird pre-filter (default on)**: stage 1 classifies every subject into a
   coarse category (bird / reptile / insect / ...). A non-bird capture is
   recorded with status `non-bird` (species = the coarse category) and the

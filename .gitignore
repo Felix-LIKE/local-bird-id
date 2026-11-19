@@ -13,5 +13,9 @@ ebird/eBird_Taxonomy_v2023.csv
 # committed curated seeds in ebird/regions/.
 ebird/regions_generated/
 
+# Reusable BioCLIP 2 species-embedding cache (derived from the model + species
+# names, regenerable on demand - never committed)
+ebird/embeddings/
+
 # Local runtime logs
 *.log

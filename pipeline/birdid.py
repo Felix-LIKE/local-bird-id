@@ -60,6 +60,8 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
+
 from ebird_data import (COARSE_LABELS, TAXONOMY_2023, TAXONOMY_2026,
                         country_continent_map)   # shared with --initialize/--download
 
@@ -268,42 +270,41 @@ class SpeciesDB:
                     out.append((sp, st))
         return out
 
-    def pool_tiers(self, region: str, month: int, grace: int = 0
-                   ) -> list[list[tuple[str, str]]]:
-        """Ordered wider candidate lists, walking up the directory tree.
-
-        For a country table stored at <CONT>/<SUB>/<COUNTRY>.csv this yields
-        the subcontinent union, then the continent union - so the two-tier
-        fallback can 'go up a directory and try again, repeating until
-        certainty approves'. Regions without a tree placement fall back to the
-        REGION_POOLS map (country -> continent pool).
-        """
+    def tier_codes(self, region: str) -> list[str]:
+        """Ordered region codes from the base region up (narrowest first),
+        mirroring the tree walk pool_tiers does: for a country table stored at
+        <CONT>/<SUB>/<COUNTRY>.csv this yields the subcontinent, then the
+        continent. Regions without a tree placement fall back to the
+        REGION_POOLS map (country -> continent pool), or just the base region."""
         region = region.upper()
         base_dir = self._region_base.get(region)
         path = self._region_file.get(region)
-        if path is None or base_dir is None:
-            pool_code = REGION_POOLS.get(region)
-            if pool_code and pool_code in self._table:
-                return [self.candidates(pool_code, month, grace)]
-            return []
-        p = path.parent if path.is_file() else path
-        tiers = []
-        seen = set()
-        for anc in [p] + list(p.parents):
-            if anc == base_dir:
-                break
-            r = anc.name.upper()
-            if r in self._table and r != region and r not in seen:
-                seen.add(r)
-                tiers.append(self.candidates(r, month, grace))
-        if not tiers:
+        codes: list[str] = []
+        if path is not None and base_dir is not None:
+            seen = set()
+            p = path.parent if path.is_file() else path
+            for anc in [p] + list(p.parents):
+                if anc == base_dir:
+                    break
+                r = anc.name.upper()
+                if r in self._table and r != region and r not in seen:
+                    seen.add(r)
+                    codes.append(r)
+        if not codes:
             # flat file at the base level (legacy layout) or no tree ancestors
             # (e.g. a country whose table only exists as a curated flat seed) ->
             # fall back to the REGION_POOLS map (country -> continent pool).
             pool_code = REGION_POOLS.get(region)
             if pool_code and pool_code in self._table:
-                tiers.append(self.candidates(pool_code, month, grace))
-        return tiers
+                codes.append(pool_code)
+        return [region] + codes
+
+    def pool_tiers(self, region: str, month: int, grace: int = 0
+                   ) -> list[list[tuple[str, str]]]:
+        """Ordered wider candidate lists (wider than the base region), walking
+        up the directory tree. See tier_codes() for the region codes."""
+        return [self.candidates(code, month, grace)
+                for code in self.tier_codes(region)[1:]]
 
     def expanded(self, region: str, month: int, grace: int = 0
                  ) -> list[tuple[str, str]]:
@@ -960,26 +961,227 @@ class Classifier:
     def close(self):
         pass
 
-    def classify(self, image: Path, candidates: list[tuple[str, str]],
-                 tiers: list[list[tuple[str, str]]], tax: dict[str, str],
-                 region: str, month: int, dt: datetime) -> dict:
+    def classify(self, image: Path, ladder: list[tuple[str, list[tuple[str, str]]]],
+                 tax: dict[str, str], region: str, month: int, dt: datetime) -> dict:
         raise NotImplementedError
+
+
+# --------------------------------------------------------------------------
+# Shared BioCLIP 2 backbone + on-disk species-embedding cache
+# --------------------------------------------------------------------------
+#
+# BioCLIP's CustomLabelsClassifier encodes EVERY species against all 80
+# ImageNet prompt templates (~2.7 s/species on this CPU) each time it is
+# constructed - and the old code constructed one per photo AND per pool
+# expansion (each also re-loading the ~4.5 s model). For a 369-photo folder
+# that was tens of minutes of repeated work. The fix has two halves:
+#
+#   1. ONE shared compiled backbone (model + tokenizer) for the whole run.
+#   2. A reusable on-disk cache of the final per-species embedding vectors
+#      (bit-identical to the 80-template mean), so a species is encoded once
+#      ever, not once per photo.
+
+_BACKBONE: dict = {"model": None}   # single shared compiled BioCLIP 2 model
+
+
+def _load_backbone():
+    """Shared BioCLIP 2 backbone (model + tokenizer + preprocess) for the whole
+    run - a single ~4.5 s model load instead of one per classifier."""
+    if _BACKBONE["model"] is None:
+        from bioclip.predict import BaseClassifier, create_bioclip_tokenizer
+        backbone = BaseClassifier()
+        backbone.tokenizer = create_bioclip_tokenizer(backbone.model_str)
+        _BACKBONE["model"] = backbone
+    return _BACKBONE["model"]
+
+
+def _encode_text_name(backbone, name: str) -> np.ndarray:
+    """One species' text embedding - bit-identical to
+    CustomLabelsClassifier._get_txt_embeddings([name]): the 80 ImageNet
+    template prompts, tokenized + encoded, L2-normalized per prompt, then the
+    normalized mean."""
+    import torch
+    from bioclip.predict import OPENA_AI_IMAGENET_TEMPLATE
+    txts = [t(name) for t in OPENA_AI_IMAGENET_TEMPLATE]
+    txts = backbone.tokenizer(txts).to(backbone.device)
+    with torch.no_grad():
+        feats = backbone.model.encode_text(txts)
+        feats = torch.nn.functional.normalize(feats, dim=-1).mean(dim=0)
+        feats = feats / feats.norm()
+    return feats.cpu().numpy().astype(np.float32)
+
+
+class SpeciesEmbeddingCache:
+    """Reusable on-disk per-species text-embedding cache.
+
+    Layout under <data_dir>/embeddings/ (gitignored - derived data):
+      index.json      {"model": <bioclip model str>, "names": [n, ...]}
+      embeddings.npy  float32 [N, D]   (row i == embedding of names[i];
+                                        D = model embedding dim, 768 for
+                                        BioCLIP 2 - read from the file, not
+                                        hardcoded)
+
+    Embeddings are computed on demand (one species at a time, ~2.7 s each on
+    this CPU) and appended to the matrix, so a species is encoded exactly once
+    ever across all runs and all folders. Different BioCLIP models are keyed
+    separately (a stale matrix for another model is rebuilt).
+    """
+
+    def __init__(self, data_dir: Path | None):
+        self.dir = Path(data_dir) / "embeddings" if data_dir else None
+        self._names: list[str] = []
+        self._index: dict[str, int] = {}
+        self._matrix: np.ndarray | None = None
+        self._model: str | None = None
+
+    # -- persistence --------------------------------------------------------
+
+    def _ensure_loaded(self):
+        if self._matrix is not None:
+            return
+        if self.dir is None:
+            self._matrix = np.zeros((0, 0), dtype=np.float32)
+            return
+        npy, js = self.dir / "embeddings.npy", self.dir / "index.json"
+        if npy.is_file() and js.is_file():
+            try:
+                meta = json.loads(js.read_text(encoding="utf-8"))
+                m = np.load(str(npy))
+                names = meta.get("names") or []
+                # Accept any 2-D matrix: the embedding dim is whatever the model
+                # produced (768 for BioCLIP 2), read from the file - never
+                # assumed, so a saved cache is reused instead of recomputed.
+                if m.ndim == 2 and len(names) == m.shape[0]:
+                    self._matrix = m.astype(np.float32)
+                    self._names = list(names)
+                    self._index = {n: i for i, n in enumerate(self._names)}
+                    self._model = meta.get("model")
+                    return
+            except Exception:
+                pass
+        self._matrix = np.zeros((0, 0), dtype=np.float32)
+
+    def _reset(self):
+        self._names = []
+        self._index = {}
+        self._matrix = np.zeros((0, 0), dtype=np.float32)
+        self._model = None
+
+    def _save(self):
+        if self.dir is None:
+            return
+        self.dir.mkdir(parents=True, exist_ok=True)
+        # np.save appends '.npy' when the name lacks it, so the temp file is
+        # 'embeddings.tmp' -> 'embeddings.tmp.npy' (the index.json.tmp keeps
+        # its own suffix). Write both, then atomically replace.
+        tmp_n = self.dir / "embeddings.tmp"
+        tmp_j = self.dir / "index.json.tmp"
+        np.save(str(tmp_n), self._matrix)
+        with open(tmp_j, "w", encoding="utf-8") as f:
+            json.dump({"model": self._model, "names": self._names}, f)
+        os.replace(self.dir / "embeddings.tmp.npy", self.dir / "embeddings.npy")
+        os.replace(tmp_j, self.dir / "index.json")
+
+    # -- lookup / compute ---------------------------------------------------
+
+    def embed(self, name: str, backbone) -> np.ndarray:
+        """Embedding for one species name, computing + persisting on first use."""
+        self._ensure_loaded()
+        model = getattr(backbone, "model_str", None)
+        if self._model != model:
+            self._reset()
+            self._model = model
+        if name in self._index:
+            return self._matrix[self._index[name]]
+        vec = _encode_text_name(backbone, name)
+        self._append(name, vec)
+        return vec
+
+    def _append(self, name: str, vec: np.ndarray):
+        row = vec.reshape(1, -1).astype(np.float32)
+        self._matrix = (row if self._matrix.shape[0] == 0
+                        else np.vstack([self._matrix, row]))
+        self._names.append(name)
+        self._index[name] = len(self._names) - 1
+        self._save()
+
+    def matrix_for(self, names: list[str], backbone,
+                   on_progress=None) -> np.ndarray:
+        """[DIM, n] column-stacked embeddings for `names` in order - identical
+        to CustomLabelsClassifier._get_txt_embeddings(list(names)). Missing
+        species are encoded now (on_progress(name, i, total) if given)."""
+        self._ensure_loaded()
+        model = getattr(backbone, "model_str", None)
+        if self._model != model:
+            self._reset()          # different model -> rebuild for this one
+            self._model = model
+        miss = [n for n in names if n not in self._index]
+        for j, n in enumerate(miss, 1):
+            if on_progress:
+                on_progress(n, j, len(miss))
+            self._append(n, _encode_text_name(backbone, n))
+        cols = [self._matrix[self._index[n]] for n in names]
+        return np.stack(cols, axis=1)
+
+
+def _build_ladder(db: SpeciesDB, region: str, month: int, grace: int,
+                  checklist: list[tuple[str, str]],
+                  central_list: list[tuple[str, str]]
+                  ) -> list[tuple[str, list[tuple[str, str]]]]:
+    """Staged candidate ladder for one capture.
+
+    The base region is ALWAYS scored with the month window already widened to
+    [month-grace, month+grace] (strict ∪ ±grace): a species photographed at a
+    season boundary (e.g. Asian Openbill in early January, whose month_mask
+    starts in February) only appears once the window is widened - so stopping
+    on a strict-only softmax can mis-ID a confident-looking wrong species
+    (White-shouldered Starling 76% instead of Asian Openbill 95%). The
+    --expand-threshold therefore does NOT gate the month grace, only widening
+    to wider REGION tiers - and each wider tier is likewise grace-widened, for
+    the same season-boundary reason.
+
+    Order: (base ±grace) -> (tier1 ±grace) -> (tier2 ±grace) -> ... with
+    every stage = checklist + central + that level's grace-widened region
+    candidates, deduped. The classifier scores the small base set first and
+    only walks up the region tree while the top score stays below
+    --expand-threshold.
+    """
+    g = max(0, int(grace))
+    ladder: list[tuple[str, list[tuple[str, str]]]] = []
+    for code in db.tier_codes(region):
+        level = db.candidates(code, month, g)
+        seen = set()
+        stage: list[tuple[str, str]] = []
+        for grp in (checklist, central_list, level):
+            for s, st in grp:
+                if s.lower() not in seen:
+                    seen.add(s.lower())
+                    stage.append((s, st))
+        label = code if not g else f"{code} ±{g}mo"
+        ladder.append((label, stage))
+    return ladder
 
 
 class BioclipClassifier(Classifier):
     """BioCLIP 2 (pybioclip) - text-conditioned species classifier on CPU.
 
     Two-stage design (matches the project goal for birds + macro subjects):
-      stage 1 (coarse, cheap): CustomLabelsClassifier over broad categories
-        (bird / reptile / insect / ...) - decides whether the subject is a bird.
+      stage 1 (coarse, cheap): softmax over broad categories (bird / reptile /
+        insect / ...) - decides whether the subject is a bird.
       stage 2 (fine):
-        - bird   -> CustomLabelsClassifier over the eBird candidate list
-                    (region/month/checklist priors) -> ranked percentages.
+        - bird   -> the staged candidate ladder (region/month/checklist priors)
+                    -> ranked percentages.
         - non-bird -> by default the bird pre-filter records the coarse
                     category (status 'non-bird') and SKIPS the fine stage, so
                     non-bird shots cost almost nothing. With --analyze-all the
                     subject is fully analysed via TreeOfLifeClassifier at
                     SPECIES rank (whole tree of life, ~1.6M species).
+
+    Performance: one shared compiled backbone for the whole run, and every
+    species' text embedding comes from an on-disk cache (bit-identical to the
+    80-ImageNet-template mean), so a photo's fine-stage cost is a single image
+    encode + softmax regardless of candidate-list size - no repeated model
+    loads, no repeated per-species text encodes.
 
     Requires:  pip install pybioclip   (pulls torch + torchvision; the
     BioCLIP 2 weights and TreeOfLife datafiles download on first use).
@@ -998,33 +1200,49 @@ class BioclipClassifier(Classifier):
                 "(this pulls in torch + torchvision; model weights download "
                 "on first use)") from e
         self._coarse = None
-        self._bird_cls = None       # cached CustomLabelsClassifier
-        self._bird_key = None       # tuple of names it was built for
+        self._cache = SpeciesEmbeddingCache(Path(args.data_dir))
         self._tol = None
         self._Rank = None
 
     def _load_coarse(self):
         if self._coarse is None:
-            from bioclip.predict import CustomLabelsClassifier
-            self._coarse = CustomLabelsClassifier(COARSE_LABELS)
+            self._coarse = _load_backbone()
         return self._coarse
 
-    def _bird_classifier(self, names: list[str]):
-        """Cached CustomLabelsClassifier over `names` (plain species names, so
-        predict() returns clean names)."""
-        key = tuple(names)
-        if self._bird_cls is None or self._bird_key != key:
-            from bioclip.predict import CustomLabelsClassifier
-            self._bird_cls = CustomLabelsClassifier(list(names))
-            self._bird_key = key
-        return self._bird_cls
+    def _encode_image(self, image: str) -> np.ndarray:
+        """One normalized image embedding (CPU, float32 [DIM]) - the image side
+        of the softmax, encoded exactly once per photo."""
+        feat = self._load_coarse().create_image_features_for_image(
+            image, normalize=True)
+        return feat.cpu().numpy().astype(np.float32)
 
-    def _score_bird(self, image: str, names: list[str]) -> list[tuple[str, float]]:
-        rows = self._bird_classifier(names).predict(image)
-        ranked = [(d.get("classification", ""), float(d.get("score", 0.0)))
-                  for d in rows if d.get("score") is not None]
-        ranked.sort(key=lambda kv: -kv[1])
-        return ranked
+    def _score_names(self, img_feat: np.ndarray, names: list[str], k: int,
+                     on_progress=None) -> list[tuple[str, float]]:
+        """softmax(scale * img_feat @ txt_embeddings) over `names`, top-k.
+        Bit-identical to CustomLabelsClassifier.predict() but the text matrix
+        comes from the shared cache (the image is already encoded by the
+        caller, so every stage of the ladder reuses it)."""
+        import torch
+        backbone = self._load_coarse()
+        txt = self._cache.matrix_for(names, backbone, on_progress=on_progress)
+        # Image as a [1, D] row + txt [D, n] - the exact shapes pybioclip's
+        # create_probabilities uses, so results are bit-identical.
+        img_t = torch.from_numpy(img_feat[None, :]).to(backbone.device)
+        txt_t = torch.from_numpy(txt).to(backbone.device)
+        with torch.no_grad():
+            # Mirror CustomLabelsClassifier.create_probabilities exactly,
+            # including its operator precedence (the scale is applied to the
+            # image features BEFORE the matmul).
+            logits = (backbone.model.logit_scale.exp() * img_t) @ txt_t
+            probs = torch.softmax(logits, dim=1)[0]
+            kk = min(k, probs.numel())
+            top = torch.topk(probs, kk)
+        return [(names[int(i)], float(p)) for p, i in zip(top.values, top.indices)]
+
+    def _embed_progress(self, name: str, i: int, total: int):
+        self._report("classify",
+                     f"encoding species embedding {i}/{total}: {name} "
+                     f"(one-time, cached on disk afterwards)")
 
     def _load_tol(self):
         if self._tol is None:
@@ -1035,31 +1253,34 @@ class BioclipClassifier(Classifier):
         return self._tol
 
     def warm(self):
-        """Load the heavy BioCLIP 2 weights up front (not lazily on the first
-        photo), reporting progress + elapsed so the first-run ~2-4 min build
-        reads as 'working', not 'crashed'."""
+        """Load the heavy BioCLIP 2 weights + precompute the coarse-stage
+        embeddings up front (not lazily on the first photo), reporting progress
+        + elapsed so the first-run build reads as 'working', not 'crashed'."""
         t0 = time.time()
         self._report("classify", "loading BioCLIP 2 model (first load ~2-4 min, "
                                  "subsequent runs fast)...")
-        self._load_coarse()
-        self._report("classify", f"BioCLIP 2 model loaded in {time.time() - t0:.0f}s")
+        backbone = self._load_coarse()
+        self._report("classify", "warming species-embedding cache "
+                                 "(one-time per species)...")
+        self._cache.matrix_for(COARSE_LABELS, backbone,
+                               on_progress=self._embed_progress)
+        self._report("classify", f"BioCLIP 2 model + cache ready in "
+                                 f"{time.time() - t0:.0f}s")
 
-    def classify(self, image, candidates, tiers, tax, region, month, dt):
+    def classify(self, image, ladder, tax, region, month, dt):
         image = str(image)
 
-        # --- stage 1: coarse category ---
+        # --- stage 1: coarse category (one shared image encode) ---
         self._report("classify", f"encoding {Path(image).name} (coarse pass)")
-        coarse = self._load_coarse()
-        res = coarse.predict(image, k=1)
-        if isinstance(res, list):
-            res = res[0]
-        cat = str(res.get("classification", "")).replace("a photo of a ", "").replace("a photo of ", "")
-        coarse_conf = float(res.get("score", 0.0))
+        img_feat = self._encode_image(image)
+        coarse = self._score_names(img_feat, COARSE_LABELS, 1)
+        cat_raw, coarse_conf = coarse[0]
+        cat = str(cat_raw).replace("a photo of a ", "").replace("a photo of ", "")
         self._report("classify", f"subject category '{cat}' ({coarse_conf*100:.0f}%)")
 
         # --- stage 2: fine species ---
         if cat == "bird":
-            return self._classify_bird(image, candidates, tiers, region, month)
+            return self._classify_bird(img_feat, ladder, region, month)
 
         # non-bird subject (landscape / person / macro ...). The bird pre-filter
         # records the coarse category cheaply and skips the full analysis, so a
@@ -1099,55 +1320,60 @@ class BioclipClassifier(Classifier):
                          f"TreeOfLife species -> {common} {p*100:.0f}%",
         }
 
-    def _classify_bird(self, image: str, candidates: list[tuple[str, str]],
-                       tiers: list[list[tuple[str, str]]], region: str,
+    def _classify_bird(self, img_feat: np.ndarray, ladder, region: str,
                        month: int) -> dict:
-        """Two-tier bird ID that walks up the region tree until certain:
-
-          tier 1 - score against the eBird candidate list (country + checklist).
-          tier 2+ - if the top score is below --expand-threshold, add the next
-                    wider pool (subcontinent, then continent - see
-                    SpeciesDB.pool_tiers) and re-score, repeating until the
-                    score clears the threshold or no wider pool remains.
-        """
-        names = [s for s, _st in candidates]
-        if not names and tiers:
-            names = [s for s, _st in tiers[0]]
-        if not names:
-            names = ["unknown"]
-        self._report("classify", f"scoring {len(names)} eBird candidates "
-                                 f"({region}, month {month:02d})")
-        ranked = self._score_bird(image, names)
-        if not ranked:
-            raise RuntimeError("BioCLIP returned no bird scores")
-        species, p = ranked[0]
-        low_p = p
-        used_tiers = 0
-        for ti, tier in enumerate(tiers, 1):
-            if p >= self.args.expand_threshold:
+        """Staged candidate ladder (see _build_ladder): the image is encoded
+        once and every stage is a cached-embedding softmax over a growing
+        candidate set (base ±month grace -> wider region tiers), stopping at
+        the first stage whose top score clears --expand-threshold. The base
+        region is always scored with the month-grace window already applied;
+        the threshold only gates walking up the region tree. Per-photo cost is
+        one image encode + a few cheap matrix products - independent of how
+        many species the ladder eventually covers."""
+        if not ladder:
+            ladder = [(f"{region}", [])]
+        # Skip stages that carry no candidates (a region code with no table -
+        # e.g. DE has no country seed, only its REGION_POOLS pool tier has
+        # candidates). Scoring an empty stage as softmax(['unknown']) would
+        # yield a 100% 'unknown' that stops the ladder. Only if NO stage has
+        # any candidates do we fall back to the single 'unknown' stage.
+        ladder = [st for st in ladder if st[1]] or [(f"{region}", [])]
+        n_stages = len(ladder)
+        first_label = ladder[0][0]
+        first = [s for s, _st in ladder[0][1]] or ["unknown"]
+        self._report("classify", f"scoring {len(first)} eBird candidates "
+                                 f"({first_label})")
+        best: tuple | None = None     # (score, species, alternatives, stage_i)
+        stop_i = 0
+        first_p = 0.0
+        for i, (label, stage) in enumerate(ladder):
+            names = [s for s, _st in stage] or ["unknown"]
+            ranked = self._score_names(img_feat, names, 4,
+                                       on_progress=self._embed_progress)
+            p, species = ranked[0][1], ranked[0][0]
+            if i == 0:
+                first_p = p
+            if best is None or p > best[0]:
+                best = (p, species, [n for n, _ in ranked[1:4]], i)
+            if p >= self.args.expand_threshold or i == n_stages - 1:
+                stop_i = i
                 break
-            add = [s for s, _st in tier if s not in names]
-            if not add:
-                continue
-            used_tiers = ti
             self._report("classify", f"top score {p*100:.0f}% below "
-                                     f"{self.args.expand_threshold:.2f} - expanding "
-                                     f"level {ti} of the region tree (+{len(add)} species)")
-            ranked2 = self._score_bird(image, names + add)
-            if ranked2 and ranked2[0][1] > p:
-                species, p = ranked2[0]
-                ranked = ranked2
-            names = names + add
-
-        alts = [n for n, _ in ranked[1:4]]
-        if used_tiers:
-            reasoning = (f"BioCLIP-2: bird category; low confidence over the "
-                         f"country list ({low_p*100:.0f}% top), expanded "
-                         f"{used_tiers} level(s) up the region tree "
-                         f"-> {species} {p*100:.0f}%")
+                                     f"{self.args.expand_threshold:.2f} - "
+                                     f"expanding to '{label}' "
+                                     f"({len(names)} candidates)")
+        p, species, alts, win_i = best
+        if stop_i == 0 and win_i == 0:
+            reasoning = (f"BioCLIP-2: bird category; softmax over "
+                         f"{len(first)} eBird candidates "
+                         f"({first_label}) -> {species} {p*100:.0f}%")
         else:
-            reasoning = (f"BioCLIP-2: bird category; softmax over {len(names)} "
-                         f"eBird candidates -> {species} {p*100:.0f}%")
+            stop_label = ladder[stop_i][0]
+            reasoning = (f"BioCLIP-2: bird category; top {first_p*100:.0f}% on "
+                         f"the {first_label} list below "
+                         f"{self.args.expand_threshold:.2f}, widened to "
+                         f"{stop_label} (stage {stop_i + 1}/{n_stages}) "
+                         f"-> {species} {p*100:.0f}%")
         return {
             "species": species,
             "confidence": round(p, 4),
@@ -1831,30 +2057,25 @@ def main():
                     date_src = "exif" if meta.get("datetime") else ("folder" if dt else "today")
 
                     tui.set(stage="candidates", message=f"{region} month {month:02d}")
-                    region_cands = db.candidates(region, month, args.month_grace)
                     checklist = capture_checklist(cap)
-                    cl_lower = {c[0].lower() for c in checklist}
                     # central checklists: species for this capture's (year, month)
                     central_list: list[tuple[str, str]] = []
                     if dt:
                         central_list = central.species_for(dt.year, dt.month)
                     # region-table species (for the "region too narrow" flag)
-                    region_names = {s.lower() for s, _ in region_cands}
+                    region_names = {s.lower() for s, _ in
+                                    db.candidates(region, month, args.month_grace)}
                     central_outside = sorted(
                         {c[0] for c in central_list
                          if c[0].lower() not in region_names})
                     central_added = sorted({c[0] for c in central_list})
-
-                    seen = set()
-                    candidates = []
-                    for grp in (checklist, central_list, region_cands):
-                        for s, st in grp:
-                            if s.lower() not in seen:
-                                seen.add(s.lower())
-                                candidates.append((s, st))
-                    # wider pools to walk up into (subcontinent, then
-                    # continent) when the top score is not confident enough.
-                    tiers = db.pool_tiers(region, month, args.month_grace)
+                    # Staged ladder: strict (region, month) first, then the
+                    # ±month grace, then each wider region tier again without
+                    # then with the grace - so a confident photo is scored
+                    # against a small list and only low-confidence shots widen
+                    # the pool (see _build_ladder).
+                    ladder = _build_ladder(db, region, month, args.month_grace,
+                                           checklist, central_list)
 
                     if central_outside:
                         tui.plain_line(
@@ -1863,7 +2084,7 @@ def main():
                             f"{', '.join(central_outside)} - region prior may be too narrow")
 
                     tui.set(stage="classify", message=f"classifying {primary.name}")
-                    result = classifier.classify(primary, candidates, tiers, taxonomy, region, month, dt)
+                    result = classifier.classify(primary, ladder, taxonomy, region, month, dt)
 
                     tui.set(stage="parse", message="normalising species")
                     if not isinstance(result, dict) or not result.get("species"):
