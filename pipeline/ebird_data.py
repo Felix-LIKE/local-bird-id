@@ -712,8 +712,8 @@ def write_region_csv(path: Path, region: str, sp_months: dict[str, set[int]],
     header.append("month_mask: 12 chars, Jan..Dec, '1' = reported that month. "
                   "status: resident | seasonal (informative only).")
     header.append("This is API-derived eBird data - it lives in the gitignored "
-                  "regions_generated/ dir and is NOT committed to git; the "
-                  "curated seed in regions/ stays as the fallback.")
+                  "regions_generated/ dir; the curated seed in regions/ stays "
+                  "as the fallback.")
     # data freshness metadata (used by --update): the year the data is from and
     # the newest observation date sampled (not the download date).
     if year >= datetime.now().year:
@@ -944,7 +944,7 @@ def _download_country(generated_dir: Path, code: str, label: str, year: int,
                   f"under {country_dir}/ (smallest division; no pooled file - "
                   f"the {code} region is the union of these).")
             print(f"birdid: done. eBird data written to {country_dir} "
-                  f"(API-derived, gitignored - not committed).")
+                  f"(API-derived).")
             return
         print(f"birdid:   note: {code} has no subnational1 regions - writing a "
               f"country table instead.")
@@ -960,7 +960,7 @@ def _download_country(generated_dir: Path, code: str, label: str, year: int,
               f"to refresh it).")
     else:
         print(f"birdid: done. eBird data written to {target} "
-              f"(API-derived, gitignored - not committed).")
+              f"(API-derived).")
 
 
 def _download_pool(generated_dir: Path, code: str, label: str, year: int,
@@ -991,8 +991,7 @@ def _download_pool(generated_dir: Path, code: str, label: str, year: int,
                          data_date=_pool_data_date(sub_dir, members))
         print(f"birdid: wrote pooled {tgt}.csv ({len(pool_months)} spp) "
               f"alongside {len(members)} country tables in {sub_dir}/")
-        print(f"birdid: done. eBird data written to {sub_dir} (API-derived, "
-              f"gitignored - not committed).")
+        print(f"birdid: done. eBird data written to {sub_dir} (API-derived).")
     elif tgt in CONTINENT_NAMES:
         # continent (AS, AF, NA, SA, OC, EUROPE): create subcontinent folders
         # for every member country and drop the country files into them.
@@ -1012,7 +1011,7 @@ def _download_pool(generated_dir: Path, code: str, label: str, year: int,
         print(f"birdid: wrote pooled {tgt}.csv ({len(pool_months)} spp) "
               f"alongside the country tables under regions_generated/{tgt}/")
         print(f"birdid: done. eBird data written to regions_generated/{tgt}/ "
-              f"(API-derived, gitignored - not committed).")
+              f"(API-derived).")
     else:
         raise ValueError(f"unknown region/pool: {code} "
                          f"(known: {', '.join(sorted(POOLS))})")
