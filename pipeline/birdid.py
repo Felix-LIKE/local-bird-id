@@ -540,12 +540,11 @@ def region_for(lat, lon, default: str) -> str:
     return default
 
 
-def read_exif_batch(paths: list[Path]) -> dict[str, dict]:
-    """One exiftool call for many files -> {resolved_path_str: meta}.
+EXIF_CHUNK = 500   # files per exiftool call in read_exif_batch
 
-    meta = {"lat": float|None, "lon": float|None, "datetime": datetime|None}.
-    Missing/broken files yield an empty meta dict.
-    """
+
+def _exif_one_chunk(paths: list[Path]) -> dict[str, dict]:
+    """One exiftool call for a chunk of files -> {resolved_path_str: meta}."""
     meta_map: dict[str, dict] = {}
     if not paths:
         return meta_map
@@ -575,6 +574,28 @@ def read_exif_batch(paths: list[Path]) -> dict[str, dict]:
                 except ValueError:
                     continue
         meta_map[src] = {"lat": lat, "lon": lon, "datetime": dt}
+    return meta_map
+
+
+def read_exif_batch(paths: list[Path], on_progress=None) -> dict[str, dict]:
+    """Chunked exiftool calls -> {resolved_path_str: meta} (identical merged
+    result to one giant call, but reports per-chunk progress and avoids one
+    enormous command line).
+
+    meta = {"lat": float|None, "lon": float|None, "datetime": datetime|None}.
+    Missing/broken files yield an empty meta dict.
+    on_progress(done, total) is called after every chunk if given.
+    """
+    meta_map: dict[str, dict] = {}
+    if not paths:
+        return meta_map
+    total = len(paths)
+    done = 0
+    for start in range(0, total, EXIF_CHUNK):
+        meta_map.update(_exif_one_chunk(paths[start:start + EXIF_CHUNK]))
+        done += min(EXIF_CHUNK, total - start)
+        if on_progress:
+            on_progress(done, total)
     return meta_map
 
 
@@ -986,10 +1007,17 @@ class Classifier:
         # to the TUI in main()); long steps (model load, encoding, pool re-score)
         # report so a run never looks stalled/crashed.
         self.progress: "callable | None" = None
+        # optional callable(stage, done, total, message) for per-step progress
+        # bars (cache build, ...) - independent of the text `progress` channel.
+        self.progress_bar: "callable | None" = None
 
     def _report(self, stage: str, message: str):
-        if self.progress:
+        if getattr(self, "progress", None):
             self.progress(stage, message)
+
+    def _report_bar(self, stage: str, done: int, total: int, message: str = ""):
+        if getattr(self, "progress_bar", None):
+            self.progress_bar(stage, done, total, message)
 
     def describe(self) -> str:
         return self.name
@@ -1278,9 +1306,11 @@ class BioclipClassifier(Classifier):
         return [(names[int(i)], float(p)) for p, i in zip(top.values, top.indices)]
 
     def _embed_progress(self, name: str, i: int, total: int):
-        self._report("classify",
-                     f"encoding species embedding {i}/{total}: {name} "
-                     f"(one-time, cached on disk afterwards)")
+        # routed to the per-step bar (not a log line per species - that got
+        # noisy for a ~1500-species first build)
+        self._report_bar("cache", i, total,
+                         f"encoding species embedding: {name} "
+                         f"(one-time, cached on disk afterwards)")
 
     def _load_tol(self):
         if self._tol is None:
@@ -1654,8 +1684,24 @@ class Capture:
         return any(f.suffix.lower() in VIEWABLE_EXTS for f in self.files)
 
 
-def scan_folder(root: Path, manifest: dict) -> list[Capture]:
-    """Group files by (relative folder, lowercased base name)."""
+def _count_image_files(root: Path) -> int:
+    """Quick pre-pass counting files that will be grouped (for the scan bar)."""
+    n = 0
+    for p in root.rglob("*"):
+        if p.is_file() and p.suffix.lower() in ALL_EXTS:
+            n += 1
+    return n
+
+
+def scan_folder(root: Path, manifest: dict, on_progress=None) -> list[Capture]:
+    """Group files by (relative folder, lowercased base name).
+
+    on_progress(done, total) is called once per grouped file (when given) so a
+    run can show a 'walking folder tree' step bar - a quick count pass supplies
+    the total before the grouping walk reports.
+    """
+    total = _count_image_files(root) if on_progress else 0
+    done = 0
     captures: dict[tuple[str, str], Capture] = {}
     for p in sorted(root.rglob("*")):
         if not p.is_file():
@@ -1666,6 +1712,9 @@ def scan_folder(root: Path, manifest: dict) -> list[Capture]:
             if key not in captures:
                 captures[key] = Capture(p.stem, p.parent)
             captures[key].files.append(p)
+            if on_progress:
+                done += 1
+                on_progress(done, total)
 
     result = []
     for cap in captures.values():
@@ -1730,6 +1779,8 @@ class State:
         self.eta = ""
         self.stage_start = time.time()   # reset whenever `message` changes
         self.stage_elapsed = 0.0
+        self.stage_done = 0              # per-step bar (e.g. EXIF / cache / status)
+        self.stage_total = 0             # 0 = no step bar -> the classify bar is shown
 
 
 class TUI:
@@ -1795,7 +1846,14 @@ class TUI:
             put("")
             put(f"scanned {st.scanned}   pending {st.pending}   done {st.done}   error {st.error}")
             put(f"progress: {st.processed}/{st.total}    elapsed {int(st.elapsed//60):02d}:{int(st.elapsed%60):02d}   {st.eta}")
-            if st.total:
+            if st.stage_total:
+                # a per-step bar (EXIF / cache build / status scan / ...) takes
+                # over the bar line while it is running
+                frac = min(1.0, st.stage_done / st.stage_total)
+                width = max(10, w - 20)
+                filled = int(width * frac)
+                put(f"[{'#' * filled}{'.' * (width - filled)}] {frac*100:4.0f}%")
+            elif st.total:
                 frac = min(1.0, st.processed / st.total)
                 width = max(10, w - 20)
                 filled = int(width * frac)
@@ -1810,10 +1868,27 @@ class TUI:
     def set(self, **kw):
         st = self.state
         with st.lock:
-            if "message" in kw:
+            if "stage" in kw and kw["stage"] != st.stage:
+                st.stage_done = 0
+                st.stage_total = 0
+            if "message" in kw and kw["message"] != st.message:
                 st.stage_start = time.time()
             for k, v in kw.items():
                 setattr(st, k, v)
+
+    def progress(self, stage: str, done: int, total: int, message: str = ""):
+        """Per-step progress: fullscreen bar in TUI mode, an inline
+        '\\r[label] done/total pct%' line otherwise. When the step finishes the
+        inline line is closed with a newline so later output starts fresh."""
+        if self.enabled:
+            self.set(stage=stage, stage_done=done, stage_total=total,
+                     message=message or "")
+            return
+        label = stage or "step"
+        pct = f"{100.0 * done / total:3.0f}%" if total else "?"
+        print(f"\r[{label}] {done}/{total} {pct}   ", end="", flush=True)
+        if total and done >= total:
+            print(flush=True)   # finish the line once the step is complete
 
     def run_loop(self):
         if not self.enabled:
@@ -1883,6 +1958,9 @@ class TUI:
 
 def stage_hint(stage: str) -> str:
     hints = {
+        "scan": "walking folder tree (grouping captures)",
+        "status": "checking existing sidecars",
+        "cache": "building species-embedding cache (one-time per species)",
         "exif": "reading EXIF (GPS + timestamp, batched)",
         "region": "resolving GPS / folder date -> region + month",
         "candidates": "building candidate shortlist (eBird + checklist)",
@@ -2160,15 +2238,19 @@ def main():
     lc_review: list[tuple[float, str, str]] = []
     try:
         # --- Phase 1: scan & classify ---
-        tui.set(phase="scanning", stage="", message="walking folder tree")
-        captures = scan_folder(root, manifest)
+        tui.set(phase="scanning", stage="scan", message="walking folder tree")
+        captures = scan_folder(root, manifest,
+                               on_progress=lambda done, total: tui.progress(
+                                   "scan", done, total))
         tui.set(scanned=len(captures))
 
         pending = []
         done_n = 0
         nb_n = 0
         error_n = 0
-        for cap in captures:
+        for i, cap in enumerate(captures, 1):
+            tui.progress("status", i, len(captures),
+                         "checking existing sidecars")
             status = classify_capture(cap)
             if status == "pending":
                 pending.append(cap)
@@ -2216,7 +2298,10 @@ def main():
             # --- Phase 1.5: one batched EXIF read for ALL photos, then GPS means ---
             tui.set(stage="exif", message=f"reading EXIF for {len(captures)} captures")
             all_files = [f for cap in captures for f in cap.files]
-            meta_map = read_exif_batch(all_files)
+            meta_map = read_exif_batch(
+                all_files,
+                on_progress=lambda done, total: tui.progress(
+                    "exif", done, total, f"reading EXIF for {len(captures)} captures"))
             dir_gps = compute_dir_gps(meta_map)
 
             # --- Phase 1.6: no-GPS region override (one question per run) ---
@@ -2254,7 +2339,10 @@ def main():
                 tui.set(stage=stage, message=msg)
                 if not tui.enabled:      # plain log output: echo the step too
                     print(f"  [{stage}] {msg}", flush=True)
+            def on_progress_bar(stage, done, total, msg=""):
+                tui.progress(stage, done, total, msg)
             classifier.progress = on_progress
+            classifier.progress_bar = on_progress_bar
             classifier.warm()
             tui.plain_line(f"classifier: {classifier.describe()}")
 
