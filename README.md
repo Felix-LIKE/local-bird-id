@@ -481,9 +481,13 @@ console and recorded in the report's `central_outside` column — a sign the
 region prior may be too narrow (download a wider pool to cover them).
 
 > Re-tagging a folder: a capture is *done* once its `<base>.xmp` exists, so a
-> rerun skips it. Delete the stale sidecars (+ `birdid_manifest.json` +
-> the per-folder `birdid_report.csv`/`birdid_index.csv` files) to force a fresh
-> run - originals are never touched.
+> rerun skips it. For a fresh identification run, use
+> `birdid <folder> --force` — every capture is re-identified **in place**: the
+> existing `<base>.xmp` is kept (nothing is deleted) and only the bird-ID
+> fields are overwritten, so it is safe on an IMatch-managed folder where the
+> sidecars also hold IMatch metadata. Only if you want to wipe the sidecars
+> entirely, delete them (+ `birdid_manifest.json` + the per-folder
+> `birdid_report.csv`/`birdid_index.csv` files) — originals are never touched.
 
 ## Status
 
