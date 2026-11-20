@@ -617,8 +617,11 @@ def sample_months(region_code: str, key: str, year: int, sample_dates: int,
 
     A date the eBird API does not answer for (the historic endpoint can hang or
     error server-side on high-volume dates, e.g. around Global Big Day in May)
-    is skipped with a warning instead of aborting the whole download - the
-    table is still written from the dates that did respond.
+    is first retried with the SAME date from the previous year; only if that
+    also fails is it skipped with a warning. This keeps a complete month whose
+    sampled dates all hang in the target year from ending up empty - e.g. DE in
+    May 2026: both sample dates hang in 2026, but 2025-05-21 answers fine, so
+    May is built from the previous year instead of being blank.
     """
     sp_months: dict[str, set[int]] = defaultdict(set)
     total = 12 * sample_dates
@@ -629,9 +632,20 @@ def sample_months(region_code: str, key: str, year: int, sample_dates: int,
         m_year = sampling_year_for_month(year, month, today)
         for y, m, d in sample_dates_for_month(m_year, month, sample_dates):
             ds = f"{y:04d}-{m:02d}-{d:02d}"
+            use_y = y
             try:
                 names = historic_obs(region_code, y, m, d, key)
-            except Exception as e:      # server-side hang/error on that date
+            except Exception:           # server-side hang/error on that date
+                if y != year:           # already a previous-year sample: no deeper fallback
+                    names = None
+                else:                   # complete month: retry the same date year-1
+                    try:
+                        names = historic_obs(region_code, year - 1, m, d, key)
+                        ds = f"{year - 1:04d}-{m:02d}-{d:02d}"
+                        use_y = year - 1
+                    except Exception:
+                        names = None
+            if names is None:
                 skipped.append(ds)
                 done += 1
                 if progress:
@@ -640,7 +654,7 @@ def sample_months(region_code: str, key: str, year: int, sample_dates: int,
             for name in names:
                 sp_months[name].add(month)
             done += 1
-            dt = date(y, m, d)
+            dt = date(use_y, m, d)
             if newest is None or dt > newest:
                 newest = dt
             if progress:
@@ -677,6 +691,8 @@ def write_region_csv(path: Path, region: str, sp_months: dict[str, set[int]],
         f"{API_BASE}/data/obs/.../historic/{{y}}/{{m}}/{{d}}.",
         f"Sample strategy: {sample_dates} date(s) per month in {year}; a species is "
         f"'present' in a month if reported on any sampled date of that month.",
+        "A date eBird does not answer for is retried from the previous year, "
+        "so a high-volume date never leaves its month empty.",
     ]
     if members:
         header.append(f"Pool over member countries: {', '.join(members)}.")
