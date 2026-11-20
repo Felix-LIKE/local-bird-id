@@ -388,7 +388,10 @@ A recommended layout (trip → location → photos):
   files). RAW-only files are classified from the embedded preview.
 - **What the program writes** next to your photos — your originals are **never
   modified**:
-  - `<base>.xmp` — the result sidecar for every capture;
+  - `<base>.xmp` — the result sidecar for every capture (bird data lives in the
+    custom namespace `http://ns.birdpipeline/1.0/` — see
+    [`docs/birdid-xmp-namespace.md`](docs/birdid-xmp-namespace.md) to make it
+    show up as `bird:*` in ExifTool/IMatch);
   - `birdid_manifest.json` — resumable bookkeeping at the folder you pointed at;
   - `birdid_report.csv` — one row per capture, in **every** folder that has any;
   - `birdid_index.csv` — per-subfolder summary counts + links, in **every**

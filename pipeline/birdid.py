@@ -1879,6 +1879,27 @@ def _xmp_tree(sidecar: Path):
     return etree.fromstring(_XMP_TPL.format(bird_ns=BIRD_NS).encode(), parser)
 
 
+def _ensure_xpacket(root):
+    """Surround the XMP tree with the standard XMP packet wrapper PIs:
+
+        <?xpacket begin='...' id='W5M0MpCehiHzreSzNTczkc9d'?>
+        <x:xmpmeta ...>...</x:xmpmeta>
+        <?xpacket end='w'?>
+
+    This is how ExifTool and IMatch write .xmp files (packet first, no XML
+    declaration), so a birdid-written sidecar keeps the same format and the
+    OS still classifies it as plain text. An existing packet begin (e.g. its
+    original packet id) is preserved; a missing one is synthesized."""
+    from lxml import etree
+    prev = root.getprevious()
+    if not (prev is not None and getattr(prev, "target", None) == "xpacket"):
+        root.addprevious(etree.ProcessingInstruction(
+            "xpacket", "begin='\ufeff' id='W5M0MpCehiHzreSzNTczkc9d'"))
+    nxt = root.getnext()
+    if not (nxt is not None and getattr(nxt, "target", None) == "xpacket"):
+        root.addnext(etree.ProcessingInstruction("xpacket", "end='w'"))
+
+
 def _nsmap():
     from lxml import etree
     return {
@@ -2062,8 +2083,12 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # into an existing file (a re-run must not drift the layout)
     _canonicalize_desc(desc)
 
+    # conventional XMP style: <?xpacket begin ...?> ... <?xpacket end='w'?> with
+    # no XML declaration (matches ExifTool/IMatch, keeps the OS file-type
+    # detection from flipping to "XML document")
+    _ensure_xpacket(root)
     out = io.BytesIO()
-    etree.ElementTree(root).write(out, xml_declaration=True, encoding="UTF-8",
+    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
                                   pretty_print=True)
     sidecar.write_bytes(out.getvalue())
 

@@ -325,7 +325,10 @@ birdid-owned), plus — **only on birdid-owned sidecars** —
 `Birds/<species>`. On a sidecar that pre-existed from other software, only the
 `bird:*` fields are added and the foreign `dc:*` content is left untouched.
 Register `http://ns.birdpipeline/1.0/` as a custom metadata
-namespace in your photo software (e.g. a DAM).
+namespace in your photo software (e.g. a DAM). Ready-made registration for
+ExifTool and IMatch (so the tags show up as `bird:*` / `XMP-bird` with
+friendly names instead of `XMP-ns0`) is in
+[`../docs/birdid-xmp-namespace.md`](../docs/birdid-xmp-namespace.md).
 
 Names are normalised against the official eBird taxonomy: the model's answer is
 matched case-insensitively, a scientific-name answer is converted back to the
