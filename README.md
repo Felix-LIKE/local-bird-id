@@ -174,7 +174,7 @@ The project lives on GitHub. Two ways to get it onto your computer.
 folder:
 
 ```bash
-git clone https://github.com/<your-account>/local-bird-id.git
+git clone https://github.com/Felix-LIKE/local-bird-id.git
 cd local-bird-id
 ```
 
@@ -187,7 +187,7 @@ folder (the one that contains a subfolder called `pipeline/`).
 > password, either you don't have access yet, or use your GitHub **personal
 > access token** as the password (Settings → Developer settings → Personal
 > access tokens). With an SSH key set up, use
-> `git clone git@github.com:<your-account>/local-bird-id.git` instead.
+> `git clone git@github.com:Felix-LIKE/local-bird-id.git` instead.
 
 Run `pwd` afterwards and make sure it ends in `local-bird-id` — the remaining
 steps assume you are in that folder.
