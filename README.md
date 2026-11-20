@@ -125,7 +125,11 @@ will, in order:
 same password you log in with). If a command says `command not found`, a
 previous step has not finished yet — re-run it.
 
-> **Quick start (skips the manual steps below).** From a terminal:
+> **Quick start (skips the manual steps below).** First install `git`, `python3`
+> and `exiftool` — **Step 1** below has the one-liner for your distro. (No git
+> yet? Download the ZIP instead — Step 2, Option B — and run `./bootstrap.sh`
+> from the unpacked folder: it installs git + Python + exiftool for you and
+> skips the clone.) Then, from a terminal:
 >
 > ```bash
 > git clone https://github.com/Felix-LIKE/local-bird-id.git
@@ -135,10 +139,12 @@ previous step has not finished yet — re-run it.
 > birdid --initialize         # one-time AI-model download (~4 GB)
 > ```
 >
-> `bootstrap.sh` detects your distro (Arch / Debian / Ubuntu / Fedora /
-> openSUSE / Alpine / macOS), installs git + Python + exiftool, builds the
-> project's private Python environment and puts `birdid` on your PATH. It never
-> touches your system Python. The steps below do the same thing by hand.
+> After `./bootstrap.sh`, reopen the terminal (or `source ~/.bashrc`; zsh:
+> `source ~/.zshrc`) so `birdid` is on your PATH. `bootstrap.sh` detects your
+> distro (Arch / Debian / Ubuntu / Fedora / openSUSE / macOS), installs
+> git + Python + exiftool, builds the project's private Python environment and
+> links `birdid` into `~/.local/bin`. It never touches your system Python. The
+> steps below do the same thing by hand.
 
 ### Step 1 — Install the basic tools
 
@@ -185,8 +191,8 @@ look at the `ID=` line: `ubuntu`/`debian` → first block, `fedora` → second,
 
 The project lives on GitHub. Two ways to get it onto your computer.
 
-**Option A — with git (recommended):** paste this, then move into the new
-folder:
+**Option A — with git (recommended):** needs the `git` you installed in Step 1.
+Paste this, then move into the new folder:
 
 ```bash
 git clone https://github.com/Felix-LIKE/local-bird-id.git
@@ -332,10 +338,10 @@ for the keyless, bundled install described above.
   it.
 - `exiftool: command not found` → the exiftool package from Step 1 is missing.
 - `Permission denied` on `pipeline/birdid` → `chmod +x pipeline/birdid`.
-- The clone asks for a password → you don't have access to the private repo yet,
-  or you need a personal access token / SSH key (see Step 2).
+- The clone asks for a username and password → use a GitHub **personal access
+  token** as the password, or set up an SSH key (see the cloning tips in Step 2).
 
-## Quick start
+## Quick usage
 
 If you haven't installed yet, do **Installation** above first. Then:
 

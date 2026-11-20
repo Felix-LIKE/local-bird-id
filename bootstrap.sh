@@ -103,13 +103,20 @@ elif command -v apt-get >/dev/null 2>&1; then
     SYS_CMD="sudo apt-get update && sudo apt-get install -y git python3 python3-venv python3-pip libimage-exiftool-perl"
 elif command -v dnf >/dev/null 2>&1; then
     PM="dnf"; PM_LABEL="Fedora/RHEL (dnf)"
-    SYS_CMD="sudo dnf install -y git python3 python3-pip python3-virtualenv perl-Image-ExifTool"
+    # python3 ships the venv module + ensurepip on Fedora, so no separate venv package
+    SYS_CMD="sudo dnf install -y git python3 python3-pip perl-Image-ExifTool"
 elif command -v zypper >/dev/null 2>&1; then
     PM="zypper"; PM_LABEL="openSUSE (zypper)"
-    SYS_CMD="sudo zypper install -y git python3 python3-pip python3-virtualenv perl-Image-ExifTool"
+    SYS_CMD="sudo zypper install -y git python3 python3-pip perl-Image-ExifTool"
 elif command -v apk >/dev/null 2>&1; then
-    PM="apk"; PM_LABEL="Alpine (apk)"
-    SYS_CMD="sudo apk add --no-cache git python3 py3-pip py3-virtualenv exiftool"
+    # Alpine/musl: PyTorch publishes only manylinux (glibc) wheels, so the
+    # BioCLIP 2 backend cannot be installed here even in a fresh plain venv.
+    say ""
+    say "Alpine Linux is not supported: PyTorch (required by the BioCLIP 2"
+    say "model) has no musl/Alpine builds. Use a glibc-based distro such as"
+    say "Ubuntu/Debian, Fedora, Arch or openSUSE - or WSL on Windows."
+    [ "$dry_run" -eq 1 ] && exit 0
+    exit 1
 elif [ "$(uname -s 2>/dev/null || true)" = "Darwin" ] && command -v brew >/dev/null 2>&1; then
     PM="brew"; PM_LABEL="macOS (Homebrew)"
     SYS_CMD="brew install git python exiftool"
