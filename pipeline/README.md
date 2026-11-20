@@ -22,6 +22,9 @@ birdid /path/to/photos --dry-run  # plan only, no model work
 birdid /path/to/photos --month-grace 0   # strict month, no ±1-month grace
 birdid /path/to/photos --analyze-all  # also analyse non-bird subjects (no pre-filter)
 birdid /path/to/photos --force    # re-ID every capture in place (keeps sidecars)
+birdid /path/to/photos --burst    # combine a rapid series of shots of the same
+                                  # bird into one stronger ID (opt-in; the
+                                  # per-capture mode stays the default)
 birdid --list-candidates          # inspect the region/month tables
 birdid --list                     # what's available to download
 birdid --list downloadable        # every eBird country (offline reference)
@@ -242,6 +245,25 @@ the layout and a worked example.
   almost nothing. `--analyze-all` disables the pre-filter: non-bird subjects
   get the full TreeOfLife species analysis, and previously skipped non-bird
   captures are re-analysed on the next run.
+- **Burst mode (`--burst`, opt-in)**: a photographer holding down the shutter
+  on a Canon 5D Mark IV (~7 fps) or R5 (12-20 fps) produces a burst of frames
+  tens-to-hundreds of ms apart - all the same bird. `--burst` recognises these
+  and combines them into one stronger ID instead of tagging each frame in
+  isolation. Captures in the same folder whose **EXIF capture time**
+  (`DateTimeOriginal` / `CreateDate` - the real shutter time, never the file
+  mtime or the "pulled from the card" timestamp a properties GUI shows) falls
+  within `--burst-gap` (default 3 s) are grouped; within a group only frames
+  whose BioCLIP **image-embedding similarity** confirms the SAME bird (cosine
+  ≥ `--burst-sim`, default 0.8, against the earliest frame) are merged. The
+  merged frames are each scored with a **full softmax over the shared candidate
+  ladder** (the same denominator for every frame) and their probability
+  distributions are **averaged** - N looks at the same bird accumulate evidence,
+  so a 3-frame burst usually beats any single frame. The shared result is
+  written to **every** frame's sidecar + manifest, so IMatch sees one consistent
+  ID across the burst. Frames that fail the similarity gate (a different bird,
+  or a non-bird subject that walked through the burst) keep their own
+  single-frame result, so a rapid cut between subjects is never merged. Without
+  `--burst` the per-capture mode is exactly unchanged.
 - **Low-confidence handling** (`--min-confidence`, default 0.50): a capture
   whose top score stays below the threshold (blurry / distant / ambiguous bird)
   is *not* silently tagged. It still gets a sidecar with its best guess +

@@ -67,6 +67,19 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
   re-runs them with `--include-low-confidence --no-tui`. To revisit flagged
   photos yourself, run `birdid <folder> --include-low-confidence` (re-analyse)
   or lower `--min-confidence` (accept more marginal shots as done).
+- **Burst mode** (`--burst`, opt-in): a rapid series of shots of the same bird
+  (holding down the shutter on a Canon 5D Mark IV / R5 fires frames
+  tens-to-hundreds of ms apart) is combined into one stronger ID instead of
+  tagging each frame in isolation. Captures in the same folder whose **EXIF
+  capture time** (`DateTimeOriginal`/`CreateDate` - the real shutter time, never
+  the file mtime or the "pulled from the card" timestamp) falls within
+  `--burst-gap` (default 3 s) are grouped, then only frames the BioCLIP
+  embedding similarity confirms as the **same bird** (cosine ≥ `--burst-sim`,
+  default 0.8) have their full-softmax distributions over the shared candidate
+  ladder **averaged**; the shared result is written to every frame's sidecar.
+  Frames that fail the gate (a different bird / a person that walked through)
+  keep their own single-frame ID. Without `--burst` the per-capture mode is
+  exactly unchanged.
 - **Resumable**: the manifest is saved after every capture; reruns skip done
   work and never redo model calls.
 - **RAW+JPEG pairs** = one capture → one model call → result mirrored to both

@@ -61,6 +61,12 @@ See --help for all options. Examples:
                                                     # IMatch sidecars, overwrites
                                                     # only the bird-ID fields)
   birdid.py ~/Pictures/birds --max 10 --no-tui      # first 10, plain output
+  birdid.py ~/Pictures/birds --burst                # combine a rapid series of
+                                                    # shots of the same bird into
+                                                    # one stronger ID (opt-in:
+                                                    # --burst / --burst-gap /
+                                                    # --burst-sim; the per-capture
+                                                    # mode stays the default)
 """
 
 import argparse
@@ -1443,6 +1449,17 @@ def _build_ladder(db: SpeciesDB, region: str, month: int, grace: int,
     return ladder
 
 
+def _cosine(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity of two embedding vectors (features are already
+    L2-normalized by BioCLIP, so this is their dot product; the norm handles
+    the general case). Used as the same-bird gate inside a burst."""
+    na = float(np.linalg.norm(a))
+    nb = float(np.linalg.norm(b))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return float(np.dot(a, b) / (na * nb))
+
+
 class BioclipClassifier(Classifier):
     """BioCLIP 2 (pybioclip) - text-conditioned species classifier on CPU.
 
@@ -1497,28 +1514,30 @@ class BioclipClassifier(Classifier):
             image, normalize=True)
         return feat.cpu().numpy().astype(np.float32)
 
-    def _score_names(self, img_feat: np.ndarray, names: list[str], k: int,
-                     on_progress=None) -> list[tuple[str, float]]:
-        """softmax(scale * img_feat @ txt_embeddings) over `names`, top-k.
-        Bit-identical to CustomLabelsClassifier.predict() but the text matrix
-        comes from the shared cache (the image is already encoded by the
-        caller, so every stage of the ladder reuses it)."""
+    def _probs_for(self, img_feat: np.ndarray, names: list[str],
+                   on_progress=None) -> np.ndarray:
+        """Full softmax probability vector over `names` (float32 [len(names)]),
+        bit-identical to CustomLabelsClassifier.create_probabilities: the
+        text matrix comes from the shared cache and the logit scale is applied
+        to the image features BEFORE the matmul, exactly as pybioclip does.
+        Shared by _score_names (top-k) and classify_burst (full distribution
+        for cross-frame averaging)."""
         import torch
         backbone = self._load_coarse()
         txt = self._cache.matrix_for(names, backbone, on_progress=on_progress)
-        # Image as a [1, D] row + txt [D, n] - the exact shapes pybioclip's
-        # create_probabilities uses, so results are bit-identical.
         img_t = torch.from_numpy(img_feat[None, :]).to(backbone.device)
         txt_t = torch.from_numpy(txt).to(backbone.device)
         with torch.no_grad():
-            # Mirror CustomLabelsClassifier.create_probabilities exactly,
-            # including its operator precedence (the scale is applied to the
-            # image features BEFORE the matmul).
             logits = (backbone.model.logit_scale.exp() * img_t) @ txt_t
-            probs = torch.softmax(logits, dim=1)[0]
-            kk = min(k, probs.numel())
-            top = torch.topk(probs, kk)
-        return [(names[int(i)], float(p)) for p, i in zip(top.values, top.indices)]
+            return torch.softmax(logits, dim=1)[0].cpu().numpy().astype(np.float32)
+
+    def _score_names(self, img_feat: np.ndarray, names: list[str], k: int,
+                     on_progress=None) -> list[tuple[str, float]]:
+        """softmax(scale * img_feat @ txt_embeddings) over `names`, top-k."""
+        probs = self._probs_for(img_feat, names, on_progress=on_progress)
+        kk = min(k, probs.size)
+        order = np.argsort(probs)[::-1][:kk]
+        return [(names[int(i)], float(probs[i])) for i in order]
 
     def _embed_progress(self, name: str, i: int, total: int):
         # routed to the per-step bar (not a log line per species - that got
@@ -1689,6 +1708,124 @@ class BioclipClassifier(Classifier):
             "alternatives": alts,
             "reasoning": reasoning,
         }
+
+    def classify_burst(self, frames, ladder, tax, region, month, sim=0.8):
+        """Identify a burst: several frames taken of (probably) the same bird.
+
+        Opt-in burst mode (--burst). Each frame's primary image is encoded
+        ONCE, and that embedding doubles as the same-bird similarity signal.
+        The coarse bird/non-bird stage runs per frame first - a person
+        walking through a burst is recorded as non-bird, never averaged into
+        a bird posterior. Frames the coarse stage calls bird are then checked
+        against the EARLIEST frame via cosine similarity of the embeddings:
+        only frames >= `sim` count as the same bird (the gate that stops a
+        rapid sequence which actually cut between different subjects from
+        being merged). Frames passing the gate are scored with a FULL softmax
+        over the SHARED candidate ladder (the union of every ladder stage, so
+        every frame sees the same denominator) and the per-frame probability
+        distributions are AVERAGED - N looks at the same bird accumulate
+        evidence, which usually beats any single frame.
+
+        Returns {str(primary.resolve()): result} for every member frame:
+          - frames that passed the gate -> the SAME shared averaged result
+          - frames that failed it        -> their own single-frame result (a
+            different bird, or a non-bird -> the normal coarse result)
+        The caller writes each frame's sidecar from this map; a frame absent
+        from it was never grouped and takes the normal per-capture path.
+        """
+        results: dict[str, dict] = {}
+        bird: list = []                     # (capture, image_feat) bird frames
+        for cap in frames:
+            path = str(cap.primary().resolve())
+            self._report("classify", f"encoding {cap.primary().name} "
+                                     f"(burst, {len(frames)} frames)")
+            feat = self._encode_image(str(cap.primary()))
+            coarse = self._score_names(feat, COARSE_LABELS, 1)
+            cat_raw, coarse_conf = coarse[0]
+            cat = str(cat_raw).replace("a photo of a ", "").replace("a photo of ", "")
+            if cat == "bird":
+                bird.append((cap, feat))
+                continue
+            # a non-bird frame inside a burst: normal single-frame handling,
+            # so its sidecar stays a non-bird record, not a merged guess.
+            if not getattr(self.args, "analyze_all", False):
+                results[path] = {
+                    "species": cat if cat else "unknown", "scientific": "",
+                    "confidence": round(coarse_conf, 4),
+                    "alternatives": [], "status": "non-bird",
+                    "reasoning": (f"BioCLIP-2: subject category '{cat}' "
+                                  f"(non-bird, burst frame); skipped by the "
+                                  f"bird pre-filter"),
+                }
+            else:
+                r = self._classify_tol(str(cap.primary()), tax)
+                r["reasoning"] = (f"BioCLIP-2: subject category '{cat}' "
+                                  f"(non-bird, burst frame); TreeOfLife -> "
+                                  f"{r['species']} {r['confidence']*100:.0f}%")
+                results[path] = r
+
+        def single(cap, feat):
+            # one frame's own fine-stage result (the burst gave no shared
+            # evidence: too few bird frames, or the same-bird gate failed).
+            r = self._classify_bird(feat, ladder, region, month)
+            r["reasoning"] = (f"BioCLIP-2: burst frame not merged (no same-bird "
+                              f"group) -> {r['species']} {r['confidence']*100:.0f}%")
+            return r
+
+        if len(bird) < 2:
+            # a 'burst' of a single bird frame: no evidence to combine
+            for cap, feat in bird:
+                results[str(cap.primary().resolve())] = single(cap, feat)
+            return results
+
+        # same-bird gate: cosine against the earliest frame's embedding
+        anchor = bird[0][1]
+        kept: list = []
+        rest: list = []
+        for cap, feat in bird:
+            (kept if _cosine(feat, anchor) >= sim else rest).append((cap, feat))
+        if len(kept) < 2:
+            # the gate kept nothing - these are different subjects back-to-back
+            for cap, feat in bird:
+                results[str(cap.primary().resolve())] = single(cap, feat)
+            return results
+
+        # shared candidate ladder: the union of every stage, so each frame's
+        # distribution is over the SAME denominator (staging is a per-photo
+        # efficiency trick; a burst wants one common set).
+        names: list[str] = []
+        seen: set = set()
+        for _label, stage in ladder:
+            for s, _st in stage:
+                if s.lower() not in seen:
+                    seen.add(s.lower())
+                    names.append(s)
+        if not names:
+            names = ["unknown"]
+
+        self._report("classify", f"burst: averaging {len(kept)} same-bird "
+                                 f"frames over {len(names)} shared candidates")
+        avg = None
+        for cap, feat in kept:
+            probs = self._probs_for(feat, names, on_progress=self._embed_progress)
+            avg = probs if avg is None else avg + probs
+        avg = avg / len(kept)
+        order = np.argsort(avg)[::-1]
+        top, conf = names[int(order[0])], float(avg[order[0]])
+        alts = [names[int(i)] for i in order[1:4] if float(avg[i]) > 0.0]
+        shared = {
+            "species": top,
+            "confidence": round(conf, 4),
+            "alternatives": alts,
+            "reasoning": (f"BioCLIP-2: burst of {len(kept)} same-bird frames "
+                          f"(avg softmax over {len(names)} shared candidates) "
+                          f"-> {top} {conf*100:.0f}%"),
+        }
+        for cap, feat in kept:
+            results[str(cap.primary().resolve())] = shared
+        for cap, feat in rest:
+            results[str(cap.primary().resolve())] = single(cap, feat)
+        return results
 
 
 def make_classifier(args) -> Classifier:
@@ -2021,6 +2158,55 @@ def classify_capture(cap: Capture, force: bool = False) -> str:
     if force:
         return "pending"
     return sidecar_status(cap.sidecar()) or "pending"
+
+
+def _group_bursts(pending: list, meta_map: dict, gap: float):
+    """Group captures into bursts by EXIF capture time - NEVER mtime.
+
+    The Canon 5D Mark IV (~7 fps) and R5 (12-20 fps) fire burst frames tens-to-
+    hundreds of ms apart, so within the SAME folder any run of consecutive
+    captures whose EXIF DateTimeOriginal/CreateDate are <= `gap` seconds apart
+    forms one burst; a shot that came later than that starts a new one. The
+    time comes from `meta_map['datetime']` (the real shutter time read from
+    EXIF) - not the file mtime or the 'pulled from the camera card' timestamp
+    a properties GUI shows - so grouping is by when the shutter actually fired.
+    Captures with no EXIF time (or whose group never reaches two members) stay
+    singletons and take the normal per-capture path.
+
+    Returns (groups, member_of): groups is a list of time-ordered
+    [Capture, ...] each of length >= 2; member_of maps
+    str(cap.primary().resolve()) -> index into groups.
+    """
+    by_dir: dict[Path, list] = {}
+    for cap in pending:
+        meta = meta_map.get(str(cap.primary().resolve()), {})
+        dt = meta.get("datetime")
+        if dt is None:                       # no EXIF create time -> never burst
+            continue
+        by_dir.setdefault(cap.directory, []).append((cap, dt))
+
+    groups: list = []
+    member_of: dict[str, int] = {}
+    for caps in by_dir.values():
+        caps.sort(key=lambda t: t[1])        # real capture time order
+        cur: list = []
+        for cap, dt in caps:
+            if cur and (dt - cur[-1][1]).total_seconds() > gap:
+                _seal_burst(cur, groups, member_of)
+                cur = []
+            cur.append((cap, dt))
+        _seal_burst(cur, groups, member_of)
+    return groups, member_of
+
+
+def _seal_burst(cur: list, groups: list, member_of: dict):
+    """Close a time-run: keep it as a burst only when it has >= 2 frames."""
+    if len(cur) >= 2:
+        idx = len(groups)
+        group = [c for c, _d in cur]
+        groups.append(group)
+        for c in group:
+            member_of[str(c.primary().resolve())] = idx
 
 
 def _sidecar_best(sidecar: Path) -> tuple[str, float] | None:
@@ -2393,6 +2579,33 @@ def main():
                     help="below this top score, re-score against the wider "
                          "regional pool (neighbouring countries) - 0 disables "
                          "the expansion (default 0.35)")
+    ap.add_argument("--burst", action="store_true",
+                    help="burst-aware identification (OPT-IN): a rapid series "
+                         "of shots of the same bird is combined into one "
+                         "stronger ID. Captures in the same folder whose EXIF "
+                         "capture time (DateTimeOriginal/CreateDate - never the "
+                         "file mtime or the 'pulled from the card' timestamp) "
+                         "falls within --burst-gap are grouped, then only frames "
+                         "the BioCLIP embedding similarity confirms as the SAME "
+                         "bird (cosine >= --burst-sim) are averaged (softmax "
+                         "mean over the shared candidate ladder) and the shared "
+                         "result is written to EVERY frame's sidecar. Frames "
+                         "that fail the similarity gate keep their own single-"
+                         "frame ID. Without this flag behaviour is exactly the "
+                         "per-capture mode.")
+    ap.add_argument("--burst-gap", type=float, default=3.0,
+                    help="max EXIF capture-time gap (seconds) between frames of "
+                         "one burst (default 3.0). Tuned for the Canon 5D Mark "
+                         "IV (~7 fps) and Canon R5 (12-20 fps): burst frames are "
+                         "tens-to-hundreds of ms apart, so a few seconds "
+                         "captures a full burst while a new shot 30 s later "
+                         "starts a new one. Requires --burst.")
+    ap.add_argument("--burst-sim", type=float, default=0.8,
+                    help="minimum cosine similarity between a frame's BioCLIP "
+                         "embedding and the burst's earliest frame for it to "
+                         "count as the SAME bird and join the average "
+                         "(default 0.8). Lower = merges more; higher = only "
+                         "near-identical frames merge. Requires --burst.")
     ap.add_argument("--month-grace", type=int, default=1,
                     help="±N months around the photo's month a species still "
                          "counts as a candidate - birds rarely carry a "
@@ -2715,6 +2928,27 @@ def main():
                         for s in load_checklist(cl_path) if s.strip()]
                 return checklist_cache[key]
 
+            # --- Phase 2.5: burst grouping (opt-in --burst) ---
+            # Group pending captures into bursts by EXIF capture time (never
+            # mtime / folder name). Classification is LAZY: when the loop below
+            # reaches the first member of a group it classifies the WHOLE burst
+            # once (classify_burst) and reuses the shared result for every
+            # member, so the per-capture write path stays exactly as-is and the
+            # default (no --burst) is untouched.
+            burst_groups: list = []
+            burst_member_of: dict = {}
+            if args.burst:
+                burst_groups, burst_member_of = _group_bursts(
+                    pending, meta_map, args.burst_gap)
+                if burst_groups:
+                    n_burst = sum(len(g) for g in burst_groups)
+                    tui.plain_line(
+                        f"burst mode: {len(burst_groups)} burst(s) over "
+                        f"{n_burst} captures (EXIF gap <= {args.burst_gap:g}s, "
+                        f"same-bird cosine >= {args.burst_sim:.2f})")
+            burst_results: dict = {}      # str(primary.resolve()) -> shared result
+            burst_done: set = set()       # group indices already classified
+
             # --- Phase 3: process ---
             tui.set(phase="running")
             for i, cap in enumerate(pending, 1):
@@ -2800,7 +3034,31 @@ def main():
                             }
                     else:
                         tui.set(stage="classify", message=f"classifying {primary.name}")
-                        result = classifier.classify(primary, ladder, taxonomy, region, month, dt)
+                        key = str(primary.resolve())
+                        if key in burst_member_of:
+                            # this capture belongs to a burst: classify the WHOLE
+                            # burst once (the first member reached triggers it)
+                            # and reuse the shared result for every member. A
+                            # member that failed the same-bird gate is absent
+                            # from burst_results and falls back to its own ID.
+                            bix = burst_member_of[key]
+                            if bix not in burst_done:
+                                burst_done.add(bix)
+                                tui.set(stage="classify",
+                                        message=f"burst {len(burst_groups[bix])} "
+                                                f"frames: {primary.name}")
+                                burst_results.update(classifier.classify_burst(
+                                    burst_groups[bix], ladder, taxonomy, region,
+                                    month, sim=args.burst_sim))
+                            if key in burst_results:
+                                result = burst_results[key]
+                            else:
+                                result = classifier.classify(primary, ladder,
+                                                             taxonomy, region,
+                                                             month, dt)
+                        else:
+                            result = classifier.classify(primary, ladder, taxonomy,
+                                                         region, month, dt)
 
                     tui.set(stage="parse", message="normalising species")
                     if not isinstance(result, dict) or not result.get("species"):
@@ -2936,6 +3194,12 @@ def main():
                 f"\ndone: {done_n} tagged, {lc_new} low-confidence, "
                 f"{nd_n} no-data, {nb_n} non-bird, "
                 f"{error_n} errors -> manifest {manifest_path}")
+            if args.burst and burst_groups:
+                summary_lines.append(
+                    f"burst mode: {len(burst_groups)} burst(s) grouped by EXIF "
+                    f"time (gap <= {args.burst_gap:g}s, same-bird cosine >= "
+                    f"{args.burst_sim:.2f}); {len(burst_results)} frames "
+                    f"combined into shared results")
             for p in written:
                 summary_lines.append(f"wrote: {p}")
             if central and central.loaded and not args.no_checklist:
