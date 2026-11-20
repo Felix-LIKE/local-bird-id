@@ -1810,6 +1810,26 @@ def classify_capture(cap: Capture) -> str:
     on re-run (the region may have been downloaded since)."""
     return sidecar_status(cap.sidecar()) or "pending"
 
+
+def _sidecar_best(sidecar: Path) -> tuple[str, float] | None:
+    """Existing sidecar's (top species, top confidence), or None if the sidecar
+    is missing or has no topConfidence element. A no-data sidecar reads back as
+    ('unknown', 0.0); the keep-best guard additionally requires a 'done' /
+    'low-confidence' status, so such records are not protected."""
+    if not sidecar.exists():
+        return None
+    try:
+        root = _xmp_tree(sidecar)
+        conf = _find(root, "//bird:topConfidence")
+        if not conf or not conf[0].text:
+            return None
+        c = float(conf[0].text)
+        sp = _find(root, "//bird:topSpecies")
+        name = sp[0].text.strip() if sp and sp[0].text else "?"
+        return name, c
+    except (TypeError, ValueError):
+        return None
+
 # --------------------------------------------------------------------------
 # TUI (curses) + worker orchestration
 # --------------------------------------------------------------------------
@@ -2315,6 +2335,8 @@ def main():
     lc_new = 0
     nd_n = 0
     lc_skipped = []
+    kept_n = 0
+    kept_lines: list[str] = []
     lc_review: list[tuple[float, str, str]] = []
     try:
         # --- Phase 1: scan & classify ---
@@ -2554,49 +2576,70 @@ def main():
                     if (species not in ("unknown", "") and scientific == ""
                             and taxonomy and status != "non-bird"):
                         tui.plain_line(f"  note: '{species}' not in eBird taxonomy - check spelling")
-                    tui.set(stage="sidecar", message=f"writing {sidecar.name}")
-                    write_sidecar(sidecar, result, region, month, dt, status, args,
-                                  scientific=scientific, avibase_url=avibase_url,
-                                  avibase_id=avibase_id)
-                    manifest[str(sidecar)] = {
-                        "files": [str(f) for f in cap_files],
-                        "sidecar": str(sidecar), "region": region, "month": month,
-                        "gps": gps_src, "region_source": region_src, "date_source": date_src,
-                        "species": species, "scientific": scientific, "confidence": confidence,
-                        "avibase_id": avibase_id, "avibase_url": avibase_url,
-                        "status": status, "classifier": classifier.describe(),
-                        "pipelineVersion": PIPELINE_VERSION,
-                        "ts": datetime.now().isoformat(timespec="seconds"),
-                        "alternatives": result.get("alternatives", []),
-                        "reasoning": result.get("reasoning", ""),
-                        "datetime": dt.strftime("%Y-%m-%d %H:%M") if dt else "",
-                        "central_added": "; ".join(central_added),
-                        "central_outside": "; ".join(central_outside),
-                    }
-                    save_manifest(manifest_path, manifest)   # resumable: save after every capture
-
-                    report_rows.append({
-                        "capture": cap.base, "file": str(primary), "viewable": primary.name,
-                        "region": region, "month": f"{month:02d}", "species": species,
-                        "scientific_name": scientific, "confidence": f"{confidence:.2f}",
-                        "status": status, "gps": gps_src, "region_source": region_src,
-                        "date_source": date_src,
-                        "alternatives": "; ".join(result.get("alternatives", [])),
-                        "reasoning": result.get("reasoning", ""),
-                        "avibase_url": avibase_url,
-                        "datetime": dt.strftime("%Y-%m-%d %H:%M") if dt else "",
-                        "central_added": "; ".join(central_added),
-                        "central_outside": "; ".join(central_outside),
-                    })
-                    last = fmt_result(result, scientific, avibase_url)
-                    if status == "non-bird":
-                        nb_n += 1
-                    elif status == "low-confidence":
-                        lc_new += 1
-                    elif status == "no-data":
-                        nd_n += 1
+                    # keep-best guard: a re-analysis (review pass, --analyze-all,
+                    # a no-data retry) must never REGRESS a recorded result. The
+                    # candidate ladder can change between runs (e.g. a region
+                    # table gets downloaded, changing the softmax denominator),
+                    # so the same photo can score differently - if the photo
+                    # already holds a higher confidence, keep that record and
+                    # skip the write instead of downgrading the sidecar.
+                    old_status = sidecar_status(sidecar)
+                    old_best = _sidecar_best(sidecar)
+                    if (old_status in ("done", "low-confidence")
+                            and old_best is not None
+                            and old_best[1] > confidence + 1e-9):
+                        kept_n += 1
+                        kept_lines.append(
+                            f"  {cap.base}: kept '{old_best[0]}' "
+                            f"{old_best[1]*100:.0f}% over new '{species}' "
+                            f"{confidence*100:.0f}%")
+                        last = (f"kept existing {old_best[0]} "
+                                f"({old_best[1]*100:.0f}%) > new {species} "
+                                f"({confidence*100:.0f}%)")
                     else:
-                        done_n += 1
+                        tui.set(stage="sidecar", message=f"writing {sidecar.name}")
+                        write_sidecar(sidecar, result, region, month, dt, status, args,
+                                      scientific=scientific, avibase_url=avibase_url,
+                                      avibase_id=avibase_id)
+                        manifest[str(sidecar)] = {
+                            "files": [str(f) for f in cap_files],
+                            "sidecar": str(sidecar), "region": region, "month": month,
+                            "gps": gps_src, "region_source": region_src, "date_source": date_src,
+                            "species": species, "scientific": scientific, "confidence": confidence,
+                            "avibase_id": avibase_id, "avibase_url": avibase_url,
+                            "status": status, "classifier": classifier.describe(),
+                            "pipelineVersion": PIPELINE_VERSION,
+                            "ts": datetime.now().isoformat(timespec="seconds"),
+                            "alternatives": result.get("alternatives", []),
+                            "reasoning": result.get("reasoning", ""),
+                            "datetime": dt.strftime("%Y-%m-%d %H:%M") if dt else "",
+                            "central_added": "; ".join(central_added),
+                            "central_outside": "; ".join(central_outside),
+                        }
+                        save_manifest(manifest_path, manifest)   # resumable: save after every capture
+
+                        report_rows.append({
+                            "capture": cap.base, "file": str(primary), "viewable": primary.name,
+                            "region": region, "month": f"{month:02d}", "species": species,
+                            "scientific_name": scientific, "confidence": f"{confidence:.2f}",
+                            "status": status, "gps": gps_src, "region_source": region_src,
+                            "date_source": date_src,
+                            "alternatives": "; ".join(result.get("alternatives", [])),
+                            "reasoning": result.get("reasoning", ""),
+                            "avibase_url": avibase_url,
+                            "datetime": dt.strftime("%Y-%m-%d %H:%M") if dt else "",
+                            "central_added": "; ".join(central_added),
+                            "central_outside": "; ".join(central_outside),
+                        })
+                        last = fmt_result(result, scientific, avibase_url)
+                        if status == "non-bird":
+                            nb_n += 1
+                        elif status == "low-confidence":
+                            lc_new += 1
+                        elif status == "no-data":
+                            nd_n += 1
+                        else:
+                            done_n += 1
                 except Exception as e:  # noqa: BLE001
                     status = "error"
                     error_n += 1
@@ -2713,6 +2756,11 @@ def main():
         summary_lines.append(
             f"skipped {len(lc_skipped)} low-confidence capture(s) already "
             f"flagged (use --include-low-confidence to revisit)")
+    if kept_lines:
+        summary_lines.append(
+            f"\nkept existing higher-confidence result for {kept_n} capture(s) "
+            f"(re-analysis scored lower - sidecar left unchanged):")
+        summary_lines.extend(kept_lines)
     if lc_review:
         summary_lines.append(
             f"\nlow-confidence photos for review (top score < "
