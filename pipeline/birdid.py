@@ -75,6 +75,18 @@ DEFAULT_DATA_DIR = str(Path(__file__).resolve().parent.parent / "ebird")
 DEFAULT_REGION = "DE"
 PIPELINE_VERSION = "1"
 
+
+def _default_cache_dir() -> Path:
+    """Central per-user BioCLIP 2 species-embedding cache.
+
+    Lives under the XDG cache home (~/.cache/birdid/embeddings) - NOT inside
+    the photo folders, the repo, or the eBird data dir - so the derived cache
+    files never end up in an IMatch-managed tree. Override with --cache-dir.
+    """
+    xdg = os.environ.get("XDG_CACHE_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".cache"
+    return base / "birdid" / "embeddings"
+
 # Centralized eBird checklist exports (one file per checklist, e.g.
 # S296663962_observations.csv). Override with --checklists-dir or
 # BIRDID_CHECKLISTS_DIR; created by --initialize.
@@ -1014,7 +1026,9 @@ def _encode_text_name(backbone, name: str) -> np.ndarray:
 class SpeciesEmbeddingCache:
     """Reusable on-disk per-species text-embedding cache.
 
-    Layout under <data_dir>/embeddings/ (gitignored - derived data):
+    Layout in a central cache dir (default ~/.cache/birdid/embeddings, override
+    with --cache-dir - kept out of the photo folders, the repo and the eBird
+    data dir so no derived files land in an IMatch-managed tree):
       index.json      {"model": <bioclip model str>, "names": [n, ...]}
       embeddings.npy  float32 [N, D]   (row i == embedding of names[i];
                                         D = model embedding dim, 768 for
@@ -1027,8 +1041,8 @@ class SpeciesEmbeddingCache:
     separately (a stale matrix for another model is rebuilt).
     """
 
-    def __init__(self, data_dir: Path | None):
-        self.dir = Path(data_dir) / "embeddings" if data_dir else None
+    def __init__(self, cache_dir: Path | None):
+        self.dir = cache_dir
         self._names: list[str] = []
         self._index: dict[str, int] = {}
         self._matrix: np.ndarray | None = None
@@ -1200,7 +1214,7 @@ class BioclipClassifier(Classifier):
                 "(this pulls in torch + torchvision; model weights download "
                 "on first use)") from e
         self._coarse = None
-        self._cache = SpeciesEmbeddingCache(Path(args.data_dir))
+        self._cache = SpeciesEmbeddingCache(Path(args.cache_dir))
         self._tol = None
         self._Rank = None
 
@@ -1358,10 +1372,12 @@ class BioclipClassifier(Classifier):
             if p >= self.args.expand_threshold or i == n_stages - 1:
                 stop_i = i
                 break
+            nxt_label, nxt_stage = ladder[i + 1]
+            nxt_n = len([s for s, _st in nxt_stage])
             self._report("classify", f"top score {p*100:.0f}% below "
                                      f"{self.args.expand_threshold:.2f} - "
-                                     f"expanding to '{label}' "
-                                     f"({len(names)} candidates)")
+                                     f"expanding to '{nxt_label}' "
+                                     f"({nxt_n} candidates)")
         p, species, alts, win_i = best
         if stop_i == 0 and win_i == 0:
             reasoning = (f"BioCLIP-2: bird category; softmax over "
@@ -1611,7 +1627,9 @@ def scan_folder(root: Path, manifest: dict) -> list[Capture]:
 
 
 def sidecar_status(sidecar: Path):
-    """Return 'done' / 'non-bird' / 'error' / None by parsing the sidecar."""
+    """Return 'done' / 'low-confidence' / 'non-bird' / 'error' / None by parsing
+    the sidecar. 'low-confidence' is kept distinct from 'done' so a re-run can
+    revisit (or skip) uncertain captures (see --include-low-confidence)."""
     if not sidecar.exists():
         return None
     try:
@@ -1622,6 +1640,8 @@ def sidecar_status(sidecar: Path):
             return "error"
         if status == "non-bird":
             return "non-bird"
+        if status == "low-confidence":
+            return "low-confidence"
         if sidecar_done(sidecar):
             return "done"
     except Exception:
@@ -1630,7 +1650,8 @@ def sidecar_status(sidecar: Path):
 
 
 def classify_capture(cap: Capture) -> str:
-    """done / error / pending - a capture is done iff its single sidecar is done."""
+    """done / low-confidence / non-bird / error / pending - a capture is done
+    iff its single sidecar is done."""
     return sidecar_status(cap.sidecar()) or "pending"
 
 # --------------------------------------------------------------------------
@@ -1792,6 +1813,12 @@ def main():
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
                     help="dir containing eBird data (regions/, regions_generated/, "
                          "taxonomy). Default: <repo>/ebird")
+    ap.add_argument("--cache-dir", default=str(_default_cache_dir()),
+                    help="central per-user BioCLIP 2 species-embedding cache "
+                         "(embeddings.npy + index.json). Kept out of the photo "
+                         "folders and the eBird data dir so no derived files "
+                         "land in an IMatch-managed tree. "
+                         f"Default: {_default_cache_dir()}")
     ap.add_argument("--region", default=DEFAULT_REGION,
                     help="default region when no GPS can be resolved; DE/SG/TH "
                          "have no country seed and fall back to their EUROPE/SEA "
@@ -1809,7 +1836,18 @@ def main():
     ap.add_argument("--report", default=None, help="additionally write a flat CSV aggregate of the current run to this path (per-folder reports are always written as <folder>/birdid_report.csv)")
     ap.add_argument("--max", type=int, default=0, help="stop after this many captures (0 = all)")
     ap.add_argument("--min-confidence", type=float, default=0.5,
-                    help="below this, status is 'low-confidence' (default 0.5)")
+                    help="below this top score a capture is flagged "
+                         "'low-confidence' (default 0.5): a sidecar is still "
+                         "written with the best guess, but the photo is listed "
+                         "for review and skipped on re-runs unless "
+                         "--include-low-confidence is given. Lower this (e.g. "
+                         "0.35) to accept more marginal shots as 'done'.")
+    ap.add_argument("--include-low-confidence", action="store_true",
+                    help="re-process captures whose sidecar is flagged "
+                         "'low-confidence' (top score below --min-confidence). "
+                         "By default such photos are left untouched and only "
+                         "listed for review; this flag puts them back in the "
+                         "processing queue.")
     ap.add_argument("--expand-threshold", type=float, default=0.35,
                     help="below this top score, re-score against the wider "
                          "regional pool (neighbouring countries) - 0 disables "
@@ -1949,6 +1987,9 @@ def main():
     tui_thread.start()
     summary_lines: list[str] = []
     fatal = False
+    lc_new = 0
+    lc_skipped = []
+    lc_review: list[tuple[float, str, str]] = []
     try:
         # --- Phase 1: scan & classify ---
         tui.set(phase="scanning", stage="", message="walking folder tree")
@@ -1971,6 +2012,12 @@ def main():
                     pending.append(cap)
                 else:
                     nb_n += 1
+            elif status == "low-confidence":
+                if args.include_low_confidence:
+                    # review pass: re-analyse the flagged captures
+                    pending.append(cap)
+                else:
+                    lc_skipped.append(cap)
             else:
                 error_n += 1
 
@@ -2140,6 +2187,8 @@ def main():
                     last = fmt_result(result, scientific, avibase_url)
                     if status == "non-bird":
                         nb_n += 1
+                    elif status == "low-confidence":
+                        lc_new += 1
                     else:
                         done_n += 1
                 except Exception as e:  # noqa: BLE001
@@ -2168,7 +2217,7 @@ def main():
                         last = f"ERROR (write failed too): {e2}"
                         tui.plain_line(f"  {last}")
 
-                tui.set(processed=i, done=done_n, error=error_n, pending=len(pending) - i,
+                tui.set(processed=i, done=done_n + lc_new, error=error_n, pending=len(pending) - i,
                         current="", stage="", message="", last=last)
                 tui.plain_line(f"[{i}/{len(pending)}] {rel}: {last}")
 
@@ -2183,8 +2232,8 @@ def main():
                 written.append(str(flat))
             tui.set(phase="done", message="finished")
             summary_lines.append(
-                f"\ndone: {done_n} tagged, {nb_n} non-bird, {error_n} errors -> "
-                f"manifest {manifest_path}")
+                f"\ndone: {done_n} tagged, {lc_new} low-confidence, {nb_n} non-bird, "
+                f"{error_n} errors -> manifest {manifest_path}")
             for p in written:
                 summary_lines.append(f"wrote: {p}")
             if central and central.loaded and not args.no_checklist:
@@ -2212,8 +2261,55 @@ def main():
         if tui_thread and tui_thread.is_alive():
             tui_thread.join(timeout=1)
         tui.stop()
+
+    # low-confidence review list - built here so it appears both after a real
+    # processing run and on the early-exit path (a re-run with nothing pending).
+    # It covers this run's and earlier runs' flagged captures, least-confident
+    # first, straight from the manifest.
+    lc_review = sorted(
+        ((float(e.get("confidence", 0.0)), e.get("species", "?"),
+          Path(k).parent.name + "/" + Path(k).stem)
+         for k, e in manifest.items() if e.get("status") == "low-confidence"),
+        key=lambda t: t[0])
+    if lc_skipped:
+        summary_lines.append(
+            f"skipped {len(lc_skipped)} low-confidence capture(s) already "
+            f"flagged (use --include-low-confidence to revisit)")
+    if lc_review:
+        summary_lines.append(
+            f"\nlow-confidence photos for review (top score < "
+            f"{args.min_confidence:.2f}, best guess kept in sidecar):")
+        for conf, sp, name in lc_review:
+            summary_lines.append(f"  {conf*100:4.0f}%  {name}  ({sp})")
+
     for line in summary_lines:
         print(line, file=sys.stderr if fatal else sys.stdout)
+
+    # Interactive review offer (TUI mode only): after the run, ask whether to
+    # re-analyse the low-confidence photos right now. A 'yes' re-invokes the
+    # same command with --include-low-confidence --no-tui (a plain retag pass;
+    # the species-embedding cache is warm by then, so it is quick). --no-tui is
+    # forced because the fullscreen UI has already been torn down.
+    if (not fatal and not args.no_tui and not args.dry_run
+            and lc_review and not args.include_low_confidence):
+        n = len(lc_review)
+        try:
+            ans = input(
+                f"\n{n} low-confidence photo(s) listed above (top score < "
+                f"{args.min_confidence:.2f}). Re-analyse them now? "
+                f"(yes = review pass, no = leave them flagged) [y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            ans = ""
+        if ans in ("y", "yes"):
+            argv = [a for a in sys.argv if a != "--no-tui"]
+            if "--include-low-confidence" not in argv:
+                argv.append("--include-low-confidence")
+            argv.append("--no-tui")
+            print("re-running as a review pass: --include-low-confidence --no-tui\n",
+                  flush=True)
+            os.execv(sys.executable,
+                     [sys.executable, os.path.abspath(__file__)] + argv[1:])
+
     if fatal:
         sys.exit(1)
 

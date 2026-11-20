@@ -31,11 +31,12 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
   likewise grace-widened. Confident photos never pay for the big pool;
   low-confidence ones still get the whole ladder.
 - **Reusable on-disk embedding cache**: every species' BioCLIP 2 text embedding
-  (the 80-ImageNet-template mean) is computed once and cached under
-  `ebird/embeddings/` (gitignored), shared across runs and folders. After the
-  first photo the per-photo cost is a single image encode + softmax, no matter
-  how many species the candidate list holds - so 369-photo folders no longer
-  stall on their first photo.
+  (the 80-ImageNet-template mean) is computed once and cached centrally under
+  `~/.cache/birdid/embeddings/` (see `--cache-dir`), shared across runs and
+  folders and kept out of the photo folders and this repo. After the first
+  photo the per-photo cost is a single image encode + softmax, no matter how
+  many species the candidate list holds - so 369-photo folders no longer stall
+  on their first photo.
 - **±1-month grace** (`--month-grace 1`, default on): a species whose
   presence is recorded a month earlier or later still counts as a candidate,
   so a photo taken just before/after the typical season isn't mis-identified
@@ -52,6 +53,16 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
   analysis - so a big mixed collection is handled fast. `--analyze-all`
   disables the pre-filter and fully analyses every subject (previously skipped
   non-birds are re-analysed on rerun).
+- **Low-confidence handling** (`--min-confidence`, default 0.50): a capture
+  whose top score stays below the threshold (a blurry, distant, or ambiguous
+  bird) still gets a sidecar - with its best guess + confidence kept - but with
+  `status = low-confidence`, so it shows up in IMatch clearly marked as
+  uncertain. Such photos are **skipped on re-runs and listed for review**: at
+  the end of a run the summary prints them least-confident first ("low-confidence
+  photos for review"), and in TUI mode it asks "re-analyse them now?" - a *yes*
+  re-runs them with `--include-low-confidence --no-tui`. To revisit flagged
+  photos yourself, run `birdid <folder> --include-low-confidence` (re-analyse)
+  or lower `--min-confidence` (accept more marginal shots as done).
 - **Resumable**: the manifest is saved after every capture; reruns skip done
   work and never redo model calls.
 - **RAW+JPEG pairs** = one capture → one model call → result mirrored to both
@@ -312,7 +323,7 @@ A recommended layout (trip → location → photos):
 | `pipeline/ebird_data.py` | eBird data management: registry, API key store, `--download` / `--list` / `--initialize` |
 | `ebird/regions/*.csv` | **Committed curated seeds** (EUROPE + SEA, the two no-key regions) — the GPS+time prior. |
 | `ebird/regions_generated/` | **Gitignored** API-derived tables from `birdid --download <code>` (preferred over the seeds; never committed — eBird API data may not be redistributed). The smallest division is written into a continent/subcontinent tree: `AS/AS-SOUTHEAST/SG.csv` (a country with subnational tables becomes `SG/<SUB>.csv`), with a pooled `<REGION>.csv` kept alongside. |
-| `ebird/embeddings/` | **Gitignored** per-species BioCLIP 2 text-embedding cache (`embeddings.npy` + `index.json`, regenerable on demand) — makes the classifier's fine stage a single cached softmax per photo. |
+| `~/.cache/birdid/embeddings/` | **Central per-user cache** (not in this repo; override with `--cache-dir`) — per-species BioCLIP 2 text embeddings (`embeddings.npy` + `index.json`, regenerable on demand) that make the classifier's fine stage a single cached softmax per photo. |
 | `ebird/continents.csv` | **Committed** static continent/subcontinent reference (250 codes) — builds the continent/subcontinent pools + country→pool map (feature 3) |
 | `ebird/eBird-Clements_Integrated_Checklist.csv` | Bundled Clements checklist (version-agnostic name): offline taxonomy fallback + Avibase ids |
 | `ebird/` | eBird data + schema docs |

@@ -181,11 +181,13 @@ the layout and a worked example.
   and re-loaded the model on every photo and pool expansion - the reason a
   369-photo folder could stall for 26 min on its first photo. Now the whole run
   shares a single compiled backbone, and each species' embedding is computed
-  once ever and cached on disk under `ebird/embeddings/` (gitignored, keyed by
-  model; `embeddings.npy` + `index.json`). Per photo the cost is one image
-  encode + a cached softmax, independent of candidate-list size. The first time
-  a region's species are seen the one-time per-species encode runs with visible
-  progress; later runs (any folder) reuse the cache.
+  once ever and cached centrally under `~/.cache/birdid/embeddings/` (override
+  with `--cache-dir`; kept out of the photo folders and the repo so no derived
+  files land in an IMatch-managed tree; keyed by model: `embeddings.npy` +
+  `index.json`). Per photo the cost is one image encode + a cached softmax,
+  independent of candidate-list size. The first time a region's species are
+  seen the one-time per-species encode runs with visible progress; later runs
+  (any folder) reuse the cache.
 - **±1-month grace (`--month-grace 1`, default on)**: a species whose recorded
   presence is off by a month or two still counts as a candidate - the month
   window is widened to `[month-grace, month+grace]`, wrapping across the year.
@@ -208,6 +210,18 @@ the layout and a worked example.
   almost nothing. `--analyze-all` disables the pre-filter: non-bird subjects
   get the full TreeOfLife species analysis, and previously skipped non-bird
   captures are re-analysed on the next run.
+- **Low-confidence handling** (`--min-confidence`, default 0.50): a capture
+  whose top score stays below the threshold (blurry / distant / ambiguous bird)
+  is *not* silently tagged. It still gets a sidecar with its best guess +
+  confidence, but with `status = low-confidence` - so it shows in IMatch marked
+  as uncertain. On re-runs such captures are **skipped** (they do not count as
+  done) and the run summary lists them least-confident-first under
+  "low-confidence photos for review". In TUI mode the run then asks whether to
+  re-analyse them; a `yes` re-invokes the same command with
+  `--include-low-confidence --no-tui` (a plain retag pass, quick now that the
+  embedding cache is warm). Use `--include-low-confidence` to put flagged
+  captures back in the processing queue, or lower `--min-confidence` to accept
+  more marginal shots as `done`.
 - **Sidecars are merged**, never blind-rewritten: existing XMP elements are
   preserved and only the `bird:` fields (+ `dc:subject`, `dc:description`) are
   updated.
