@@ -1550,6 +1550,38 @@ def _set_list(parent, tag, ns_uri, values, container):
         li.text = str(v)
 
 
+# Canonical order of rdf:Description's children in a sidecar. write_sidecar
+# merges into an existing file, and _set_list / dc:subject remove-and-reappend
+# their elements - without this reorder, every re-run would drift the layout
+# (species/confidence migrating to the end). Kept in sync with write_sidecar.
+_XMP_DESC_ORDER = [
+    ("bird", "species"), ("bird", "confidence"), ("bird", "summary"),
+    ("bird", "topSpecies"), ("bird", "scientificName"),
+    ("bird", "avibaseId"), ("bird", "avibaseUrl"), ("bird", "topConfidence"),
+    ("bird", "status"), ("bird", "pipelineVersion"), ("bird", "region"),
+    ("bird", "month"), ("bird", "datetime"), ("bird", "reasoning"),
+    ("bird", "error"), ("dc", "description"), ("dc", "subject"),
+]
+
+
+def _canonicalize_desc(desc):
+    """Reorder rdf:Description's children into _XMP_DESC_ORDER so a merged
+    sidecar keeps the same layout as a freshly written one. Elements outside
+    the canonical list keep their relative order at the end."""
+    from lxml import etree
+    nsmap = _nsmap()
+    wanted = [f"{{{nsmap[ns]}}}{tag}" for ns, tag in _XMP_DESC_ORDER]
+    rank = {tag: i for i, tag in enumerate(wanted)}
+    children = list(desc)
+    ordered = sorted((el for el in children if el.tag in rank),
+                     key=lambda el: rank[el.tag])
+    tail = [el for el in children if el.tag not in rank]
+    for el in children:
+        desc.remove(el)
+    for el in ordered + tail:
+        desc.append(el)
+
+
 def sidecar_done(sidecar: Path) -> bool:
     """A file is 'done' iff its sidecar has bird:species with >= 1 entry."""
     if not sidecar.exists():
@@ -1636,6 +1668,10 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
                 li = etree.SubElement(bag, f"{{{_nsmap()['rdf']}}}li")
                 li.text = f"{kw_prefix}/{s}"
 
+    # canonical element order, regardless of whether this sidecar was merged
+    # into an existing file (a re-run must not drift the layout)
+    _canonicalize_desc(desc)
+
     out = io.BytesIO()
     etree.ElementTree(root).write(out, xml_declaration=True, encoding="UTF-8",
                                   pretty_print=True)
@@ -1657,6 +1693,17 @@ def load_manifest(path: Path) -> dict:
 
 def save_manifest(path: Path, manifest: dict):
     path.write_text(json.dumps(manifest, indent=1, ensure_ascii=False))
+
+
+def _low_confidence_review(manifest: dict) -> list[tuple[float, str, str]]:
+    """Sorted (confidence, species, folder/stem) list of low-confidence
+    captures from the manifest, least-confident first. Used for the review
+    summary and for the in-TUI rerun offer."""
+    return sorted(
+        ((float(e.get("confidence", 0.0)), e.get("species", "?"),
+          Path(k).parent.name + "/" + Path(k).stem)
+         for k, e in manifest.items() if e.get("status") == "low-confidence"),
+        key=lambda t: t[0])
 
 
 # --------------------------------------------------------------------------
@@ -2609,6 +2656,40 @@ def main():
                 for p in written:
                     summary_lines.append(f"wrote: {p}")
             tui.set(phase="done", message="nothing to process")
+
+        # --- in-TUI offer for the low-confidence review pass ---
+        # The TUI is still alive here (teardown is in `finally`). tui.prompt()
+        # suspends the fullscreen, asks on the terminal and restores it - the
+        # same mechanism the region / no-data questions use mid-run. A 'yes'
+        # re-execs a fresh process with --include-low-confidence, so the review
+        # pass runs with its own full TUI; a 'no' falls through to teardown and
+        # the normal summary. Interrupt/error paths bypass this entirely.
+        if (tui.enabled and not args.dry_run
+                and not args.include_low_confidence):
+            lc_offer = _low_confidence_review(manifest)
+            if lc_offer:
+                listing = "\n".join(
+                    f"  {conf*100:4.0f}%  {name}  ({sp})"
+                    for conf, sp, name in lc_offer)
+                ans = tui.prompt(
+                    f"{len(lc_offer)} low-confidence photo(s) (top score < "
+                    f"{args.min_confidence:.2f}):\n{listing}\n"
+                    f"Re-analyse them now in a TUI review pass? "
+                    f"(yes = review now, no = leave them flagged) [y/N] ").lower()
+                if ans in ("y", "yes"):
+                    # hand off cleanly: tear the TUI down, then re-exec a fresh
+                    # process so the review pass starts with its own fullscreen.
+                    tui.stop_flag.set()
+                    if tui_thread and tui_thread.is_alive():
+                        tui_thread.join(timeout=1)
+                    tui.stop()
+                    argv = [a for a in sys.argv if a != "--no-tui"]
+                    if "--include-low-confidence" not in argv:
+                        argv.append("--include-low-confidence")
+                    print("re-running as a TUI review pass: "
+                          "--include-low-confidence\n", flush=True)
+                    os.execv(sys.executable,
+                             [sys.executable, os.path.abspath(__file__)] + argv[1:])
     except KeyboardInterrupt:
         tui.set(phase="interrupted", message="interrupted - manifest is resume-safe")
         summary_lines = ["\ninterrupted. rerun the same command to resume."]
@@ -2625,12 +2706,9 @@ def main():
     # low-confidence review list - built here so it appears both after a real
     # processing run and on the early-exit path (a re-run with nothing pending).
     # It covers this run's and earlier runs' flagged captures, least-confident
-    # first, straight from the manifest.
-    lc_review = sorted(
-        ((float(e.get("confidence", 0.0)), e.get("species", "?"),
-          Path(k).parent.name + "/" + Path(k).stem)
-         for k, e in manifest.items() if e.get("status") == "low-confidence"),
-        key=lambda t: t[0])
+    # first, straight from the manifest. (The in-TUI review offer already asked
+    # about these; this is just the summary.)
+    lc_review = _low_confidence_review(manifest)
     if lc_skipped:
         summary_lines.append(
             f"skipped {len(lc_skipped)} low-confidence capture(s) already "
@@ -2659,31 +2737,6 @@ def main():
 
     for line in summary_lines:
         print(line, file=sys.stderr if fatal else sys.stdout)
-
-    # Interactive review offer (TUI mode only): after the run, ask whether to
-    # re-analyse the low-confidence photos right now. A 'yes' re-invokes the
-    # same command with --include-low-confidence --no-tui (a plain retag pass;
-    # the species-embedding cache is warm by then, so it is quick). --no-tui is
-    # forced because the fullscreen UI has already been torn down.
-    if (not fatal and not args.no_tui and not args.dry_run
-            and lc_review and not args.include_low_confidence):
-        n = len(lc_review)
-        try:
-            ans = input(
-                f"\n{n} low-confidence photo(s) listed above (top score < "
-                f"{args.min_confidence:.2f}). Re-analyse them now? "
-                f"(yes = review pass, no = leave them flagged) [y/N] ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            ans = ""
-        if ans in ("y", "yes"):
-            argv = [a for a in sys.argv if a != "--no-tui"]
-            if "--include-low-confidence" not in argv:
-                argv.append("--include-low-confidence")
-            argv.append("--no-tui")
-            print("re-running as a review pass: --include-low-confidence --no-tui\n",
-                  flush=True)
-            os.execv(sys.executable,
-                     [sys.executable, os.path.abspath(__file__)] + argv[1:])
 
     if fatal:
         sys.exit(1)
