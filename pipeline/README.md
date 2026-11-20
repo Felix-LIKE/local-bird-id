@@ -127,6 +127,11 @@ Needs `exiftool` and python3 with `PIL`, `lxml`, `requests` (see the top-level
 README for the per-distro package names, e.g. `perl-image-exiftool` on Arch,
 `libimage-exiftool-perl` on Ubuntu/Debian, `perl-Image-ExifTool` on Fedora).
 
+The pipeline also runs on **macOS** (`brew install exiftool`) and **Windows**
+(WSL, Git Bash, or `python birdid.py ...` directly with `windows-curses` /
+`--no-tui` for the TUI) — see the top-level README, "Running on macOS or
+Windows".
+
 ## Usage (direct)
 
 ```bash

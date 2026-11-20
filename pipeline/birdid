@@ -36,8 +36,23 @@
 #   1  pipeline error / FATAL
 set -u
 
+# ---- portable path resolution ---------------------------------------------
+# GNU `readlink -f` where available, else Python's os.path.realpath (python3 is
+# a hard requirement of the whole tool anyway). This is the one place macOS's
+# BSD readlink (no -f flag) would otherwise break the launcher.
+_realpath() {
+    local p
+    if p="$(readlink -f -- "$1" 2>/dev/null)"; then
+        printf '%s\n' "$p"
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
 # ---- config ---------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$(_realpath "${BASH_SOURCE[0]}")")" && pwd)"
 # prefer the project venv (BioCLIP backend) if present
 VENV="$SCRIPT_DIR/.venv"
 if [ -x "$VENV/bin/python" ]; then
@@ -61,7 +76,7 @@ _doctor() {
     local bad=0 tmp repo real inst
     tmp="/tmp/birdid_doctor_$$.syntax"
     echo "birdid: --doctor: launcher self-diagnostics"
-    echo "  script      : $(readlink -f "$0")"
+    echo "  script      : $(_realpath "$0")"
     echo "  pipeline    : $PIPELINE"
 
     # 1. this file parses
@@ -114,9 +129,9 @@ _doctor() {
     fi
 
     # 5. install layout: ~/.local/bin/birdid is a symlink to this file
-    real="$(readlink -f "$0")"
+    real="$(_realpath "$0")"
     if [ -L "$HOME/.local/bin/birdid" ]; then
-        inst="$(readlink -f "$HOME/.local/bin/birdid")"
+        inst="$(_realpath "$HOME/.local/bin/birdid")"
         if [ "$inst" = "$real" ]; then
             echo "  [ok] ~/.local/bin/birdid -> $real"
         else

@@ -250,6 +250,50 @@ birdid --help          # all options
 If you get a `Permission denied` when running `pipeline/birdid`, make it
 executable first: `chmod +x pipeline/birdid`.
 
+### Running on macOS or Windows
+
+The core pipeline (`birdid.py`) is pure Python and runs on macOS and Windows —
+there is no Linux-only code. Only the small `pipeline/birdid` launcher and the
+setup steps above are Linux-flavoured. Data, cache and API key always live in
+your user folders (`<repo>/ebird`, `~/.cache/birdid`, `~/.config/birdid`), never
+in hardcoded system paths.
+
+**macOS**
+
+1. Install `exiftool` — a hard requirement, it reads the GPS + date out of your
+   photos: `brew install exiftool` (install [Homebrew](https://brew.sh) first).
+2. Create the Python environment exactly as in Step 3 — the venv uses the same
+   `bin/python` layout as Linux:
+
+   ```bash
+   python3 -m venv --system-site-packages pipeline/.venv
+   pipeline/.venv/bin/pip install --upgrade pip
+   pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+   pipeline/.venv/bin/pip install pybioclip lxml requests
+   ```
+3. `pipeline/birdid --initialize`, then run as usual. The launcher now falls
+   back to a portable path resolver when macOS's `readlink` lacks `-f`, so it
+   works out of the box. The TUI needs `curses`, which is built into macOS's
+   Python.
+
+**Windows**
+
+There is no native bash, so pick one of these:
+
+- **WSL (recommended)** — install WSL, then follow the Linux steps above.
+  Everything, including the `pipeline/birdid` launcher and `--doctor`, behaves
+  exactly as on Linux.
+- **Git Bash / MSYS2** — the launcher mostly works, but the venv sits in
+  `pipeline/.venv/Scripts/python.exe` (Windows layout), so set `BIRDID_PY` to
+  point at it or just call `python birdid.py ...` directly. Install the
+  [ExifTool](https://exiftool.org) Windows binary and add it to your PATH.
+- **Native Python (no bash)** — run `python birdid.py /path/to/photos ...`
+  directly:
+  - create a venv and `pip install torch torchvision pybioclip lxml requests`,
+  - install the ExifTool Windows binary and add it to your PATH,
+  - the TUI needs `pip install windows-curses` — or simply add `--no-tui`
+    (birdid already auto-disables the TUI when stdout isn't a terminal).
+
 ### How much disk space do I need?
 
 | Component | Size (approx) |
