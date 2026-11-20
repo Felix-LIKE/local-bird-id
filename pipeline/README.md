@@ -118,7 +118,7 @@ instructions (Ubuntu / Fedora / Arch) are in the top-level `README.md`
 (Installation). The short version:
 
 ```bash
-python3 -m venv --system-site-packages pipeline/.venv
+python3 -m venv pipeline/.venv
 pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pipeline/.venv/bin/pip install pybioclip lxml requests
 pipeline/birdid --initialize

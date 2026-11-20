@@ -125,6 +125,21 @@ will, in order:
 same password you log in with). If a command says `command not found`, a
 previous step has not finished yet — re-run it.
 
+> **Quick start (skips the manual steps below).** From a terminal:
+>
+> ```bash
+> git clone https://github.com/Felix-LIKE/local-bird-id.git
+> cd local-bird-id
+> ./bootstrap.sh --dry-run    # safe: only prints what it would do
+> ./bootstrap.sh              # installs system deps, creates the venv, adds birdid to PATH
+> birdid --initialize         # one-time AI-model download (~4 GB)
+> ```
+>
+> `bootstrap.sh` detects your distro (Arch / Debian / Ubuntu / Fedora /
+> openSUSE / Alpine / macOS), installs git + Python + exiftool, builds the
+> project's private Python environment and puts `birdid` on your PATH. It never
+> touches your system Python. The steps below do the same thing by hand.
+
 ### Step 1 — Install the basic tools
 
 Open a terminal (most distros: press `Ctrl+Alt+T`). Pick the block for your
@@ -197,7 +212,7 @@ This installs the project's Python libraries into a private folder
 your computer can break. Paste these four lines:
 
 ```bash
-python3 -m venv --system-site-packages pipeline/.venv
+python3 -m venv pipeline/.venv
 pipeline/.venv/bin/pip install --upgrade pip
 pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pipeline/.venv/bin/pip install pybioclip lxml requests
@@ -265,7 +280,7 @@ in hardcoded system paths.
    `bin/python` layout as Linux:
 
    ```bash
-   python3 -m venv --system-site-packages pipeline/.venv
+   python3 -m venv pipeline/.venv
    pipeline/.venv/bin/pip install --upgrade pip
    pipeline/.venv/bin/pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
    pipeline/.venv/bin/pip install pybioclip lxml requests
