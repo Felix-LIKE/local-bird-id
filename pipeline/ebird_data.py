@@ -456,10 +456,13 @@ def http_get_json(url: str, headers: dict | None = None, retries: int = 3):
         try:
             r = requests.get(url, headers=headers or {}, timeout=20)
         except requests.RequestException as e:
-            if attempt == retries - 1:
-                raise RuntimeError(f"request failed: {e}") from e
-            time.sleep(2 * (attempt + 1))
-            continue
+            # A timeout/hang is not worth retrying: the eBird historic endpoint
+            # can simply never answer a date (DE in May, around Global Big Day),
+            # and 3 x 20s per date would stall the run for minutes. The callers
+            # (sample_months etc.) recover by skipping the date / falling back
+            # to the previous year. Only retry-able HTTP statuses below are
+            # re-attempted.
+            raise RuntimeError(f"request failed: {e}") from e
         if r.status_code in (429, 500, 502, 503, 504):
             retry_after = r.headers.get("Retry-After")
             try:
