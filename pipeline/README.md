@@ -41,11 +41,12 @@ birdid --cache update             # sync the cache with the current eBird tables
 
 - The only backend is **BioCLIP 2** (CPU, runs in the project venv) - no server
   is ever needed.
-- **Fully offline by default**: for folder runs the launcher sets
-  `HF_HUB_OFFLINE=1` / `TRANSFORMERS_OFFLINE=1`, so the pipeline never touches
-  the network. Run `birdid --initialize` once (the management commands run
-  online) to cache the BioCLIP 2 weights, the TreeOfLife-200M datafile, the Aves
-  filter and the eBird taxonomy under `~/.cache/huggingface`.
+- **Fully offline by default**: for folder runs and for `--cache` (which only
+  touches already-downloaded data) the launcher sets `HF_HUB_OFFLINE=1` /
+  `TRANSFORMERS_OFFLINE=1`, so the pipeline never touches the network. Run
+  `birdid --initialize` once (the management commands run online) to cache the
+  BioCLIP 2 weights, the TreeOfLife-200M datafile, the Aves filter and the eBird
+  taxonomy under `~/.cache/huggingface`.
 - Env override: `BIRDID_PY` (python to use; defaults to the project venv).
 
 ## Data management

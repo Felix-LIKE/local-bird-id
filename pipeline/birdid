@@ -93,17 +93,23 @@ fi
 # online. Everything that has a folder is a real identification run and must
 # stay fully offline.
 MGMT=0
+OFFLINE=0
 for a in "$@"; do
     case "$a" in
         -d|--download|-u|--update|--list|--api|--initialize|--download-backends|--cache|--list-candidates|-h|--help)
             MGMT=1 ;;
         --download=*|--update=*|--list=*|--api=*|--initialize=*) MGMT=1 ;;
     esac
+    # --cache only touches already-downloaded data (local eBird tables and the
+    # pre-cached BioCLIP model), so it runs fully offline too.
+    case "$a" in
+        --cache) OFFLINE=1 ;;
+    esac
 done
 
-if [ "$MGMT" -eq 0 ]; then
-    # real run: guarantee fully-offline operation. The BioCLIP/TOL backends are
-    # predownloaded with `--initialize` / `--download-backends`.
+if [ "$MGMT" -eq 0 ] || [ "$OFFLINE" -eq 1 ]; then
+    # real runs and --cache: guarantee fully-offline operation. The BioCLIP/TOL
+    # backends are predownloaded with `--initialize` / `--download-backends`.
     export HF_HUB_OFFLINE=1
     export TRANSFORMERS_OFFLINE=1
 fi

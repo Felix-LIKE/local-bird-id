@@ -86,7 +86,8 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
   sidecars; RAW-only files use the embedded preview (no dcraw needed).
 - **Live TUI** progress (q = quit, resume-safe) or `--no-tui` for plain output.
 - **Completely offline**: the launcher forces `HF_HUB_OFFLINE=1` for folder
-  runs; run `birdid --initialize` once to cache everything.
+  runs and for `--cache` (which only touches already-downloaded data); run
+  `birdid --initialize` once to cache everything.
 
 ### Never needs a key vs needs a key
 
