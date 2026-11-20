@@ -103,6 +103,12 @@ birdid --download region NA-CARIBBEAN  # Caribbean subcontinent
 birdid --download region SA-BRAZIL     # Brazil (1 country)
 ```
 
+Bare `birdid --download region` resolves to the **default country's
+subcontinent** (DE → `EU-WEST` - the tightest pool); `--download region
+continent` to its **continent** (DE → `EUROPE` - the widest). For a specific
+country use `--download region subcontinent SG` (→ `SEA`) or
+`--download region continent SG` (→ `AS`).
+
 So e.g. `regions_generated/AS/AS-SOUTHEAST/` ends up containing `SG.csv`,
 `MY.csv`, ... plus a pooled `AS-SOUTHEAST.csv`; downloading `region AS` later
 fills `AS/AS-EAST/`, `AS/AS-WEST/`, ... without touching the existing folders.
@@ -130,6 +136,11 @@ How the real data is fetched:
   a continent) unions the monthly presence of all its member countries and
   keeps the union as a pooled `<REGION>.csv` alongside the country files.
 - Rate-limit guard: `--api-delay` seconds between calls (default 1.5).
+- **Resilient to slow dates**: a single date the eBird API doesn't answer for
+  (the historic endpoint can hang server-side on very high-volume dates, e.g.
+  around Global Big Day in early May) is skipped after a few short retries with
+  a warning, instead of aborting the whole download - the table is built from
+  the dates that did respond.
 
 Generated tables are **API-derived and gitignored** - they are preferred over
 the seeds while present, but must never be committed (eBird API data may not be

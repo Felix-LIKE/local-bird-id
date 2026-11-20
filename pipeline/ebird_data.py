@@ -285,6 +285,28 @@ def load_countries(data_dir: Path) -> dict[str, str]:
     return out
 
 
+def _region_level_for(country: str, level: str,
+                      countries: dict[str, str]) -> tuple[str, str]:
+    """Resolve a country's subcontinent (level=SUBCONTINENT) or continent
+    (level=CONTINENT) pool to (code, label) for `--download region ...`.
+
+    Returns the aliased pool code (AS-SOUTHEAST -> SEA) so it matches the name
+    `--list downloadable` shows. Raises if the country has no such level in the
+    bundled continents.csv reference.
+    """
+    if level == "SUBCONTINENT":
+        raw = country_subcontinent_map().get(country)
+    else:
+        raw = country_continent_map().get(country)
+    if not raw:
+        name = COUNTRIES.get(country, {}).get("name") or countries.get(country, country)
+        raise ValueError(f"{country} ({name}) has no {level.lower()} in the "
+                         f"bundled continents.csv reference")
+    code = POOL_ALIASES.get(raw, raw)
+    label = SUB_NAMES.get(code) or POOLS.get(code, {}).get("name", code)
+    return code, label
+
+
 def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
     """Turn `--download` args into (kind, code, label).
 
@@ -292,7 +314,10 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
       ['SG']                  bare code (registry country, pool, or any ISO
                               country in the bundled reference)
       ['country']             default country (DEFAULT_REGION)
-      ['region']              pool of the default country
+      ['region']              default country's SUBcontinent pool (tightest)
+      ['region', 'subcontinent']   same, explicit
+      ['region', 'continent'] default country's continent pool (widest)
+      ['region', 'subcontinent'|'continent', CODE]   a specific country's pool
       ['taxonomy']            the eBird/Clements taxonomy (no key needed)
       ['country', 'SG']       explicit country (any eBird country/subnational code)
       ['region', 'SEA']       explicit pool
@@ -309,8 +334,9 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
             code = DEFAULT_REGION
             return "country", code, COUNTRIES[code]["name"]
         if u == "REGION":
-            code = COUNTRIES[DEFAULT_REGION]["pool"]
-            return "region", code, POOLS[code]["name"]
+            # default: the default country's SUBcontinent (tightest pool)
+            return "region", *_region_level_for(DEFAULT_REGION, "SUBCONTINENT",
+                                                countries)
         if u == "TAXONOMY":
             return "taxonomy", "", "eBird/Clements taxonomy"
         if u in COUNTRIES:
@@ -337,6 +363,9 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
                 return "country", u, countries[u]
             return "country", u, u          # arbitrary eBird country/subnational code
         if kind == "region":
+            if u in ("SUBCONTINENT", "CONTINENT"):
+                # level of the default country (e.g. `region continent` -> EUROPE)
+                return "region", *_region_level_for(DEFAULT_REGION, u, countries)
             if u in POOLS:
                 return "region", u, POOLS[u]["name"]
             if u in SUB_NAMES:
@@ -348,8 +377,18 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
                              f"(known: {', '.join(sorted(POOLS))})")
         raise ValueError("--download's first value must be 'country' or 'region' "
                          f"(got {t[0]!r})")
-    raise ValueError("--download takes 1 or 2 values, e.g. '--download SG' or "
-                     "'--download country SG'")
+    if len(t) == 3 and t[0].lower() == "region":
+        level, code = t[1].upper(), t[2].upper()
+        if level not in ("SUBCONTINENT", "CONTINENT"):
+            raise ValueError(f"unknown region level {t[1]!r} "
+                             f"(use 'subcontinent' or 'continent')")
+        if code not in COUNTRIES and code not in countries:
+            raise ValueError(f"unknown country code: {t[2]!r} "
+                             f"(see `birdid --list downloadable` for all eBird "
+                             f"countries)")
+        return "region", *_region_level_for(code, level, countries)
+    raise ValueError("--download takes 1, 2 or 3 values, e.g. '--download SG', "
+                     "'--download country SG', '--download region continent'")
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +454,7 @@ def http_get_json(url: str, headers: dict | None = None, retries: int = 3):
     for attempt in range(retries):
         _throttle()
         try:
-            r = requests.get(url, headers=headers or {}, timeout=60)
+            r = requests.get(url, headers=headers or {}, timeout=20)
         except requests.RequestException as e:
             if attempt == retries - 1:
                 raise RuntimeError(f"request failed: {e}") from e
@@ -575,22 +614,42 @@ def sample_months(region_code: str, key: str, year: int, sample_dates: int,
     complete in it falls back to `year - 1` observations, so an in-progress
     year never yields empty month masks (see sampling_year_for_month).
     `progress` (optional) is a callable(region, done, total, date).
+
+    A date the eBird API does not answer for (the historic endpoint can hang or
+    error server-side on high-volume dates, e.g. around Global Big Day in May)
+    is skipped with a warning instead of aborting the whole download - the
+    table is still written from the dates that did respond.
     """
     sp_months: dict[str, set[int]] = defaultdict(set)
     total = 12 * sample_dates
     done = 0
     newest: date | None = None
+    skipped: list[str] = []
     for month in range(1, 13):
         m_year = sampling_year_for_month(year, month, today)
         for y, m, d in sample_dates_for_month(m_year, month, sample_dates):
-            for name in historic_obs(region_code, y, m, d, key):
+            ds = f"{y:04d}-{m:02d}-{d:02d}"
+            try:
+                names = historic_obs(region_code, y, m, d, key)
+            except Exception as e:      # server-side hang/error on that date
+                skipped.append(ds)
+                done += 1
+                if progress:
+                    progress(region_code, done, total, f"{ds} (skipped)")
+                continue
+            for name in names:
                 sp_months[name].add(month)
             done += 1
             dt = date(y, m, d)
             if newest is None or dt > newest:
                 newest = dt
             if progress:
-                progress(region_code, done, total, f"{dt:%Y-%m-%d}")
+                progress(region_code, done, total, ds)
+    if skipped:
+        shown = ", ".join(skipped[:6]) + (" ..." if len(skipped) > 6 else "")
+        print(f"birdid:   warning: eBird API did not answer {len(skipped)} "
+              f"sample date(s) for {region_code} ({shown}); those samples were "
+              f"skipped, the table is built from the rest.")
     return dict(sp_months), newest or date(year, 12, 31)
 
 

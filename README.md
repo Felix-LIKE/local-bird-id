@@ -373,7 +373,9 @@ pipeline/birdid --api <your-key>    # store it (~/.config/birdid/ebird_api_key, 
 # ebird/regions_generated/; a pooled <REGION>.csv is kept alongside)
 pipeline/birdid --download SG       # country  (or: --download country SG)
 pipeline/birdid --download SEA      # region   (or: --download region SEA)
-pipeline/birdid --download region   # default region's pool (DE -> EUROPE)
+pipeline/birdid --download region   # default country's subcontinent (DE -> EU-WEST)
+pipeline/birdid --download region continent   # widest group: DE -> EUROPE
+pipeline/birdid --download region continent SG # specific country: SG -> AS
 pipeline/birdid --download country SG --subnational   # SG/<SUB>.csv per subregion
 
 # batch-download a whole continent or subcontinent (from ebird/continents.csv);
