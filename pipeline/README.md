@@ -257,9 +257,12 @@ the layout and a worked example.
   whose BioCLIP **image-embedding similarity** confirms the SAME bird (cosine
   ≥ `--burst-sim`, default 0.8, against the earliest frame) are merged. The
   merged frames are each scored with a **full softmax over the shared candidate
-  ladder** (the same denominator for every frame) and their probability
-  distributions are **averaged** - N looks at the same bird accumulate evidence,
-  so a 3-frame burst usually beats any single frame. The shared result is
+  ladder** (the same denominator for every frame) and combined by **logit-
+  averaging** (the normalized geometric mean of the per-frame distributions:
+  per-frame log-probabilities are averaged, then one softmax) - a species that
+  is top in every frame dominates, so N looks at the same bird *accumulate*
+  evidence and a 3-frame burst usually beats any single frame (a plain
+  probability average would only smooth, not compound). The shared result is
   written to **every** frame's sidecar + manifest, so IMatch sees one consistent
   ID across the burst. Frames that fail the similarity gate (a different bird,
   or a non-bird subject that walked through the burst) keep their own

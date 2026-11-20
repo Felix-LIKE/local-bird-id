@@ -76,7 +76,9 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
   `--burst-gap` (default 3 s) are grouped, then only frames the BioCLIP
   embedding similarity confirms as the **same bird** (cosine ≥ `--burst-sim`,
   default 0.8) have their full-softmax distributions over the shared candidate
-  ladder **averaged**; the shared result is written to every frame's sidecar.
+  ladder merged by **logit-averaging** (the normalized geometric mean, so N
+  looks at the same bird *accumulate* evidence and confidence rises with N);
+  the shared result is written to every frame's sidecar.
   Frames that fail the gate (a different bird / a person that walked through)
   keep their own single-frame ID. Without `--burst` the per-capture mode is
   exactly unchanged.

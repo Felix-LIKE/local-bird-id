@@ -1722,9 +1722,14 @@ class BioclipClassifier(Classifier):
         rapid sequence which actually cut between different subjects from
         being merged). Frames passing the gate are scored with a FULL softmax
         over the SHARED candidate ladder (the union of every ladder stage, so
-        every frame sees the same denominator) and the per-frame probability
-        distributions are AVERAGED - N looks at the same bird accumulate
-        evidence, which usually beats any single frame.
+        every frame sees the same denominator) and the per-frame distributions
+        are combined by LOGIT averaging (the normalized geometric mean of the
+        per-frame softmax vectors): the per-frame log-probabilities are
+        averaged and one softmax applied - a species that is top in every
+        frame dominates, and N looks at the same bird ACCUMULATE evidence, so
+        confidence rises with N and usually beats any single frame (unlike a
+        plain arithmetic mean of the probabilities, which only smooths and
+        lands below the best frame).
 
         Returns {str(primary.resolve()): result} for every member frame:
           - frames that passed the gate -> the SAME shared averaged result
@@ -1803,13 +1808,22 @@ class BioclipClassifier(Classifier):
         if not names:
             names = ["unknown"]
 
-        self._report("classify", f"burst: averaging {len(kept)} same-bird "
+        self._report("classify", f"burst: merging {len(kept)} same-bird "
                                  f"frames over {len(names)} shared candidates")
-        avg = None
+        # Evidence accumulation: average the per-frame LOG-probabilities (equal
+        # to averaging the raw logits up to one per-frame constant) and take a
+        # single softmax = the normalized GEOMETRIC mean of the per-frame
+        # distributions. A species that is top in every frame dominates and
+        # confidence rises with N - unlike a plain arithmetic mean of the
+        # softmax vectors, which only smooths and lands below the best frame.
+        mean_logp = None
         for cap, feat in kept:
             probs = self._probs_for(feat, names, on_progress=self._embed_progress)
-            avg = probs if avg is None else avg + probs
-        avg = avg / len(kept)
+            logp = np.log(np.maximum(probs, 1e-12))
+            mean_logp = logp if mean_logp is None else mean_logp + logp
+        mean_logp = mean_logp / len(kept)
+        e = np.exp(mean_logp - mean_logp.max())
+        avg = e / e.sum()
         order = np.argsort(avg)[::-1]
         top, conf = names[int(order[0])], float(avg[order[0]])
         alts = [names[int(i)] for i in order[1:4] if float(avg[i]) > 0.0]
@@ -1818,8 +1832,8 @@ class BioclipClassifier(Classifier):
             "confidence": round(conf, 4),
             "alternatives": alts,
             "reasoning": (f"BioCLIP-2: burst of {len(kept)} same-bird frames "
-                          f"(avg softmax over {len(names)} shared candidates) "
-                          f"-> {top} {conf*100:.0f}%"),
+                          f"(logit-averaged softmax over {len(names)} shared "
+                          f"candidates) -> {top} {conf*100:.0f}%"),
         }
         for cap, feat in kept:
             results[str(cap.primary().resolve())] = shared
@@ -2587,8 +2601,9 @@ def main():
                          "file mtime or the 'pulled from the card' timestamp) "
                          "falls within --burst-gap are grouped, then only frames "
                          "the BioCLIP embedding similarity confirms as the SAME "
-                         "bird (cosine >= --burst-sim) are averaged (softmax "
-                         "mean over the shared candidate ladder) and the shared "
+                         "bird (cosine >= --burst-sim) are merged by logit-"
+                         "averaging (geometric mean over the shared candidate "
+                         "ladder, so N looks accumulate evidence) and the shared "
                          "result is written to EVERY frame's sidecar. Frames "
                          "that fail the similarity gate keep their own single-"
                          "frame ID. Without this flag behaviour is exactly the "
@@ -2603,7 +2618,7 @@ def main():
     ap.add_argument("--burst-sim", type=float, default=0.8,
                     help="minimum cosine similarity between a frame's BioCLIP "
                          "embedding and the burst's earliest frame for it to "
-                         "count as the SAME bird and join the average "
+                         "count as the SAME bird and join the merged result "
                          "(default 0.8). Lower = merges more; higher = only "
                          "near-identical frames merge. Requires --burst.")
     ap.add_argument("--month-grace", type=int, default=1,
