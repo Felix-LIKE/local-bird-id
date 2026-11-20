@@ -290,17 +290,21 @@ the layout and a worked example.
   captures back in the processing queue, or lower `--min-confidence` to accept
   more marginal shots as `done`.
 - **Sidecars are merged**, never blind-rewritten: existing XMP elements are
-  preserved and only the `bird:` fields (+ `dc:subject`, `dc:description`) are
-  updated.
+  preserved and only the `bird:` fields are updated. `dc:subject` /
+  `dc:description` are managed **only on sidecars birdid itself created** (it
+  marks them with `bird:dcOwned`) - on a sidecar written by other software
+  (e.g. IMatch) birdid adds its `bird:*` fields and leaves `dc:subject` /
+  `dc:description` untouched, so foreign keywords and captions are never
+  clobbered.
 - **Forcing a re-run**: a capture counts as *done* iff its sidecar is done, so
   reruns skip it. `--force` re-identifies **every** capture in place: existing
-  sidecars are kept (nothing is deleted) and only the bird-ID fields
-  (`bird:*` + `dc:subject`/`dc:description`) are overwritten, so a forced run
-  is safe on a folder managed by your photo software - any other XMP content
-  it wrote is preserved. The keep-best guard is bypassed (the new result is
-  written even
-  if it scores lower). Without `--force`, delete the stale sidecars (+ manifest
-  + report) first to re-tag a folder - originals are never touched.
+  sidecars are kept (nothing is deleted) and only the bird-ID fields are
+  overwritten (`bird:*`, plus `dc:subject`/`dc:description` on birdid-owned
+  sidecars), so a forced run is safe on a folder managed by your photo
+  software - any other XMP content it wrote is preserved. The keep-best guard
+  is bypassed (the new result is written even if it scores lower). Without
+  `--force`, delete the stale sidecars (+ manifest + report) first to re-tag a
+  folder - originals are never touched.
 
 ## Output per photo (XMP sidecar)
 
@@ -314,9 +318,13 @@ One sidecar per capture, `<base>.xmp` (e.g. `IMG_1234.xmp` for
 top guess), `bird:topConfidence`,
 `bird:status` (done / low-confidence / non-bird / error), `bird:pipelineVersion`,
 `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning`,
-`dc:description` (includes the scientific name, and the Avibase link), and
+`bird:dcOwned` (set to `true` on sidecars birdid created, marking them as
+birdid-owned), plus — **only on birdid-owned sidecars** —
+`dc:description` (includes the scientific name, and the Avibase link) and
 `dc:subject` keywords
-`Birds/<species>`. Register `http://ns.birdpipeline/1.0/` as a custom metadata
+`Birds/<species>`. On a sidecar that pre-existed from other software, only the
+`bird:*` fields are added and the foreign `dc:*` content is left untouched.
+Register `http://ns.birdpipeline/1.0/` as a custom metadata
 namespace in your photo software (e.g. a DAM).
 
 Names are normalised against the official eBird taxonomy: the model's answer is

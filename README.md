@@ -566,7 +566,8 @@ region prior may be too narrow (download a wider pool to cover them).
 > rerun skips it. For a fresh identification run, use
 > `birdid <folder> --force` — every capture is re-identified **in place**: the
 > existing `<base>.xmp` is kept (nothing is deleted) and only the bird-ID
-> fields are overwritten, so it is safe on folders managed by your photo
+> fields are overwritten (the `dc:subject`/`dc:description` your software wrote
+> are never touched), so it is safe on folders managed by your photo
 > software where the sidecars also hold metadata written by that software.
 > Only if you want to wipe the sidecars
 > entirely, delete them (+ `birdid_manifest.json` + the per-folder

@@ -60,7 +60,9 @@ See --help for all options. Examples:
   birdid.py ~/Pictures/birds --force                # re-ID an already-tagged
                                                     # folder in place (keeps the
                                                     # existing sidecars, overwrites
-                                                    # only the bird-ID fields)
+                                                    # only the bird-ID fields, and
+                                                    # never foreign dc:subject/
+                                                    # dc:description content)
   birdid.py ~/Pictures/birds --max 10 --no-tui      # first 10, plain output
   birdid.py ~/Pictures/birds --burst                # combine a rapid series of
                                                     # shots of the same bird into
@@ -1913,6 +1915,17 @@ def _set_list(parent, tag, ns_uri, values, container):
         li.text = str(v)
 
 
+def _dc_keywords_owned(root):
+    """True if an existing dc:subject was written by birdid (i.e. it contains
+    our `Birds/` / `Non-bird/` keyword prefixes). Backward compatibility for
+    sidecars created before the bird:dcOwned marker existed."""
+    for el in _find(root, "//dc:subject/rdf:Bag/rdf:li"):
+        t = (el.text or "").strip()
+        if t.startswith("Birds/") or t.startswith("Non-bird/"):
+            return True
+    return False
+
+
 # Canonical order of rdf:Description's children in a sidecar. write_sidecar
 # merges into an existing file, and _set_list / dc:subject remove-and-reappend
 # their elements - without this reorder, every re-run would drift the layout
@@ -1923,7 +1936,7 @@ _XMP_DESC_ORDER = [
     ("bird", "avibaseId"), ("bird", "avibaseUrl"), ("bird", "topConfidence"),
     ("bird", "status"), ("bird", "pipelineVersion"), ("bird", "region"),
     ("bird", "month"), ("bird", "datetime"), ("bird", "reasoning"),
-    ("bird", "error"), ("dc", "description"), ("dc", "subject"),
+    ("bird", "dcOwned"), ("bird", "error"), ("dc", "description"), ("dc", "subject"),
 ]
 
 
@@ -1962,12 +1975,23 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
                   avibase_url: str = "", avibase_id: str = ""):
     """Create/merge an XMP sidecar at `sidecar`. Originals are never touched."""
     from lxml import etree
+    preexisted = sidecar.exists()
     root = _xmp_tree(sidecar)
     ns = _nsmap()
     descs = _find(root, "//rdf:Description")
     if not descs:
         raise RuntimeError("could not locate rdf:Description in sidecar XML")
     desc = descs[0]
+
+    # A sidecar birdid created (or already manages) is "owned": birdid may also
+    # maintain the human-readable dc:description and dc:subject keywords there.
+    # A sidecar that pre-existed and carries no birdid marker (e.g. one written
+    # by IMatch or any other tool) is FOREIGN: birdid adds ONLY its bird:*
+    # fields and never touches the foreign dc:* fields, so existing keywords and
+    # captions are preserved instead of being clobbered.
+    owned = (not preexisted) or bool(_find(root, "//bird:dcOwned")) or _dc_keywords_owned(root)
+    if owned:
+        _set_text(desc, "dcOwned", BIRD_NS, "true")
 
     if error:
         _set_text(desc, "status", BIRD_NS, "error")
@@ -2007,29 +2031,32 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
         reasoning = result.get("reasoning", "")
         _set_text(desc, "reasoning", BIRD_NS, reasoning[:1000])
 
-        # dc:description (human readable) and dc:subject keywords
-        note = f"{species} ({scientific}) {confidence*100:.0f}%" if scientific else f"{species} ({confidence*100:.0f}%)"
-        if alts:
-            note += "; alternatives: " + ", ".join(alts[:3])
-        if reasoning:
-            note += f" - {reasoning}"
-        if avibase_url:
-            note += f" | Avibase: {avibase_url}"
-        _set_text(desc, "description", _nsmap()["dc"], note)
+        if owned:
+            # dc:description (human readable) and dc:subject keywords - only on
+            # sidecars birdid owns, so foreign captions/keywords are preserved
+            note = f"{species} ({scientific}) {confidence*100:.0f}%" if scientific else f"{species} ({confidence*100:.0f}%)"
+            if alts:
+                note += "; alternatives: " + ", ".join(alts[:3])
+            if reasoning:
+                note += f" - {reasoning}"
+            if avibase_url:
+                note += f" | Avibase: {avibase_url}"
+            _set_text(desc, "description", _nsmap()["dc"], note)
 
-        # dc:subject -> Birds/<species> keywords (convenience for photo software);
-        # non-bird subjects get Non-bird/<category> so they stay separate.
-        kw_prefix = "Non-bird" if status == "non-bird" else "Birds"
-        for old in _find(root, "//dc:subject"):
-            old.getparent().remove(old)
-        subj = etree.SubElement(desc, f"{{{_nsmap()['dc']}}}subject")
-        bag = etree.SubElement(subj, f"{{{_nsmap()['rdf']}}}Bag")
-        seen = set()
-        for s in ranked[:5]:
-            if s not in seen:
-                seen.add(s)
-                li = etree.SubElement(bag, f"{{{_nsmap()['rdf']}}}li")
-                li.text = f"{kw_prefix}/{s}"
+            # dc:subject -> Birds/<species> keywords (convenience for photo
+            # software); non-bird subjects get Non-bird/<category> so they stay
+            # separate. Only on owned sidecars (see above).
+            kw_prefix = "Non-bird" if status == "non-bird" else "Birds"
+            for old in _find(root, "//dc:subject"):
+                old.getparent().remove(old)
+            subj = etree.SubElement(desc, f"{{{_nsmap()['dc']}}}subject")
+            bag = etree.SubElement(subj, f"{{{_nsmap()['rdf']}}}Bag")
+            seen = set()
+            for s in ranked[:5]:
+                if s not in seen:
+                    seen.add(s)
+                    li = etree.SubElement(bag, f"{{{_nsmap()['rdf']}}}li")
+                    li.text = f"{kw_prefix}/{s}"
 
     # canonical element order, regardless of whether this sidecar was merged
     # into an existing file (a re-run must not drift the layout)
@@ -2588,13 +2615,15 @@ def main():
                     help="force a fresh identification run for a folder that "
                          "already has sidecars: every capture is re-processed "
                          "and ONLY the bird-ID fields in the existing XMP are "
-                         "overwritten (bird:* + dc:subject/dc:description). "
-                         "Everything else in the sidecar - e.g. metadata your "
-                         "photo software has written - is preserved, and no "
-                         "file is deleted, so a forced re-run is safe on a "
-                         "folder managed by your photo software. Also "
-                         "overrides the keep-best guard (the new "
-                         "result is written even if it scores lower).")
+                         "overwritten (bird:*; dc:subject/dc:description only "
+                         "on sidecars birdid itself created). dc:subject and "
+                         "dc:description written by other software are never "
+                         "touched. Everything else in the sidecar - e.g. "
+                         "metadata your photo software has written - is "
+                         "preserved, and no file is deleted, so a forced "
+                         "re-run is safe on a folder managed by your photo "
+                         "software. Also overrides the keep-best guard (the "
+                         "new result is written even if it scores lower).")
     ap.add_argument("--expand-threshold", type=float, default=0.35,
                     help="below this top score, re-score against the wider "
                          "regional pool (neighbouring countries) - 0 disables "
