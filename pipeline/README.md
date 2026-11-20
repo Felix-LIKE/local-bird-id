@@ -31,7 +31,8 @@ birdid --download region AS-SOUTHEAST      # all 11 country files into AS/AS-SOU
 birdid --download taxonomy        # fetch the keyless eBird/Clements taxonomy
 birdid --initialize               # one-time: taxonomy + BioCLIP 2 backends
 birdid --cache build <region>     # precompute the species-embedding cache (no API key)
-birdid --cache clean <region>     # prune the cache to that region's species
+birdid --cache clean <region>     # remove that region's data from the cache
+birdid --cache update             # sync the cache with the current eBird tables
 ```
 
 - The only backend is **BioCLIP 2** (CPU, runs in the project venv) - no server
@@ -88,13 +89,19 @@ folder**; they manage the eBird data used as the classifier's prior.
   grace-widened) and the coarse labels - so a later run over that region encodes
   nothing on the fly. With no region it covers **all loaded regions** (the
   common "build the whole cache before a trip" case). `--cache clean [REGION...]`
-  prunes the cache down to that region's species + coarse labels (default: all
-  loaded regions, i.e. drop every species no loaded table can use - e.g. after
-  an eBird table refresh or when you stop photographing a region). `clean` needs
-  **no model** and runs instantly; `build` loads the shared BioCLIP 2 backbone
-  and shows a per-species progress bar. Region codes come from the eBird tables
+  **removes** the given region(s)' species from the cache and **keeps everything
+  else** - for when you stop photographing a region (e.g. `--cache clean SG`
+  frees Singapore's data, leaving the rest intact). With no region, `clean`
+  instead drops the **stale** species no loaded table can use any more (e.g.
+  after an eBird table refresh). `--cache update [REGION...]` **syncs** the
+  cache with the current eBird tables: it drops stale species AND encodes the
+  species the region(s) now need that aren't cached yet (incremental - only the
+  delta) - the "is my cache still current?" command. `clean` needs **no model**
+  and runs instantly; `build`/`update` load the shared BioCLIP 2 backbone and
+  show a per-species progress bar. Region codes come from the eBird tables
   (`birdid --list`): countries (`DE`, `SG`), subcontinents (`EU-WEST`,
-  `AS-SOUTHEAST`) or continents (`EUROPE`, `AS`).
+  `AS-SOUTHEAST`) or continents (`EUROPE`, `AS`). Coarse labels are never
+  removed.
 
 ## Prerequisites (one time)
 
@@ -204,9 +211,10 @@ the layout and a worked example.
   seen the one-time per-species encode runs with visible progress; later runs
   (any folder) reuse the cache. The cache is **region-agnostic** (it holds
   every species ever encoded, keyed by name), so `--cache build <region>`
-  precomputes exactly the species a run over that region will need, and
-  `--cache clean <region>` prunes the store down to that region's species -
-  see *Data management* above.
+  precomputes exactly the species a run over that region will need, `--cache
+  clean <region>` removes that region's species (keeping the rest), and
+  `--cache update` syncs the whole store to the current eBird tables - see
+  *Data management* above.
 - **±1-month grace (`--month-grace 1`, default on)**: a species whose recorded
   presence is off by a month or two still counts as a candidate - the month
   window is widened to `[month-grace, month+grace]`, wrapping across the year.

@@ -1232,8 +1232,9 @@ def _cache_needed_species(db: SpeciesDB, region: str, grace: int = 1
     The union over ALL months of the base region plus every wider tier pool
     (subcontinent, then continent), each with the month window grace-widened -
     the same candidate sets the ladder and the low-confidence fallback use, so
-    a `--cache build <region>` precomputes exactly what a run over that region
-    will need, and `--cache clean <region>` retains exactly that set.
+    `--cache build <region>` precomputes exactly what a run over that region
+    will need, and `--cache clean <region>` / `--cache update` know exactly
+    which cached species belong to that region.
     """
     out: list[str] = []
     seen: set[str] = set()
@@ -1246,24 +1247,54 @@ def _cache_needed_species(db: SpeciesDB, region: str, grace: int = 1
     return out
 
 
-def run_cache(data_dir: Path, cache_dir: Path, tokens: list[str]):
-    """`--cache build [REGION...]` / `--cache clean [REGION...]`.
+def _cache_union(db: SpeciesDB, regions: list[str]) -> list[str]:
+    """Ordered list of every species a run over `regions` can need: the union
+    of each region's _cache_needed_species plus the COARSE_LABELS coarse
+    prompts (scored for every photo regardless of region)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for reg in regions:
+        for sp in _cache_needed_species(db, reg):
+            if sp.lower() not in seen:
+                seen.add(sp.lower())
+                out.append(sp)
+    for c in COARSE_LABELS:
+        if c.lower() not in seen:
+            seen.add(c.lower())
+            out.append(c)
+    return out
 
-    `build` precomputes the species-embedding cache for the given region(s) so
-    a later run over that region encodes nothing on the fly (default: all
-    loaded regions). `clean` prunes the cache down to the region(s)' species +
-    the COARSE_LABELS coarse prompts (default: all loaded regions, i.e. drop
-    every species no loaded region can ever use - e.g. after an eBird table
-    refresh). Both accept region codes from `db.regions()` (countries like DE,
-    subcontinents like EU-WEST or AS-SOUTHEAST, or continents like EUROPE).
-    `clean` needs no model; `build` loads the shared BioCLIP 2 backbone.
+
+def run_cache(data_dir: Path, cache_dir: Path, tokens: list[str]):
+    """`--cache build | clean | update [REGION...]`.
+
+    All three work on the central per-species embedding cache and accept
+    region codes from `db.regions()` (countries like DE, subcontinents like
+    EU-WEST or AS-SOUTHEAST, or continents like EUROPE); no region = every
+    loaded region. COARSE_LABELS are never removed.
+
+      build   precompute embeddings for the region(s)' species (base + wider
+              pools), so a later run over that region encodes nothing on the
+              fly. Loads the BioCLIP 2 backbone; skips already-cached species.
+      clean   GET RID of data. With regions: remove exactly that region's
+              species (base + its wider pools) from the cache and keep every
+              other species - shared species it also uses are dropped too
+              (they are part of its cached data) and re-encoded on demand if
+              another region needs them. No region: drop the stale species no
+              loaded table can use any more (e.g. after an eBird refresh). No
+              model needed.
+      update  sync the cache with the current eBird tables: drop species no
+              longer in any loaded table AND encode species the region(s) now
+              need that aren't cached yet (incremental - only the delta). The
+              "is my cache still current?" command. No-arg = whole cache.
     """
     cmd = tokens[0].lower() if tokens else ""
-    if cmd not in ("build", "clean"):
+    if cmd not in ("build", "clean", "update"):
         given = tokens[0] if tokens else ""
         raise ValueError(
             f"unknown --cache subcommand {given!r} "
-            "(expected: --cache build [REGION...]  |  --cache clean [REGION...])")
+            "(expected: --cache build [REGION...]  |  --cache clean [REGION...]  "
+            "|  --cache update [REGION...])")
     requested = [t.upper() for t in tokens[1:]]
 
     db = SpeciesDB(data_dir / "regions", data_dir / "regions_generated")
@@ -1279,28 +1310,23 @@ def run_cache(data_dir: Path, cache_dir: Path, tokens: list[str]):
     else:
         regions = sorted(available)     # all loaded regions
 
-    # the species set a run over these regions can need, plus the coarse
-    # prompts that every classify() scores regardless of region
-    needed: list[str] = []
-    seen: set[str] = set()
-    for reg in regions:
-        for sp in _cache_needed_species(db, reg):
-            if sp.lower() not in seen:
-                seen.add(sp.lower())
-                needed.append(sp)
-    for c in COARSE_LABELS:
-        if c.lower() not in seen:
-            seen.add(c.lower())
-            needed.append(c)
+    # what each requested region needs, and the union over EVERY loaded region
+    # (the "any current table can use this species" reference for pruning)
+    need_of = {reg: set(_cache_needed_species(db, reg)) for reg in regions}
+    every_need = set(COARSE_LABELS)
+    for reg in sorted(available):
+        every_need |= set(_cache_needed_species(db, reg))
+    every_l = {n.lower() for n in every_need}
 
     cache = SpeciesEmbeddingCache(cache_dir)
+
+    def _prog(name: str, i: int, total: int):
+        sys.stdout.write(f"\r  encoding {i:>3}/{total:<3}  {name[:52]:<52}")
+        sys.stdout.flush()
+
     if cmd == "build":
+        needed = _cache_union(db, regions)
         backbone = _load_backbone()
-
-        def _prog(name: str, i: int, total: int):
-            sys.stdout.write(f"\r  encoding {i:>3}/{total:<3}  {name[:52]:<52}")
-            sys.stdout.flush()
-
         t0 = time.time()
         print(f"birdid: --cache build {', '.join(regions)} "
               f"({len(needed)} species needed, "
@@ -1310,17 +1336,62 @@ def run_cache(data_dir: Path, cache_dir: Path, tokens: list[str]):
         sys.stdout.flush()
         print(f"birdid: cache ready at {cache.dir} "
               f"({len(cache.names())} species, {time.time() - t0:.0f}s)")
-    else:                               # clean
-        keep = set(COARSE_LABELS)
-        for reg in regions:
-            keep.update(_cache_needed_species(db, reg))
+
+    elif cmd == "clean":
+        if not requested:
+            # no-arg clean: drop the stale species NO loaded table can use
+            # (species from tables that have since been refreshed / removed)
+            before = len(cache.names())
+            keep = {n for n in cache.names() if n.lower() in every_l}
+            removed = cache.retain(keep)
+            print(f"birdid: --cache clean (all loaded regions): kept "
+                  f"{before - removed}/{before} species "
+                  f"({removed} stale removed)")
+        else:
+            # region clean: get rid of THAT region's cached data - drop the
+            # union of its needed species (base + its wider pools), keep every
+            # other species. Shared species that the region also needs are
+            # dropped too (they are part of its cached data) and simply
+            # re-encoded if another region needs them again.
+            requested_need = set()
+            for reg in regions:
+                requested_need |= need_of[reg]
+            drop_l = {d.lower() for d in requested_need}
+            before = len(cache.names())
+            keep = {n for n in cache.names() if n.lower() not in drop_l}
+            removed = cache.retain(keep)
+            print(f"birdid: --cache clean {', '.join(regions)}: removed "
+                  f"{removed} species belonging to that region, kept everything "
+                  f"else ({before - removed} species remain)")
+            if not removed:
+                print("        (none of that region's species were cached)")
+
+    else:                               # update
+        # 1) drop species no loaded table can use any more (stale after a
+        #    refresh) - no model needed
         before = len(cache.names())
+        keep = {n for n in cache.names() if n.lower() in every_l}
         removed = cache.retain(keep)
-        print(f"birdid: --cache clean {', '.join(regions)}: kept "
-              f"{before - removed}/{before} species "
-              f"({removed} stale removed)")
-        print(f"        retained species serve: {', '.join(regions)} "
-              f"+ coarse labels")
+        # 2) encode the species the requested region(s) now need that aren't
+        #    cached yet - incremental, only the delta
+        needed = _cache_union(db, regions)
+        cached_l = {n.lower() for n in cache.names()}
+        miss = [n for n in needed if n.lower() not in cached_l]
+        t0 = time.time()
+        if miss:
+            backbone = _load_backbone()
+            print(f"birdid: --cache update: {removed} stale dropped, encoding "
+                  f"{len(miss)} newly-needed species...")
+            cache.matrix_for(miss, backbone, on_progress=_prog)
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        if removed or miss:
+            print(f"birdid: cache updated at {cache.dir}: dropped {removed} "
+                  f"stale, added {len(miss)} -> {len(cache.names())} species "
+                  f"({time.time() - t0:.0f}s)")
+        else:
+            print(f"birdid: --cache update: cache is up to date "
+                  f"({len(cache.names())} species, no changes)")
 
 
 def _build_ladder(db: SpeciesDB, region: str, month: int, grace: int,
@@ -2376,13 +2447,17 @@ def main():
                          "single country table")
     ap.add_argument("--cache", nargs="+", metavar="SUB [REGION...]",
                     help="manage the species-embedding cache (no photo folder, "
-                         "no API key needed): '--cache build [REGION...]' "
-                         "precomputes embeddings for a region's candidate "
-                         "species so a later run encodes nothing on the fly "
-                         "(default: all loaded regions); '--cache clean "
-                         "[REGION...]' prunes the cache to that region's "
-                         "species + coarse labels (default: all loaded "
-                         "regions, dropping species no table can use). "
+                         "no API key needed). 'build [REGION...]' precomputes "
+                         "embeddings for a region's candidate species so a "
+                         "later run encodes nothing on the fly (default: all "
+                         "loaded regions). 'clean [REGION...]' gets rid of "
+                         "data: with regions it removes those regions' species "
+                         "from the cache and keeps everything else; with no "
+                         "region it drops the stale species no loaded table "
+                         "can use (default: all loaded regions) - no model "
+                         "needed. 'update [REGION...]' syncs the cache with "
+                         "the current eBird tables: drop species no longer in "
+                         "any table and encode newly-needed ones (incremental). "
                          "REGION codes come from the eBird tables, e.g. DE, "
                          "EU-WEST, AS-SOUTHEAST, EUROPE")
     args = ap.parse_args()
