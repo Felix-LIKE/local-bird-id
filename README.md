@@ -17,8 +17,9 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
 
 - **One-command launcher** (`birdid <folder>`): BioCLIP 2 on CPU, no server,
   fully offline after a one-time `--initialize`.
-- **Data management built in**: `birdid --list`, `--download`, `--api` and
-  `--initialize` turn `birdid` into a small eBird data CLI (see below).
+- **Data management built in**: `birdid --list`, `--download`, `--api`,
+  `--initialize` and `--cache` turn `birdid` into a small eBird data CLI
+  (see below).
 - **Common + scientific names**: every result is normalised against the official
   eBird taxonomy (e.g. `Great Tit` / *`Parus major`*), and the top guess links
   to its **Avibase** species page (`https://avibase.ca/<id>`).
@@ -36,7 +37,9 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
   folders and kept out of the photo folders and this repo. After the first
   photo the per-photo cost is a single image encode + softmax, no matter how
   many species the candidate list holds - so 369-photo folders no longer stall
-  on their first photo.
+  on their first photo. The cache is region-agnostic (keyed by species name);
+  `birdid --cache build <region>` precomputes it ahead of a trip and
+  `birdid --cache clean <region>` prunes it to the regions you still use.
 - **±1-month grace** (`--month-grace 1`, default on): a species whose
   presence is recorded a month earlier or later still counts as a candidate,
   so a photo taken just before/after the typical season isn't mis-identified
@@ -386,6 +389,15 @@ pipeline/birdid --download region EU-NORTH      # Northern Europe
 
 # no key needed - fetch the keyless eBird/Clements taxonomy
 pipeline/birdid --download taxonomy
+
+# species-embedding cache (no photo folder, no API key): precompute it before
+# a trip so a run over that region encodes nothing on the fly
+pipeline/birdid --cache build DE          # Germany (base + EU-WEST + EUROPE pools)
+pipeline/birdid --cache build             # every loaded region (whole cache)
+# prune the cache to the regions you still photograph (e.g. after an eBird
+# table refresh or when you drop a region) - runs instantly, needs no model
+pipeline/birdid --cache clean SG          # keep only SG (+ coarse labels)
+pipeline/birdid --cache clean             # keep only the loaded regions' species
 ```
 
 - With an API key, `--download <code>` writes a real-eBird table to the

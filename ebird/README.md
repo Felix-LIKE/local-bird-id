@@ -85,6 +85,15 @@ complete in the target year fall back to the previous year's observations, so
 updating mid-year never leaves December (or any future month) empty. Missing
 tables are fetched too; `--year` pins a different target year.
 
+After a `--download`/`--update` changes the species set, the central
+species-embedding cache can be re-aligned with the same regions:
+`birdid --cache clean <region>` prunes it down to what the refreshed tables can
+need (default: all loaded regions - drop every species no table uses), or
+`birdid --cache build <region>` precomputes the new region's species so the
+next run encodes nothing on the fly. Both accept the same region codes as
+`--download` (countries, subcontinents like `EU-WEST`/`AS-SOUTHEAST`, or
+continents like `EUROPE`); `clean` needs no model or API key.
+
 Batch-download a whole continent or subcontinent at once (from the bundled
 `continents.csv` reference). **The smallest division is always written**: the
 country files land in a continent/subcontinent folder tree, and a continent
