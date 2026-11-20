@@ -35,6 +35,13 @@ Data management (see pipeline/ebird_data.py):
                                        the eBird data itself, not the download
                                        date); default target = current year,
                                        so 2025 data is refreshed with 2026
+  birdid.py --cache build|clean|update [REGION...]
+                                       manage the species-embedding cache: build
+                                       precomputes a region's embeddings so a
+                                       run encodes nothing on the fly; clean
+                                       removes a region's data (or stale species
+                                       no table uses); update syncs the cache
+                                       with the current eBird tables
   birdid.py --api [<key>]              store / show the eBird API key
   birdid.py --initialize               one-time: download taxonomy + BioCLIP 2
                                        backends so everything works offline
@@ -49,6 +56,10 @@ Usage:
 See --help for all options. Examples:
   birdid.py ~/Pictures/birds --dry-run              # just scan + plan
   birdid.py ~/Pictures/birds                        # process everything
+  birdid.py ~/Pictures/birds --force                # re-ID an already-tagged
+                                                    # folder in place (keeps the
+                                                    # IMatch sidecars, overwrites
+                                                    # only the bird-ID fields)
   birdid.py ~/Pictures/birds --max 10 --no-tui      # first 10, plain output
 """
 

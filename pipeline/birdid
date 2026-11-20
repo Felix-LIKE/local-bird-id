@@ -9,10 +9,18 @@
 #   birdid --download <code>           # write a real eBird table to the
 #                                      # gitignored regions_generated/ dir
 #                                      # (needs --api key; never committed)
+#   birdid --update <code>             # refresh only the tables whose eBird data
+#                                      # is newer than what's stored (default
+#                                      # target = current year)
 #   birdid --download region SA        # batch: whole continent/subcontinent
 #                                      # (NA/SA/AF/AS/OC, EU-NORTH, AS-SOUTHEAST,
 #                                      # NA-CARIBBEAN, ...) -- see --list region
 #   birdid --download taxonomy         # fetch the keyless eBird/Clements taxonomy
+#   birdid --cache build|clean|update [REGION...]
+#                                     # manage the species-embedding cache: build
+#                                     # = precompute a region's embeddings, clean
+#                                     # = remove a region's data / stale species,
+#                                     # update = sync with the current eBird tables
 #   birdid --api [<key>]               # store / show the eBird API key
 #   birdid --initialize                # one-time: taxonomy + BioCLIP 2 backends
 #   birdid --download-backends         # (same backend part as --initialize)
@@ -41,17 +49,27 @@ die() { printf 'birdid: ERROR: %s\n' "$*" >&2; exit 1; }
 # ---- main -----------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
     say "usage: birdid /path/to/photos [birdid.py args...]"
+    say "       (--force re-identifies an already-tagged folder in place,"
+    say "        keeping the IMatch sidecars and only overwriting the bird-ID"
+    say "        fields)"
     say ""
     say "data management (no folder):"
     say "  birdid --list [country|region]     what's available to download"
     say "  birdid --download <code>           write a real eBird table to the"
     say "                                     gitignored regions_generated/ dir"
     say "                                     (needs --api key; never committed)"
+    say "  birdid --update <code>             refresh only the tables whose eBird"
+    say "                                     data is newer than what's stored"
     say "  birdid --download taxonomy         fetch the keyless eBird/Clements"
     say "                                     taxonomy (no key needed)"
     say "  birdid --download region SA        batch: whole continent/subcontinent"
     say "                                     (NA/SA/AF/AS/OC, EU-NORTH,"
     say "                                     AS-SOUTHEAST, NA-CARIBBEAN, ...)"
+    say "  birdid --cache build <region>      precompute a region's species-"
+    say "                                     embedding cache (no API key)"
+    say "  birdid --cache clean <region>      remove that region's data from the"
+    say "                                     cache (no region = drop stale)"
+    say "  birdid --cache update              sync the cache with the eBird tables"
     say "  birdid --api [<key>]               store / show the eBird API key"
     say "  birdid --initialize                one-time: taxonomy + BioCLIP 2 backends"
     say "  birdid --list-candidates           inspect the region/month tables"
@@ -64,15 +82,16 @@ fi
 [ -f "$PIPELINE" ] || die "pipeline not found: $PIPELINE"
 
 # management commands run WITHOUT a photo folder and may need the network
-# (--download / --api / --initialize / --download-backends); --list and
-# --list-candidates are local-only but harmless to run online. Everything that
-# has a folder is a real identification run and must stay fully offline.
+# (--download / --update / --api / --initialize / --download-backends);
+# --list / --cache / --list-candidates are local-only but harmless to run
+# online. Everything that has a folder is a real identification run and must
+# stay fully offline.
 MGMT=0
 for a in "$@"; do
     case "$a" in
-        -d|--download|--list|--api|--initialize|--download-backends|--list-candidates|-h|--help)
+        -d|--download|-u|--update|--list|--api|--initialize|--download-backends|--cache|--list-candidates|-h|--help)
             MGMT=1 ;;
-        --download=*|--list=*|--api=*|--initialize=*) MGMT=1 ;;
+        --download=*|--update=*|--list=*|--api=*|--initialize=*) MGMT=1 ;;
     esac
 done
 
