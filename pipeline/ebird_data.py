@@ -481,22 +481,32 @@ def http_get_json(url: str, headers: dict | None = None, retries: int = 3):
     raise RuntimeError(f"gave up after {retries} attempts: {url}")
 
 
-def region_exists(code: str, key: str) -> bool:
+def region_exists(code: str, key: str, attempts: int = 3) -> bool:
     """Cheap validation that a region code is real before burning 24 requests.
 
-    An invalid *key* raises (403 -> the user is told to run `--api`); an
-    invalid *code* returns False so the caller can skip/reject it.
+    Returns True when the API confirms the code, False when the API
+    definitively says there is no such region (404 / no code). A transient
+    failure (timeout / rate-limit / 5xx) is retried and, if it persists,
+    raises RuntimeError - so callers never mistake a network blip for an
+    invalid code (which would silently drop a valid member from a pool). An
+    invalid *key* raises (403 -> the user is told to run `--api`).
     """
-    try:
-        url = f"{API_BASE}/ref/region/info/{code}"
-        data = http_get_json(url, {"X-eBirdApiToken": key})
-        return bool(data) and bool(data.get("code"))
-    except RuntimeError as e:
-        if "403" in str(e):
-            raise
-        return False
-    except Exception:
-        return False
+    url = f"{API_BASE}/ref/region/info/{code}"
+    last = None
+    for attempt in range(attempts):
+        try:
+            data = http_get_json(url, {"X-eBirdApiToken": key})
+            return bool(data) and bool(data.get("code"))
+        except RuntimeError as e:
+            if "403" in str(e):
+                raise
+            last = e                       # transient - retry below
+        except Exception:
+            return False                   # definitive: no such region
+        if attempt + 1 < attempts:
+            time.sleep(0.5 * (attempt + 1))
+    raise RuntimeError(f"could not verify region code '{code}' after "
+                       f"{attempts} attempts (last error: {last})")
 
 
 def _taxonomy_present(path: Path) -> bool:
@@ -866,7 +876,17 @@ def _download_members(generated_dir: Path, members: list[str], key: str,
     incremental download does not drop existing members from the pool."""
     pool_months: dict[str, set[int]] = defaultdict(set)
     for member in members:
-        if not region_exists(member, key):
+        try:
+            ok = region_exists(member, key)
+        except RuntimeError as e:
+            # Persistent transient API failure (timeout/rate-limit/5xx), NOT
+            # an invalid code: warn and skip so the other members still
+            # download; the pool will simply be missing this one until the
+            # API is reachable again (re-run --update to include it).
+            print(f"birdid:   warning: could not verify member code {member} "
+                  f"({e}) - skipped; re-run --update when the API is reachable")
+            continue
+        if not ok:
             print(f"birdid:   warning: skipping invalid member code {member}")
             continue
         dest_dir = override_dir or (generated_dir / _country_rel_dir(member))
