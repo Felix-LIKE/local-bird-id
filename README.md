@@ -182,11 +182,9 @@ cd local-bird-id
 **Code** button → **Download ZIP**, unpack it, then `cd` into the unpacked
 folder (the one that contains a subfolder called `pipeline/`).
 
-> **Note — the repo is currently private.** You need to be invited first
-> (GitHub → Settings → Collaborators). If the clone asks for a username and
-> password, either you don't have access yet, or use your GitHub **personal
-> access token** as the password (Settings → Developer settings → Personal
-> access tokens). With an SSH key set up, use
+> **Cloning tips.** If HTTPS clone asks for a username and password, use a
+> GitHub **personal access token** as the password (Settings → Developer
+> settings → Personal access tokens). With an SSH key set up, use
 > `git clone git@github.com:Felix-LIKE/local-bird-id.git` instead.
 
 Run `pwd` afterwards and make sure it ends in `local-bird-id` — the remaining
