@@ -63,7 +63,8 @@ from pathlib import Path
 import numpy as np
 
 from ebird_data import (COARSE_LABELS, TAXONOMY_2023, TAXONOMY_2026,
-                        country_continent_map)   # shared with --initialize/--download
+                        country_continent_map,
+                        country_subcontinent_map)   # shared with --initialize/--download
 
 # --------------------------------------------------------------------------
 # Config / defaults
@@ -127,17 +128,40 @@ REGION_BBOXES = {
 # respect borders, so a species photographed just across a border (or missed by
 # the curated country table) still gets a chance. Pools are ordinary region
 # tables (same CSV format) covering the surrounding countries. Explicit country
-# -> pool overrides come first; every other country then maps to its continent
-# pool via the bundled continents reference (ebird/continents.csv).
-REGION_POOLS = dict(country_continent_map())   # every country -> its continent pool
-# Explicit country -> tighter pool overrides win over the continent default
-# (Singapore/Thailand are Southeast Asia, Germany is Europe - not the whole
-# continent pool, so the two-tier fallback uses the curated SEA/EUROPE seeds).
-REGION_POOLS.update({
-    "SG": "SEA",     # Singapore -> Southeast Asia pool (MY/ID/TH/...)
-    "TH": "SEA",     # Thailand   -> Southeast Asia pool
-    "DE": "EUROPE",  # Germany    -> European pool
-})
+# -> pool overrides come first; every other country then maps to its
+# subcontinent, else its continent pool, via the bundled continents reference
+# (ebird/continents.csv).
+
+# Continent / region-box codes that must NEVER be read as ISO country codes in
+# the country -> wider-pool map. continents.csv also uses these as ISO keys
+# (AF=Afghanistan, NA=Namibia, SA=Saudi Arabia, AS=American Samoa), which
+# collided with the same-named GPS boxes below and silently scored e.g. a Ghana
+# photo (box AF = Africa) against ASIAN species. Excluding them here makes an
+# undownloaded continent box report "no data for this region" instead of a
+# wrong continent pool.
+CONTINENT_CODES = {"NA", "SA", "AF", "AS", "OC", "AN", "EUROPE", "SEA"}
+
+
+def _build_region_pools() -> dict[str, str]:
+    """Country code -> wider pool code for the two-tier fallback.
+
+    Tightest pool first: a country's subcontinent (MY -> AS-SOUTHEAST/SEA),
+    then its continent (MY -> AS). Continent codes are excluded as KEYS so a
+    GPS box (AF/SA/NA/AS/OC) never resolves through a same-named ISO country.
+    Explicit curated overrides (SG/TH -> SEA, DE -> EUROPE) win last.
+    """
+    pools: dict[str, str] = {}
+    for code, pool in country_subcontinent_map().items():
+        if code not in CONTINENT_CODES and code not in pools:
+            pools[code] = pool
+    for code, pool in country_continent_map().items():
+        if code not in CONTINENT_CODES and code not in pools:
+            pools[code] = pool
+    pools.update({"SG": "SEA", "TH": "SEA", "DE": "EUROPE"})
+    return pools
+
+
+REGION_POOLS = _build_region_pools()
 
 BIRD_NS = "http://ns.birdpipeline/1.0/"
 
@@ -772,9 +796,9 @@ class CentralChecklists:
 
 def _report_cols() -> list[str]:
     return ["capture", "file", "viewable", "region", "month", "species",
-            "scientific_name", "confidence", "status", "gps", "date_source",
-            "alternatives", "reasoning", "avibase_url", "datetime",
-            "central_added", "central_outside"]
+            "scientific_name", "confidence", "status", "gps", "region_source",
+            "date_source", "alternatives", "reasoning", "avibase_url",
+            "datetime", "central_added", "central_outside"]
 
 
 def _write_csv(path: Path, rows: list[dict]):
@@ -1266,6 +1290,43 @@ class BioclipClassifier(Classifier):
             self._tol = TreeOfLifeClassifier()
         return self._tol
 
+    def _classify_tol(self, image: str, tax) -> dict:
+        """Whole-tree-of-life species ID (no regional prefilter) - shared by
+        --analyze-all non-bird subjects and no-data regions. The full tree is
+        one heavy model: the first call pays a ~2-4 min load, then every photo
+        is species-ID'd over the whole tree (no regional shortlist), which is
+        slower per photo and lands lower-confidence than a regional ladder
+        (more lookalikes)."""
+        tol = self._load_tol()
+        rows = tol.predict(image, rank=self._Rank.SPECIES, k=3)
+        if isinstance(rows, list):
+            row = rows[0] if rows else {}
+        else:
+            row = rows
+        # row keys: file_name, kingdom..genus, species (sci), common_name, score
+        species = str(row.get("common_name") or row.get("species") or "unknown")
+        p = float(row.get("score", 0.0))
+        common, sci = normalize_species(species, tax)
+        return {
+            "species": common,
+            "scientific": sci,
+            "confidence": round(p, 4),
+            "alternatives": [],
+            "reasoning": f"BioCLIP-2: whole tree of life -> {common} {p*100:.0f}%",
+        }
+
+    def classify_no_prefilter(self, image, tax, region: str) -> dict:
+        """Identify a photo whose resolved region has no downloaded eBird data,
+        by falling back to the whole tree of life (no regional prefilter)."""
+        self._report("classify", f"no eBird data for '{region}': searching "
+                                 "whole tree of life (no prefilter)")
+        result = self._classify_tol(str(image), tax)
+        result["reasoning"] = (f"BioCLIP-2: no eBird data for region "
+                               f"'{region}'; whole tree of life (no "
+                               f"prefilter) -> {result['species']} "
+                               f"{result['confidence']*100:.0f}%")
+        return result
+
     def warm(self):
         """Load the heavy BioCLIP 2 weights + precompute the coarse-stage
         embeddings up front (not lazily on the first photo), reporting progress
@@ -1315,24 +1376,11 @@ class BioclipClassifier(Classifier):
 
         self._report("classify", "non-bird subject + --analyze-all: searching "
                                 "whole tree of life")
-        tol = self._load_tol()
-        rows = tol.predict(image, rank=self._Rank.SPECIES, k=3)
-        if isinstance(rows, list):
-            row = rows[0] if rows else {}
-        else:
-            row = rows
-        # row keys: file_name, kingdom..genus, species (sci), common_name, score
-        species = str(row.get("common_name") or row.get("species") or "unknown")
-        p = float(row.get("score", 0.0))
-        common, sci = normalize_species(species, tax)
-        return {
-            "species": common,
-            "scientific": sci,
-            "confidence": round(p, 4),
-            "alternatives": [],
-            "reasoning": f"BioCLIP-2: subject category '{cat}' (non-bird); "
-                         f"TreeOfLife species -> {common} {p*100:.0f}%",
-        }
+        result = self._classify_tol(str(image), tax)
+        result["reasoning"] = (f"BioCLIP-2: subject category '{cat}' (non-bird); "
+                               f"TreeOfLife species -> {result['species']} "
+                               f"{result['confidence']*100:.0f}%")
+        return result
 
     def _classify_bird(self, img_feat: np.ndarray, ladder, region: str,
                        month: int) -> dict:
@@ -1627,9 +1675,11 @@ def scan_folder(root: Path, manifest: dict) -> list[Capture]:
 
 
 def sidecar_status(sidecar: Path):
-    """Return 'done' / 'low-confidence' / 'non-bird' / 'error' / None by parsing
-    the sidecar. 'low-confidence' is kept distinct from 'done' so a re-run can
-    revisit (or skip) uncertain captures (see --include-low-confidence)."""
+    """Return 'done' / 'low-confidence' / 'non-bird' / 'no-data' / 'error' /
+    None by parsing the sidecar. 'low-confidence' is kept distinct from 'done'
+    so a re-run can revisit (or skip) uncertain captures (see
+    --include-low-confidence); 'no-data' marks a capture whose region had no
+    eBird data (best guess blank)."""
     if not sidecar.exists():
         return None
     try:
@@ -1642,6 +1692,8 @@ def sidecar_status(sidecar: Path):
             return "non-bird"
         if status == "low-confidence":
             return "low-confidence"
+        if status == "no-data":
+            return "no-data"
         if sidecar_done(sidecar):
             return "done"
     except Exception:
@@ -1650,8 +1702,9 @@ def sidecar_status(sidecar: Path):
 
 
 def classify_capture(cap: Capture) -> str:
-    """done / low-confidence / non-bird / error / pending - a capture is done
-    iff its single sidecar is done."""
+    """done / low-confidence / non-bird / no-data / error / pending - a capture
+    is done iff its single sidecar is done. 'no-data' captures are re-analysed
+    on re-run (the region may have been downloaded since)."""
     return sidecar_status(cap.sidecar()) or "pending"
 
 # --------------------------------------------------------------------------
@@ -1685,6 +1738,7 @@ class TUI:
         self.state = State()
         self.stop_flag = threading.Event()
         self._win = None
+        self._io_lock = threading.Lock()   # guards the curses screen
 
     def start(self):
         if not self.enabled:
@@ -1720,35 +1774,38 @@ class TUI:
             if not self.enabled:
                 return
         import curses
-        win = self._win
-        win.erase()
-        h, w = win.getmaxyx()
-        line = 0
-        def put(text, attr=0):
-            nonlocal line
-            if line < h - 1:
-                win.addnstr(line, 0, text[:max(0, w - 1)], w - 1, attr)
-                line += 1
-        put("Bird Photo ID  (q: quit)", curses.A_BOLD)
-        put("")
-        put(f"phase: {st.phase:<9} stage: {st.stage:<12} message: {st.message}")
-        if st.message:
-            mm, ss = divmod(int(st.stage_elapsed), 60)
-            put(f"  working on this step for {mm:02d}:{ss:02d} - not stuck")
-        put("")
-        put(f"scanned {st.scanned}   pending {st.pending}   done {st.done}   error {st.error}")
-        put(f"progress: {st.processed}/{st.total}    elapsed {int(st.elapsed//60):02d}:{int(st.elapsed%60):02d}   {st.eta}")
-        if st.total:
-            frac = min(1.0, st.processed / st.total)
-            width = max(10, w - 20)
-            filled = int(width * frac)
-            put(f"[{'#' * filled}{'.' * (width - filled)}] {frac*100:4.0f}%")
-        put("")
-        put(f"current: {st.current}")
-        put(f"last   : {st.last[: max(0, w - 10)]}")
-        put("")
-        put(stage_hint(st.stage))
-        win.refresh()
+        with self._io_lock:
+            win = self._win
+            if win is None:
+                return
+            win.erase()
+            h, w = win.getmaxyx()
+            line = 0
+            def put(text, attr=0):
+                nonlocal line
+                if line < h - 1:
+                    win.addnstr(line, 0, text[:max(0, w - 1)], w - 1, attr)
+                    line += 1
+            put("Bird Photo ID  (q: quit)", curses.A_BOLD)
+            put("")
+            put(f"phase: {st.phase:<9} stage: {st.stage:<12} message: {st.message}")
+            if st.message:
+                mm, ss = divmod(int(st.stage_elapsed), 60)
+                put(f"  working on this step for {mm:02d}:{ss:02d} - not stuck")
+            put("")
+            put(f"scanned {st.scanned}   pending {st.pending}   done {st.done}   error {st.error}")
+            put(f"progress: {st.processed}/{st.total}    elapsed {int(st.elapsed//60):02d}:{int(st.elapsed%60):02d}   {st.eta}")
+            if st.total:
+                frac = min(1.0, st.processed / st.total)
+                width = max(10, w - 20)
+                filled = int(width * frac)
+                put(f"[{'#' * filled}{'.' * (width - filled)}] {frac*100:4.0f}%")
+            put("")
+            put(f"current: {st.current}")
+            put(f"last   : {st.last[: max(0, w - 10)]}")
+            put("")
+            put(stage_hint(st.stage))
+            win.refresh()
 
     def set(self, **kw):
         st = self.state
@@ -1762,9 +1819,15 @@ class TUI:
         if not self.enabled:
             return
         import curses
-        self._win.timeout(150)
         while not self.stop_flag.is_set():
-            key = self._win.getch()
+            with self._io_lock:
+                win = self._win
+                if win is None:
+                    # a prompt owns the screen right now - wait for it to finish
+                    time.sleep(0.05)
+                    continue
+                win.timeout(150)
+                key = win.getch()
             if key in (ord("q"), ord("Q")):
                 self.stop_flag.set()
                 break
@@ -1775,6 +1838,47 @@ class TUI:
     def plain_line(self, text):
         if not self.enabled:
             print(text, flush=True)
+
+    def prompt(self, text: str, default: str = "") -> str:
+        """Ask the user a one-shot question during a run and return the trimmed
+        answer ('' = accept the default).
+
+        Non-TUI: plain print + input(). TUI: briefly suspends the fullscreen
+        screen, asks on the terminal, then restores it. The caller validates the
+        answer and re-prompts as needed; EOF/interrupt returns the default.
+        """
+        if not self.enabled:
+            print(text, flush=True)
+            try:
+                return input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                return default
+        import curses
+        with self._io_lock:
+            if self._win is not None:
+                curses.nocbreak()
+                self._win.keypad(False)
+                curses.echo()
+                curses.endwin()
+                self._win = None
+        try:
+            print(text, flush=True)
+            try:
+                ans = input("> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                ans = default
+            return ans
+        finally:
+            with self._io_lock:
+                self._win = curses.initscr()
+                curses.noecho()
+                curses.cbreak()
+                self._win.keypad(True)
+                try:
+                    curses.curs_set(0)
+                except Exception:
+                    pass
+            self.refresh()
 
 
 def stage_hint(stage: str) -> str:
@@ -1795,12 +1899,74 @@ def fmt_result(result: dict, scientific: str = "", avibase_url: str = "") -> str
         return "no result"
     if result.get("status") == "non-bird":
         return f"{result.get('species', '?')} (non-bird - skipped)"
+    if result.get("status") == "no-data":
+        return "no region data (flagged no-data)"
     c = float(result.get("confidence", 0.0))
     name = result.get("species", "?")
     base = f"{name} ({scientific}) {c*100:.0f}%" if scientific else f"{name} ({c*100:.0f}%)"
     if avibase_url:
         base += f" | avibase: {avibase_url}"
     return base
+
+
+def ask_region_override(tui, count: int, default: str,
+                        valid: list[str]) -> str | None:
+    """Ask (TUI) once for a region to use for `count` GPS-less photos.
+
+    Returns an upper-cased region code, or None to keep the default. Non-TUI
+    (batch/--no-tui) never prompts - --region stays the only mechanism there.
+    """
+    if not tui.enabled:
+        return None
+    while True:
+        ans = tui.prompt(
+            f"{count} photo(s) have no GPS location. Which country/region "
+            f"were they taken in? (enter a code, or blank for the default "
+            f"'{default}'; available: {', '.join(valid)})")
+        if not ans:
+            return None
+        ans = ans.upper()
+        if ans in valid:
+            return ans
+        tui.plain_line(f"  unknown region code '{ans}' - choose from: "
+                       f"{', '.join(valid)}")
+
+
+def ask_no_data_choice(tui, region: str) -> str:
+    """Decide how to handle photos in a region with no downloaded eBird data.
+
+    'tol' = analyze WITHOUT the regional prefilter (whole tree of life) - the
+    user explicitly opts in after a cost/accuracy disclaimer. 'flag' = skip and
+    write status 'no-data' (best guess blank, surfaces in the review list).
+    Non-TUI always returns 'flag': the expensive no-prefilter path is never run
+    silently.
+    """
+    if not tui.enabled:
+        return "flag"
+    tui.plain_line(f"  note: no eBird data for region '{region}' "
+                   f"(ladder is empty - no downloaded table)")
+    while True:
+        ans = tui.prompt(
+            f"No eBird data for region '{region}'.\n"
+            f"  1) analyze WITHOUT the regional prefilter (whole tree of life)\n"
+            f"     what 'significantly longer' means: one extra model load of "
+            f"~2-4 min up front, then EVERY photo is species-ID'd over the full "
+            f"tree (no regional shortlist) - slower per photo AND lower "
+            f"accuracy / more lookalikes than a regional ladder. (The "
+            f"all-taxonomy pool of ~18,600 species would be slower still: a "
+            f"one-time ~10-14 h embedding precompute - not used.)\n"
+            f"  2) skip + flag as 'no-data' (recommended default - surfaces in "
+            f"the review list, best guess left blank)\n"
+            f"  To avoid this, download the region once and rerun:\n"
+            f"     birdid --download {region}\n"
+            f"  (curated registry ships SG/TH/DE + the SEA/EUROPE pools; any "
+            f"other eBird country/continent needs an API key: "
+            f"birdid --api <key>)\n"
+            f"  [1/2/Enter=2]: ")
+        if ans in ("1", "2", "y", "n", ""):
+            break
+        tui.plain_line("  enter 1 (analyze) or 2 (flag).")
+    return "tol" if ans in ("1", "y") else "flag"
 
 # --------------------------------------------------------------------------
 # Main pipeline
@@ -1822,7 +1988,8 @@ def main():
     ap.add_argument("--region", default=DEFAULT_REGION,
                     help="default region when no GPS can be resolved; DE/SG/TH "
                          "have no country seed and fall back to their EUROPE/SEA "
-                         "pool")
+                         "pool. In TUI mode a GPS-less run asks once for the "
+                         "region instead of silently using this default")
     ap.add_argument("--no-checklist", action="store_true",
                     help="ignore optional eBird *_observations.csv exports "
                          "(both in photo folders and the centralized checklists dir)")
@@ -1988,6 +2155,7 @@ def main():
     summary_lines: list[str] = []
     fatal = False
     lc_new = 0
+    nd_n = 0
     lc_skipped = []
     lc_review: list[tuple[float, str, str]] = []
     try:
@@ -2018,6 +2186,12 @@ def main():
                     pending.append(cap)
                 else:
                     lc_skipped.append(cap)
+            elif status == "no-data":
+                # flagged for review last run because the region had no eBird
+                # data. Re-analyse by default: a re-run after --download picks
+                # them up, and the per-region prompt lets the user choose
+                # whole-tree-of-life vs flag again.
+                pending.append(cap)
             else:
                 error_n += 1
 
@@ -2045,6 +2219,28 @@ def main():
             meta_map = read_exif_batch(all_files)
             dir_gps = compute_dir_gps(meta_map)
 
+            # --- Phase 1.6: no-GPS region override (one question per run) ---
+            # Photos with no usable GPS resolve to --region (default DE). In TUI
+            # mode, ask once for the country/region they were taken in instead
+            # of silently assuming the default. --no-tui keeps --region as the
+            # non-interactive form.
+            region_override: str | None = None
+            if pending and not args.dry_run:
+                no_gps = sum(
+                    1 for cap in pending
+                    if resolve_location(
+                        cap.primary(),
+                        meta_map.get(str(cap.primary().resolve()), {}),
+                        dir_gps)[2] == "none")
+                if no_gps:
+                    valid = sorted(set(db.regions()) | set(REGION_BBOXES)
+                                   | set(REGION_POOLS))
+                    region_override = ask_region_override(tui, no_gps,
+                                                          args.region, valid)
+                    if region_override:
+                        tui.plain_line(f"using region override '{region_override}' "
+                                       f"for GPS-less photos.")
+
             # --- Phase 2: classifier backend ---
             # Explicit, timed model load BEFORE the loop - the BioCLIP 2 build
             # can take ~2-4 min on first run, and doing it inside the first
@@ -2065,6 +2261,9 @@ def main():
             report_rows = []
             stop = tui.stop_flag
             checklist_cache: dict[str, list[tuple[str, str]]] = {}
+            # per-region decision for photos whose region has no eBird data
+            # ('tol' = whole-tree-of-life, 'flag' = skip + status 'no-data')
+            no_data_choice_cache: dict[str, str] = {}
             central = (CentralChecklists(Path(args.checklists_dir), taxonomy)
                        if not args.no_checklist else CentralChecklists(None, taxonomy))
             tui.plain_line(central.report())
@@ -2098,7 +2297,13 @@ def main():
                     tui.set(stage="region", message="resolving region/month")
                     meta = meta_map.get(str(primary.resolve()), {})
                     lat, lon, gps_src = resolve_location(primary, meta, dir_gps)
-                    region = region_for(lat, lon, args.region)
+                    if region_override is not None and gps_src == "none":
+                        # user supplied a region for the GPS-less photos this run
+                        region = region_override
+                        region_src = "prompt"
+                    else:
+                        region = region_for(lat, lon, args.region)
+                        region_src = "gps" if gps_src != "none" else "default"
                     dt = meta.get("datetime") or folder_date(primary)
                     month = dt.month if dt else datetime.now().month
                     date_src = "exif" if meta.get("datetime") else ("folder" if dt else "today")
@@ -2130,8 +2335,38 @@ def main():
                             f"species outside {region} table: "
                             f"{', '.join(central_outside)} - region prior may be too narrow")
 
-                    tui.set(stage="classify", message=f"classifying {primary.name}")
-                    result = classifier.classify(primary, ladder, taxonomy, region, month, dt)
+                    # --- no-data handling: an empty ladder (no eBird table at
+                    # all, not even a wider pool tier) used to score 'unknown'
+                    # silently. Ask once per region (TUI) whether to analyze
+                    # WITHOUT the regional prefilter (whole tree of life - with
+                    # the cost/accuracy disclaimer) or skip + flag 'no-data'.
+                    if sum(len(st) for _, st in ladder) == 0:
+                        if region not in no_data_choice_cache:
+                            no_data_choice_cache[region] = ask_no_data_choice(tui, region)
+                        if no_data_choice_cache[region] == "tol":
+                            tui.set(stage="classify",
+                                    message=f"classifying {primary.name} "
+                                            f"(no prefilter)")
+                            result = classifier.classify_no_prefilter(
+                                primary, taxonomy, region)
+                        else:
+                            result = {
+                                "species": "unknown",
+                                "scientific": "",
+                                "confidence": 0.0,
+                                "alternatives": [],
+                                "status": "no-data",
+                                "reasoning": (f"no eBird region data for "
+                                              f"'{region}' - flagged for "
+                                              f"review; download it with "
+                                              f"'birdid --download {region}' "
+                                              f"(needs an API key) or rerun in "
+                                              f"TUI mode to analyze without "
+                                              f"the prefilter"),
+                            }
+                    else:
+                        tui.set(stage="classify", message=f"classifying {primary.name}")
+                        result = classifier.classify(primary, ladder, taxonomy, region, month, dt)
 
                     tui.set(stage="parse", message="normalising species")
                     if not isinstance(result, dict) or not result.get("species"):
@@ -2158,7 +2393,7 @@ def main():
                     manifest[str(sidecar)] = {
                         "files": [str(f) for f in cap_files],
                         "sidecar": str(sidecar), "region": region, "month": month,
-                        "gps": gps_src, "date_source": date_src,
+                        "gps": gps_src, "region_source": region_src, "date_source": date_src,
                         "species": species, "scientific": scientific, "confidence": confidence,
                         "avibase_id": avibase_id, "avibase_url": avibase_url,
                         "status": status, "classifier": classifier.describe(),
@@ -2176,7 +2411,8 @@ def main():
                         "capture": cap.base, "file": str(primary), "viewable": primary.name,
                         "region": region, "month": f"{month:02d}", "species": species,
                         "scientific_name": scientific, "confidence": f"{confidence:.2f}",
-                        "status": status, "gps": gps_src, "date_source": date_src,
+                        "status": status, "gps": gps_src, "region_source": region_src,
+                        "date_source": date_src,
                         "alternatives": "; ".join(result.get("alternatives", [])),
                         "reasoning": result.get("reasoning", ""),
                         "avibase_url": avibase_url,
@@ -2189,6 +2425,8 @@ def main():
                         nb_n += 1
                     elif status == "low-confidence":
                         lc_new += 1
+                    elif status == "no-data":
+                        nd_n += 1
                     else:
                         done_n += 1
                 except Exception as e:  # noqa: BLE001
@@ -2232,7 +2470,8 @@ def main():
                 written.append(str(flat))
             tui.set(phase="done", message="finished")
             summary_lines.append(
-                f"\ndone: {done_n} tagged, {lc_new} low-confidence, {nb_n} non-bird, "
+                f"\ndone: {done_n} tagged, {lc_new} low-confidence, "
+                f"{nd_n} no-data, {nb_n} non-bird, "
                 f"{error_n} errors -> manifest {manifest_path}")
             for p in written:
                 summary_lines.append(f"wrote: {p}")
@@ -2281,6 +2520,21 @@ def main():
             f"{args.min_confidence:.2f}, best guess kept in sidecar):")
         for conf, sp, name in lc_review:
             summary_lines.append(f"  {conf*100:4.0f}%  {name}  ({sp})")
+
+    # no-data review list: captures whose region had no downloaded eBird data
+    # (status 'no-data', best guess blank). They re-run automatically once the
+    # region is downloaded; the list is so they surface for review meanwhile.
+    nd_review = sorted(
+        (Path(k).parent.name + "/" + Path(k).stem
+         for k, e in manifest.items() if e.get("status") == "no-data"))
+    if nd_review:
+        summary_lines.append(
+            f"\nno-data photos for review ({len(nd_review)}; region not "
+            f"downloaded - best guess left blank. Download it with "
+            f"'birdid --download <region>' (needs an API key) and rerun, or "
+            f"rerun in TUI mode to analyze them without the prefilter):")
+        for name in nd_review:
+            summary_lines.append(f"  {name}")
 
     for line in summary_lines:
         print(line, file=sys.stderr if fatal else sys.stdout)
