@@ -21,6 +21,7 @@ birdid /path/to/photos --max 10   # extra birdid.py args pass straight through
 birdid /path/to/photos --dry-run  # plan only, no model work
 birdid /path/to/photos --month-grace 0   # strict month, no ±1-month grace
 birdid /path/to/photos --analyze-all  # also analyse non-bird subjects (no pre-filter)
+birdid /path/to/photos --force    # re-ID every capture in place (keeps sidecars)
 birdid --list-candidates          # inspect the region/month tables
 birdid --list                     # what's available to download
 birdid --list downloadable        # every eBird country (offline reference)
@@ -128,6 +129,10 @@ python3 birdid.py /path/to/photos --dry-run
 
 # Process everything (shows a live TUI; q = quit, resume-safe):
 python3 birdid.py /path/to/photos
+
+# Force a fresh identification of an already-tagged folder (sidecars are kept,
+# only the bird-ID fields are overwritten - safe on an IMatch-managed folder):
+python3 birdid.py /path/to/photos --force
 
 # Plain output, first 10 photos:
 python3 birdid.py /path/to/photos --max 10 --no-tui
@@ -253,8 +258,13 @@ the layout and a worked example.
   preserved and only the `bird:` fields (+ `dc:subject`, `dc:description`) are
   updated.
 - **Forcing a re-run**: a capture counts as *done* iff its sidecar is done, so
-  reruns skip it. To re-tag a folder, delete the stale sidecars (+ manifest +
-  report) first - originals are never touched.
+  reruns skip it. `--force` re-identifies **every** capture in place: existing
+  sidecars are kept (nothing is deleted) and only the bird-ID fields
+  (`bird:*` + `dc:subject`/`dc:description`) are overwritten, so a forced run
+  is safe on an IMatch-managed folder - any other XMP content IMatch wrote is
+  preserved. The keep-best guard is bypassed (the new result is written even
+  if it scores lower). Without `--force`, delete the stale sidecars (+ manifest
+  + report) first to re-tag a folder - originals are never touched.
 
 ## Output per photo (XMP sidecar)
 

@@ -2001,10 +2001,14 @@ def sidecar_status(sidecar: Path):
     return None
 
 
-def classify_capture(cap: Capture) -> str:
+def classify_capture(cap: Capture, force: bool = False) -> str:
     """done / low-confidence / non-bird / no-data / error / pending - a capture
     is done iff its single sidecar is done. 'no-data' captures are re-analysed
-    on re-run (the region may have been downloaded since)."""
+    on re-run (the region may have been downloaded since). With ``force=True``
+    every capture is 'pending': an existing sidecar is re-identified in place
+    (only its bird-ID fields are overwritten, nothing is deleted)."""
+    if force:
+        return "pending"
     return sidecar_status(cap.sidecar()) or "pending"
 
 
@@ -2364,6 +2368,16 @@ def main():
                          "By default such photos are left untouched and only "
                          "listed for review; this flag puts them back in the "
                          "processing queue.")
+    ap.add_argument("--force", action="store_true",
+                    help="force a fresh identification run for a folder that "
+                         "already has sidecars: every capture is re-processed "
+                         "and ONLY the bird-ID fields in the existing XMP are "
+                         "overwritten (bird:* + dc:subject/dc:description). "
+                         "Everything else in the sidecar - e.g. metadata IMatch "
+                         "has written - is preserved, and no file is deleted, "
+                         "so a forced re-run is safe on an IMatch-managed "
+                         "folder. Also overrides the keep-best guard (the new "
+                         "result is written even if it scores lower).")
     ap.add_argument("--expand-threshold", type=float, default=0.35,
                     help="below this top score, re-score against the wider "
                          "regional pool (neighbouring countries) - 0 disables "
@@ -2568,7 +2582,7 @@ def main():
         for i, cap in enumerate(captures, 1):
             tui.progress("status", i, len(captures),
                          "checking existing sidecars")
-            status = classify_capture(cap)
+            status = classify_capture(cap, args.force)
             if status == "pending":
                 pending.append(cap)
             elif status == "done":
@@ -2601,6 +2615,10 @@ def main():
             summary_lines.append(
                 f"scan: {len(captures)} captures | {done_n} done | {nb_n} non-bird | "
                 f"{error_n} error | {len(pending)} pending")
+            if args.force:
+                summary_lines.append(
+                    "forced run: all captures would be re-identified in place "
+                    "(sidecars kept, only bird-ID fields overwritten).")
             for cap in pending[:20]:
                 summary_lines.append(f"  [pending] {cap.primary()} -> {cap.sidecar()}")
             if len(pending) > 20:
@@ -2798,9 +2816,12 @@ def main():
                     # so the same photo can score differently - if the photo
                     # already holds a higher confidence, keep that record and
                     # skip the write instead of downgrading the sidecar.
+                    # --force explicitly overrides this: a forced re-ID always
+                    # writes the new result, whatever it scores.
                     old_status = sidecar_status(sidecar)
                     old_best = _sidecar_best(sidecar)
-                    if (old_status in ("done", "low-confidence")
+                    if (not args.force
+                            and old_status in ("done", "low-confidence")
                             and old_best is not None
                             and old_best[1] > confidence + 1e-9):
                         kept_n += 1
@@ -2895,6 +2916,11 @@ def main():
                 _write_csv(flat, report_rows)
                 written.append(str(flat))
             tui.set(phase="done", message="finished")
+            if args.force:
+                summary_lines.append(
+                    "\nforced re-run: captures with existing sidecars were "
+                    "re-identified; only the bird-ID fields were overwritten "
+                    "(all other XMP content - e.g. IMatch metadata - preserved).")
             summary_lines.append(
                 f"\ndone: {done_n} tagged, {lc_new} low-confidence, "
                 f"{nd_n} no-data, {nb_n} non-bird, "
@@ -2941,7 +2967,7 @@ def main():
                     if tui_thread and tui_thread.is_alive():
                         tui_thread.join(timeout=1)
                     tui.stop()
-                    argv = [a for a in sys.argv if a != "--no-tui"]
+                    argv = [a for a in sys.argv if a not in ("--no-tui", "--force")]
                     if "--include-low-confidence" not in argv:
                         argv.append("--include-low-confidence")
                     print("re-running as a TUI review pass: "
