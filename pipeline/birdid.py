@@ -26,9 +26,15 @@ manifest are written. A RAW + JPEG pair of the same capture is processed ONCE
 
 Data management (see pipeline/ebird_data.py):
   birdid.py --list [country|region]    what's available to download
-  birdid.py --download <code>          regenerate a region table from real
-                                       eBird observations (needs --api key;
-                                       no key = keep the curated seed)
+  birdid.py --download <code>          fill in the missing region tables from
+                                       real eBird observations (skips parts you
+                                       already have; needs --api key; no key =
+                                       keep the curated seed)
+  birdid.py --update <code>            refresh only the tables whose eBird data
+                                       is newer (each table records the date of
+                                       the eBird data itself, not the download
+                                       date); default target = current year,
+                                       so 2025 data is refreshed with 2026
   birdid.py --api [<key>]              store / show the eBird API key
   birdid.py --initialize               one-time: download taxonomy + BioCLIP 2
                                        backends so everything works offline
@@ -2124,10 +2130,24 @@ def main():
                          "country, creating subregion folders as needed "
                          "(e.g. region AS, region AS-SOUTHEAST, region SEA, "
                          "region EUROPE; see --list region). A pooled "
-                         "<REGION>.csv is kept alongside. 'taxonomy' (keyless) "
-                         "fetches the eBird/Clements taxonomy. Region tables "
-                         "need an API key (--api); without one only the "
-                         "curated seeds (EUROPE/SEA) apply.")
+                         "<REGION>.csv is kept alongside. INCREMENTAL: parts "
+                         "already downloaded are skipped, only the missing "
+                         "data is fetched. 'taxonomy' (keyless) fetches the "
+                         "eBird/Clements taxonomy. Region tables need an API "
+                         "key (--api); without one only the curated seeds "
+                         "(EUROPE/SEA) apply.")
+    ap.add_argument("-u", "--update", nargs="+", metavar="SPEC",
+                    help="like --download but refreshes only the tables whose "
+                         "eBird data is newer than what is stored - each "
+                         "generated CSV records a '# data_date:' (the newest "
+                         "observation date sampled: the date of the eBird data "
+                         "itself, NOT the download date) that --update compares "
+                         "against the newest data the API serves (default "
+                         "target: the current year, so 2025-sampled tables get "
+                         "2026 data; months not yet complete in the target "
+                         "year fall back to the previous year so no month is "
+                         "left empty). Missing tables are fetched too. Pass "
+                         "--year to pin the target year.")
     ap.add_argument("--list", nargs="*", metavar="KIND",
                     help="list countries/regions available for download "
                          "(optional filter: country | region; or 'downloadable' "
@@ -2147,8 +2167,10 @@ def main():
                     help="seconds between eBird API calls (rate-limit guard, default 1.5)")
     ap.add_argument("--sample-dates", type=int, default=2,
                     help="sample dates per month for --download (default 2)")
-    ap.add_argument("--year", type=int, default=2025,
-                    help="historic-data year for --download (default 2025)")
+    ap.add_argument("--year", type=int, default=None,
+                    help="historic-data year to sample: default 2025 for "
+                         "--download (a complete year), the current year for "
+                         "--update (the newest data eBird serves)")
     ap.add_argument("--subnational", action="store_true",
                     help="with --download country <CODE>: also fetch that "
                          "country's subnational1 regions and write them as "
@@ -2160,7 +2182,7 @@ def main():
 
     # --- data management commands (no photo folder needed) ---
     mgmt = (args.initialize or args.download_backends or args.api is not None
-            or args.list is not None or args.download)
+            or args.list is not None or args.download or args.update)
     if mgmt:
         try:
             if args.initialize or args.download_backends:
@@ -2175,6 +2197,12 @@ def main():
             elif args.list is not None:
                 from ebird_data import list_regions
                 list_regions(data_dir, args.list)
+            elif args.update:
+                from ebird_data import set_api_delay, update
+                set_api_delay(args.api_delay)
+                update(data_dir, args.update, year=args.year,
+                       sample_dates=args.sample_dates,
+                       subnational=args.subnational)
             elif args.download:
                 from ebird_data import set_api_delay, download
                 set_api_delay(args.api_delay)
@@ -2187,8 +2215,8 @@ def main():
 
     if not args.folder and not args.list_candidates:
         ap.error("the following arguments are required: folder  "
-                 "(or use a management command: --download/--list/--api/"
-                 "--initialize/--list-candidates)")
+                 "(or use a management command: --download/--update/--list/"
+                 "--api/--initialize/--list-candidates)")
 
     root = None
     if args.folder:

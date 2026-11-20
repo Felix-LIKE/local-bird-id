@@ -71,6 +71,20 @@ The repo ships exactly two curated seeds: **EUROPE** and **SEA**. No-key runs:
    Singapore's subnational1 regions instead and stores them as
    `regions_generated/AS/AS-SOUTHEAST/SG/<SUB>.csv`.
 
+`--download` is **incremental**: a table that is already downloaded is skipped,
+only the missing parts are fetched. So re-running `birdid --download region EU-WEST`
+after a partial run only downloads the countries you don't have yet.
+
+To refresh tables whose **eBird data is newer** (not just "filled in"), use
+`birdid --update <code>`: every generated CSV records the date of the eBird
+data it was built from (`# data_date:` - the newest observation date sampled,
+NOT the date it was downloaded), and `--update` compares that against the
+newest data the API serves (default target: the current year, so a table
+sampled from 2025 data is refreshed with 2026 observations). Months not yet
+complete in the target year fall back to the previous year's observations, so
+updating mid-year never leaves December (or any future month) empty. Missing
+tables are fetched too; `--year` pins a different target year.
+
 Batch-download a whole continent or subcontinent at once (from the bundled
 `continents.csv` reference). **The smallest division is always written**: the
 country files land in a continent/subcontinent folder tree, and a continent
@@ -105,7 +119,10 @@ How the real data is fetched:
 - for each month it calls the **historic observations** endpoint
   (`GET /v2/data/obs/{regionCode}/historic/{y}/{m}/{d}` - the date is three path
   segments) on `--sample-dates` (default 2) dates per month of `--year`
-  (default 2025), and
+  (default 2025; `--update` defaults to the **current year**), and
+- if the target year is still in progress, any month that has not fully passed
+  uses the **previous year's** observations instead (so December is never
+  empty when you update in, say, November), and
 - aggregates which species were actually reported in each month → writes
   `regions_generated/<CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv` (status
   `resident` if present all 12 sampled months, else `seasonal`).

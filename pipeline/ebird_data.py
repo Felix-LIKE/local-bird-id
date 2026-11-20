@@ -25,7 +25,17 @@ Commands
 - `--download country|region [id]`: with an API key, writes real eBird
   historic-observation tables (sampled dates per month) into the
   regions_generated/ tree; every directory also acts as a queryable union
-  region. Without a key it keeps the shipped curated seed (the no-key fallback).
+  region. **Incremental**: parts already downloaded are skipped, only the
+  missing data is fetched. Without a key it keeps the shipped curated seed
+  (the no-key fallback).
+- `--update country|region [id]`: like --download but only refreshes the parts
+  whose eBird data is newer than what is stored - each generated CSV records
+  a `# data_date:` (the newest observation date sampled, i.e. the date of the
+  eBird data itself, not the download date) that --update compares against the
+  newest data the API serves (default target: the current year, so 2025-sampled
+  tables are refreshed with 2026 observations; `--year` pins it). Months not
+  yet complete in the target year fall back to the previous year's
+  observations so no month mask is left empty.
 - `--list [country|region]`: what is available to download (+ table status).
 - `--api [key]`: store the eBird API key under ~/.config/birdid/ebird_api_key
   (chmod 600); bare `--api` prints the current status.
@@ -39,7 +49,7 @@ import csv
 import os
 import time
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 API_BASE = "https://api.ebird.org/v2"
@@ -524,6 +534,24 @@ def sample_dates_for_month(year: int, month: int, n: int) -> list[tuple[int, int
     return [(year, month, d) for d in days]
 
 
+def sampling_year_for_month(target_year: int, month: int, today: date | None = None) -> int:
+    """The observation year to sample for `month` when targeting `target_year`.
+
+    A month's data is only taken from the target year once that month is fully
+    in the past (its last day <= today); otherwise the most recent complete
+    instance of the month (`target_year - 1`) is sampled instead. So updating
+    to the *current* year mid-year never produces empty tail-month masks: on
+    2026-11-20, Jan-Oct use 2026 observations while Nov-Dec fall back to 2025
+    (December simply has not happened yet in 2026).
+    """
+    today = today or date.today()
+    import calendar
+    last = calendar.monthrange(target_year, month)[1]
+    if date(target_year, month, last) <= today:
+        return target_year
+    return target_year - 1
+
+
 def historic_obs(region_code: str, year: int, month: int, day: int, key: str) -> list[str]:
     """Species common names reported in `region_code` on a historic date.
 
@@ -537,23 +565,33 @@ def historic_obs(region_code: str, year: int, month: int, day: int, key: str) ->
 
 
 def sample_months(region_code: str, key: str, year: int, sample_dates: int,
-                  progress=None) -> dict[str, set[int]]:
-    """{species: {months}} from historic observations on sampled dates.
+                  progress=None, today: date | None = None
+                  ) -> tuple[dict[str, set[int]], date]:
+    """({species: {months}}, newest observation date sampled) from historic
+    observations on sampled dates.
 
     A species is recorded present in a month iff it was reported on any sampled
-    date of that month. `progress` (optional) is a callable(region, done, total).
+    date of that month. `year` is the *target* sampling year; any month not yet
+    complete in it falls back to `year - 1` observations, so an in-progress
+    year never yields empty month masks (see sampling_year_for_month).
+    `progress` (optional) is a callable(region, done, total, date).
     """
     sp_months: dict[str, set[int]] = defaultdict(set)
     total = 12 * sample_dates
     done = 0
+    newest: date | None = None
     for month in range(1, 13):
-        for y, m, d in sample_dates_for_month(year, month, sample_dates):
+        m_year = sampling_year_for_month(year, month, today)
+        for y, m, d in sample_dates_for_month(m_year, month, sample_dates):
             for name in historic_obs(region_code, y, m, d, key):
                 sp_months[name].add(month)
             done += 1
+            dt = date(y, m, d)
+            if newest is None or dt > newest:
+                newest = dt
             if progress:
-                progress(region_code, done, total, f"{y}-{m:02d}-{d:02d}")
-    return dict(sp_months)
+                progress(region_code, done, total, f"{dt:%Y-%m-%d}")
+    return dict(sp_months), newest or date(year, 12, 31)
 
 
 # ---------------------------------------------------------------------------
@@ -565,7 +603,14 @@ def _mask(months: set[int]) -> str:
 
 
 def write_region_csv(path: Path, region: str, sp_months: dict[str, set[int]],
-                     label: str, year: int, sample_dates: int, members: list[str] | None = None):
+                     label: str, year: int, sample_dates: int,
+                     members: list[str] | None = None, data_date: str = ""):
+    """Write a region table, recording the eBird data date it was built from.
+
+    `data_date` is the newest observation date sampled (the date of the eBird
+    data itself, NOT the download date) - written as a `# data_date:` header
+    line that `--update` later compares against to decide what is stale.
+    """
     header = [
         f"Generated from real eBird API historic observations by `birdid --download` "
         f"on {datetime.now():%Y-%m-%d}.",
@@ -581,6 +626,14 @@ def write_region_csv(path: Path, region: str, sp_months: dict[str, set[int]],
     header.append("This is API-derived eBird data - it lives in the gitignored "
                   "regions_generated/ dir and is NOT committed to git; the "
                   "curated seed in regions/ stays as the fallback.")
+    # data freshness metadata (used by --update): the year the data is from and
+    # the newest observation date sampled (not the download date).
+    if year >= datetime.now().year:
+        header.append(f"Months not yet complete in {year} fall back to "
+                      f"{year - 1} observations, so no month is left empty.")
+    header.append(f"data_year: {year}")
+    if data_date:
+        header.append(f"data_date: {data_date}")
 
     with open(path, "w", newline="", encoding="utf-8") as f:
         f.write("region,species,status,month_mask\n")
@@ -629,36 +682,135 @@ def _pool_tree_code(code: str) -> str:
     return "AS-SOUTHEAST" if code == "SEA" else code
 
 
+def _read_meta(path: Path, key: str) -> str | None:
+    """Value of a '# key: value' header line in a generated region CSV."""
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("# "):
+                    k, _, v = line[2:].partition(":")
+                    if k.strip() == key:
+                        return v.strip()
+    except OSError:
+        pass
+    return None
+
+
+def _load_region_csv(path: Path) -> dict[str, set[int]]:
+    """{species: {months}} from an existing region CSV (comment/header safe)."""
+    sp: dict[str, set[int]] = defaultdict(set)
+    try:
+        with open(path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                if not row or (row.get("region") or "").lstrip().startswith("#"):
+                    continue
+                name = (row.get("species") or "").strip()
+                mask = (row.get("month_mask") or "").strip()
+                if not name or len(mask) != 12:
+                    continue
+                for i, ch in enumerate(mask):
+                    if ch == "1":
+                        sp[name].add(i + 1)
+    except OSError:
+        pass
+    return dict(sp)
+
+
+def _target_data_date(year: int, sample_dates: int, today: date | None = None) -> str:
+    """The newest observation date a fresh sampling of `year` would reach - the
+    'data date' `--update` compares existing tables against (ISO string)."""
+    today = today or date.today()
+    newest: date | None = None
+    for month in range(1, 13):
+        my = sampling_year_for_month(year, month, today)
+        for y, m, d in sample_dates_for_month(my, month, sample_dates):
+            dt = date(y, m, d)
+            if newest is None or dt > newest:
+                newest = dt
+    return (newest or date(year, 12, 31)).isoformat()
+
+
+def _sample_or_skip(dest: Path, region_code: str, label: str, key: str, year: int,
+                    sample_dates: int, today: date | None,
+                    update: bool, target_date: str = "") -> tuple[dict | None, str]:
+    """Sample `region_code` into `dest`, skipping it when not needed.
+
+    Returns (species_months | None, data_date | None); None means the table was
+    skipped (already present for --download, or already current for --update).
+
+    - --download only fills gaps: an existing table is left alone.
+    - --update re-samples a table whose recorded data_date is older than the
+      target data date; a table with no recorded date (written before this
+      feature existed) is treated as stale and refreshed.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if dest.is_file():
+        local = _read_meta(dest, "data_date")
+        if not update:
+            print(f"birdid:   {region_code}: table exists, skipping "
+                  f"(use --update to refresh)")
+            return None, ""
+        if target_date and local and local >= target_date:
+            print(f"birdid:   {region_code}: current ({local}) - skipping")
+            return None, ""
+        if local:
+            print(f"birdid:   {region_code}: data from {local} is older than "
+                  f"target {target_date} - refreshing")
+        else:
+            print(f"birdid:   {region_code}: no data date recorded - refreshing")
+    sp, data_date = _sample_with_progress(region_code, key, year, sample_dates,
+                                          today=today)
+    write_region_csv(dest, region_code, sp, label, year, sample_dates,
+                     data_date=data_date.isoformat())
+    return sp, data_date.isoformat()
+
+
+def _pool_data_date(generated_dir: Path, members: list[str]) -> str:
+    """Newest recorded data_date across a set of member tables (the pooled
+    table's own data date), or '' when none are dated."""
+    dates = []
+    for m in members:
+        p = _find_region_csv(generated_dir, m)
+        if p:
+            d = _read_meta(p, "data_date")
+            if d:
+                dates.append(d)
+    return max(dates) if dates else ""
+
+
 def _download_members(generated_dir: Path, members: list[str], key: str,
                       year: int, sample_dates: int,
-                      override_dir: Path | None) -> dict[str, set[int]]:
-    """Sample every member country and write its table into the tree.
-
-    With `override_dir` (subcontinent download) every member lands in that
-    folder; otherwise each member goes into its own
-    <CONTINENT>/<SUBCONTINENT>/ folder (continent download - creates the
-    subregion folders). Returns the unioned {species: months} for the pooled file.
-    """
+                      override_dir: Path | None, today: date | None = None,
+                      update: bool = False, target_date: str = "") -> dict[str, set[int]]:
+    """Sample every member country, skipping those already present (--download)
+    or already current (--update), and return the unioned {species: months} for
+    the pooled file - built from ALL member tables present after the run, so an
+    incremental download does not drop existing members from the pool."""
     pool_months: dict[str, set[int]] = defaultdict(set)
     for member in members:
         if not region_exists(member, key):
             print(f"birdid:   warning: skipping invalid member code {member}")
             continue
-        sp = _sample_with_progress(member, key, year, sample_dates)
+        dest_dir = override_dir or (generated_dir / _country_rel_dir(member))
+        dest = dest_dir / f"{member}.csv"
+        sp, _ = _sample_or_skip(dest, member, member, key, year, sample_dates,
+                                today, update, target_date)
+        if sp is None:
+            sp = _load_region_csv(dest)   # skipped (exists) - still pool it
         for name, months in sp.items():
             pool_months[name].update(months)
-        dest_dir = override_dir or (generated_dir / _country_rel_dir(member))
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        write_region_csv(dest_dir / f"{member}.csv", member, sp,
-                         member, year, sample_dates)
     return pool_months
 
 
 def _download_country(generated_dir: Path, code: str, label: str, year: int,
-                      sample_dates: int, key: str, subnational: bool):
+                      sample_dates: int, key: str, subnational: bool,
+                      today: date | None = None, update: bool = False,
+                      target_date: str = ""):
     """Write one country's table into <CONTINENT>/<SUBCONTINENT>/<COUNTRY>.csv
     (or, with --subnational, its subnational1 tables into
-    <CONTINENT>/<SUBCONTINENT>/<COUNTRY>/<SUB>.csv - the smallest division)."""
+    <CONTINENT>/<SUBCONTINENT>/<COUNTRY>/<SUB>.csv - the smallest division).
+    Existing tables are skipped by --download and only refreshed by --update
+    when their eBird data is older than the target."""
     if not region_exists(code, key):
         raise RuntimeError(f"eBird region code '{code}' is not valid "
                            f"(check your key / the code).")
@@ -680,12 +832,17 @@ def _download_country(generated_dir: Path, code: str, label: str, year: int,
                 flat.unlink()
                 print(f"birdid:   removed superseded flat table {flat} "
                       f"(replaced by {len(subs)} subnational tables)")
+            written = 0
             for sub in subs:
                 sub_code = sub["code"]
-                sp = _sample_with_progress(sub_code, key, year, sample_dates)
-                write_region_csv(country_dir / f"{sub_code}.csv", sub_code, sp,
-                                 sub.get("name", sub_code), year, sample_dates)
-            print(f"birdid: wrote {len(subs)} subnational tables for {code} "
+                sp, _ = _sample_or_skip(country_dir / f"{sub_code}.csv",
+                                        sub_code, sub.get("name", sub_code),
+                                        key, year, sample_dates, today,
+                                        update, target_date)
+                if sp is not None:
+                    written += 1
+            print(f"birdid: {written} subnational table(s) for {code} processed "
+                  f"(skipped {len(subs) - written} already present/current) "
                   f"under {country_dir}/ (smallest division; no pooled file - "
                   f"the {code} region is the union of these).")
             print(f"birdid: done. eBird data written to {country_dir} "
@@ -695,31 +852,45 @@ def _download_country(generated_dir: Path, code: str, label: str, year: int,
               f"country table instead.")
     dest = generated_dir / _country_rel_dir(code)
     dest.mkdir(parents=True, exist_ok=True)
-    sp_months = _sample_with_progress(code, key, year, sample_dates)
-    write_region_csv(dest / f"{code}.csv", code, sp_months, label, year, sample_dates)
-    print(f"birdid: done. eBird data written to {dest / f'{code}.csv'} "
-          f"(API-derived, gitignored - not committed).")
+    target = dest / f"{code}.csv"
+    sp_months, _ = _sample_or_skip(target, code, label, key, year, sample_dates,
+                                   today, update, target_date)
+    if sp_months is None:
+        print(f"birdid: done. {code} table already "
+              f"{'present' if not update else 'current'} - skipped "
+              f"(use {'--update' if not update else '--year with a newer year'} "
+              f"to refresh it).")
+    else:
+        print(f"birdid: done. eBird data written to {target} "
+              f"(API-derived, gitignored - not committed).")
 
 
 def _download_pool(generated_dir: Path, code: str, label: str, year: int,
-                   sample_dates: int, key: str):
+                   sample_dates: int, key: str, today: date | None = None,
+                   update: bool = False):
     """Write the smallest division for a continent/subcontinent pool: every
     member country table in the <CONTINENT>/<SUBCONTINENT>/ tree, plus a pooled
-    union table (kept alongside, per the 'keep both' choice)."""
+    union table (kept alongside, per the 'keep both' choice). Existing member
+    tables are skipped (--download) or only refreshed when stale (--update)."""
     tgt = _pool_tree_code(code)
+    target_date = _target_data_date(year, sample_dates, today) if update else ""
+    verb = "updating" if update else "downloading"
     if tgt in SUB_NAMES:
         # subcontinent (AS-SOUTHEAST, EU-WEST, ...): fill its own folder
         cont = subcontinent_continent_map().get(tgt)
         members = sorted(c for c, s in country_subcontinent_map().items() if s == tgt)
         if not members:
             raise ValueError(f"no countries found for subcontinent {tgt}")
-        print(f"birdid: downloading subcontinent {tgt} ({label}) over "
+        print(f"birdid: {verb} subcontinent {tgt} ({label}) over "
               f"{len(members)} member countries -> regions_generated/{cont}/{tgt}/ ...")
         sub_dir = generated_dir / cont / tgt
         pool_months = _download_members(generated_dir, members, key, year,
-                                        sample_dates, override_dir=sub_dir)
+                                        sample_dates, override_dir=sub_dir,
+                                        today=today, update=update,
+                                        target_date=target_date)
         write_region_csv(sub_dir / f"{tgt}.csv", tgt, dict(pool_months),
-                         label, year, sample_dates, members=members)
+                         label, year, sample_dates, members=members,
+                         data_date=_pool_data_date(sub_dir, members))
         print(f"birdid: wrote pooled {tgt}.csv ({len(pool_months)} spp) "
               f"alongside {len(members)} country tables in {sub_dir}/")
         print(f"birdid: done. eBird data written to {sub_dir} (API-derived, "
@@ -730,13 +901,16 @@ def _download_pool(generated_dir: Path, code: str, label: str, year: int,
         members = sorted(c for c, cont in country_continent_map().items() if cont == tgt)
         if not members:
             raise ValueError(f"no countries found for continent {tgt}")
-        print(f"birdid: downloading continent {tgt} ({label}) over "
+        print(f"birdid: {verb} continent {tgt} ({label}) over "
               f"{len(members)} member countries; subcontinent folders under "
               f"regions_generated/{tgt}/ are created on demand ...")
         pool_months = _download_members(generated_dir, members, key, year,
-                                        sample_dates, override_dir=None)
+                                        sample_dates, override_dir=None,
+                                        today=today, update=update,
+                                        target_date=target_date)
         write_region_csv(generated_dir / f"{tgt}.csv", tgt, dict(pool_months),
-                         label, year, sample_dates, members=members)
+                         label, year, sample_dates, members=members,
+                         data_date=_pool_data_date(generated_dir, members))
         print(f"birdid: wrote pooled {tgt}.csv ({len(pool_months)} spp) "
               f"alongside the country tables under regions_generated/{tgt}/")
         print(f"birdid: done. eBird data written to regions_generated/{tgt}/ "
@@ -746,9 +920,9 @@ def _download_pool(generated_dir: Path, code: str, label: str, year: int,
                          f"(known: {', '.join(sorted(POOLS))})")
 
 
-def download(data_dir: Path, tokens: list[str], year: int = DEFAULT_YEAR,
-             sample_dates: int = DEFAULT_SAMPLE_DATES, key: str | None = None,
-             subnational: bool = False):
+def _run_download(data_dir: Path, tokens: list[str], year: int | None,
+                  sample_dates: int, key: str | None, subnational: bool,
+                  update: bool):
     kind, code, label = resolve_spec(tokens, load_countries(data_dir))
     data_dir = Path(data_dir)
     key = key or get_api_key()
@@ -774,23 +948,56 @@ def download(data_dir: Path, tokens: list[str], year: int = DEFAULT_YEAR,
             print(f"birdid: ERROR: {e}")
         print(f"birdid: no API key configured - no generated table written for "
               f"{code} ({label}).")
-        print("        without a key, --download can only fetch the taxonomy "
-              "(above); region tables use the curated seeds (EUROPE/SEA) or none.")
+        print("        without a key, --download/--update can only fetch the "
+              "taxonomy (above); region tables use the curated seeds "
+              "(EUROPE/SEA) or none.")
         print("        to fetch real eBird observations instead:")
-        print("          birdid --api <your-ebird-key>   then rerun --download")
+        print("          birdid --api <your-ebird-key>   then rerun "
+              "--download/--update")
         return
+
+    if year is None:
+        # --update defaults to the current year (the newest data eBird serves);
+        # --download keeps the curated default so a complete year is sampled.
+        year = date.today().year if update else DEFAULT_YEAR
 
     generated_dir = data_dir / GENERATED_DIR
     generated_dir.mkdir(parents=True, exist_ok=True)
+    today = date.today()
 
     if kind == "country":
-        _download_country(generated_dir, code, label, year, sample_dates,
-                          key, subnational)
+        _download_country(generated_dir, code, label, year, sample_dates, key,
+                          subnational, today=today, update=update)
     else:
-        _download_pool(generated_dir, code, label, year, sample_dates, key)
+        _download_pool(generated_dir, code, label, year, sample_dates, key,
+                       today=today, update=update)
 
 
-def _sample_with_progress(region_code: str, key: str, year: int, sample_dates: int):
+def download(data_dir: Path, tokens: list[str], year: int | None = None,
+             sample_dates: int = DEFAULT_SAMPLE_DATES, key: str | None = None,
+             subnational: bool = False):
+    """Fetch the missing part of a region: tables already downloaded are left
+    alone (only gaps are fetched), so re-running `--download EU-WEST` does not
+    burn API calls on countries you already have. `year` defaults to a complete
+    observation year (DEFAULT_YEAR); pass --year to choose."""
+    _run_download(data_dir, tokens, year, sample_dates, key, subnational,
+                  update=False)
+
+
+def update(data_dir: Path, tokens: list[str], year: int | None = None,
+           sample_dates: int = DEFAULT_SAMPLE_DATES, key: str | None = None,
+           subnational: bool = False):
+    """Refresh the parts of a region whose eBird data is older than the newest
+    available (default target: the current year, so a table sampled from 2025
+    data is refreshed with 2026 observations; pass --year to pin it). Missing
+    tables are fetched too. Months not yet complete in the target year fall
+    back to the previous year's observations, so no month mask is left empty."""
+    _run_download(data_dir, tokens, year, sample_dates, key, subnational,
+                  update=True)
+
+
+def _sample_with_progress(region_code: str, key: str, year: int, sample_dates: int,
+                          today: date | None = None):
     total = 12 * sample_dates
     state = {"done": 0}
 
@@ -801,8 +1008,9 @@ def _sample_with_progress(region_code: str, key: str, year: int, sample_dates: i
         if done == tot:
             print()
 
-    sp = sample_months(region_code, key, year, sample_dates, progress=progress)
-    return sp
+    sp, data_date = sample_months(region_code, key, year, sample_dates,
+                                  progress=progress, today=today)
+    return sp, data_date
 
 
 # ---------------------------------------------------------------------------
