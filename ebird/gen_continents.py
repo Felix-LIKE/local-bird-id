@@ -8,6 +8,7 @@ commit. Subcontinent codes with a dash are our own pool codes; 'SEA' and
 """
 import csv
 import sys
+from pathlib import Path
 
 # code -> (continent, subcontinent)
 MAP = {
@@ -158,7 +159,8 @@ MAP = {
 
 def main():
     countries = {}
-    with open("/data/offline-data/bird/ebird/countries.csv", newline="", encoding="utf-8") as f:
+    data_dir = Path(__file__).resolve().parent
+    with open(data_dir / "countries.csv", newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             code = (row.get("code") or "").strip().upper()
             if code:
@@ -171,7 +173,7 @@ def main():
         print("EXTRA in MAP (not in countries.csv):", extra, file=sys.stderr)
     if missing or extra:
         sys.exit(1)
-    with open("/data/offline-data/bird/ebird/continents.csv", "w", newline="", encoding="utf-8") as f:
+    with open(data_dir / "continents.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["code", "continent", "subcontinent"])
         for code in sorted(MAP):

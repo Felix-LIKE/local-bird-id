@@ -60,8 +60,9 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
 - **Low-confidence handling** (`--min-confidence`, default 0.50): a capture
   whose top score stays below the threshold (a blurry, distant, or ambiguous
   bird) still gets a sidecar - with its best guess + confidence kept - but with
-  `status = low-confidence`, so it shows up in IMatch clearly marked as
-  uncertain. Such photos are **skipped on re-runs and listed for review**: at
+  `status = low-confidence`, so it shows up in your photo software clearly
+  marked as uncertain. Such photos are **skipped on re-runs and listed for
+  review**: at
   the end of a run the summary prints them least-confident first ("low-confidence
   photos for review"), and in TUI mode it asks "re-analyse them now?" - a *yes*
   re-runs them with `--include-low-confidence --no-tui`. To revisit flagged
@@ -173,7 +174,7 @@ The project lives on GitHub. Two ways to get it onto your computer.
 folder:
 
 ```bash
-git clone https://github.com/Felix-LIKE/local-bird-id.git
+git clone https://github.com/<your-account>/local-bird-id.git
 cd local-bird-id
 ```
 
@@ -186,7 +187,7 @@ folder (the one that contains a subfolder called `pipeline/`).
 > password, either you don't have access yet, or use your GitHub **personal
 > access token** as the password (Settings → Developer settings → Personal
 > access tokens). With an SSH key set up, use
-> `git clone git@github.com:Felix-LIKE/local-bird-id.git` instead.
+> `git clone git@github.com:<your-account>/local-bird-id.git` instead.
 
 Run `pwd` afterwards and make sure it ends in `local-bird-id` — the remaining
 steps assume you are in that folder.
@@ -353,7 +354,7 @@ A recommended layout (trip → location → photos):
     │   ├── 5M4_0001.CR2
     │   ├── 5M4_0001.JPG            ← RAW+JPG pair = ONE capture
     │   ├── 5M4_0002.JPG
-    │   └── S296663962_observations.csv   ← optional eBird checklist export
+    │   └── S123456789_observations.csv   ← optional eBird checklist export
     └── 260201-NewPlace/            ← new folders are picked up automatically
         └── 5M4_0003.JPG
 ```
@@ -500,7 +501,7 @@ pipeline/birdid --cache update
   rerun, running on a subfolder alone works, and `--report <path>` still writes
   a flat aggregate.
 - **Centralized eBird checklists** (feature 2): drop exported checklists
-  (e.g. `S296663962_observations.csv`) into `~/.config/birdid/checklists/`
+  (e.g. `S123456789_observations.csv`) into `~/.config/birdid/checklists/`
   (created by `--initialize`; override with `--checklists-dir` /
   `$BIRDID_CHECKLISTS_DIR`). Species are keyed by their `Observation Date`
   month and boost matching folders' candidate lists; species outside the GPS
@@ -532,7 +533,7 @@ pipeline/birdid --cache update
 ### Central checklists folder
 
 Drop your exported eBird checklists (one file per checklist, e.g.
-`S296663962_observations.csv`) into `~/.config/birdid/checklists/` — created by
+`S123456789_observations.csv`) into `~/.config/birdid/checklists/` — created by
 `--initialize`, or override with `--checklists-dir` / `$BIRDID_CHECKLISTS_DIR`.
 Each row's `Observation Date` (e.g. `Jan 28, 2026`) keys its species by month,
 so every capture whose folder resolves to that month gets those species added
@@ -546,8 +547,9 @@ region prior may be too narrow (download a wider pool to cover them).
 > rerun skips it. For a fresh identification run, use
 > `birdid <folder> --force` — every capture is re-identified **in place**: the
 > existing `<base>.xmp` is kept (nothing is deleted) and only the bird-ID
-> fields are overwritten, so it is safe on an IMatch-managed folder where the
-> sidecars also hold IMatch metadata. Only if you want to wipe the sidecars
+> fields are overwritten, so it is safe on folders managed by your photo
+> software where the sidecars also hold metadata written by that software.
+> Only if you want to wipe the sidecars
 > entirely, delete them (+ `birdid_manifest.json` + the per-folder
 > `birdid_report.csv`/`birdid_index.csv` files) — originals are never touched.
 

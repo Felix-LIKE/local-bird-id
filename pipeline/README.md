@@ -5,7 +5,8 @@
 `260128-Botanic_Garden`), builds a species candidate list from the offline eBird
 tables (optionally boosted by an eBird checklist export in the photo folder),
 and classifies each bird with **BioCLIP 2** (pybioclip, CPU). It writes
-IMatch-safe XMP sidecars and a resumable manifest. **Originals are never
+XMP sidecars that work with any photo-management program, plus a resumable
+manifest. **Originals are never
 modified** - only one `<base>.xmp` sidecar per capture, the manifest, and the
 report are written. Every result records both the **common name** and the
 **scientific name** (from the official eBird taxonomy).
@@ -142,7 +143,8 @@ python3 birdid.py /path/to/photos --dry-run
 python3 birdid.py /path/to/photos
 
 # Force a fresh identification of an already-tagged folder (sidecars are kept,
-# only the bird-ID fields are overwritten - safe on an IMatch-managed folder):
+# only the bird-ID fields are overwritten - safe on a folder managed by your
+# photo software):
 python3 birdid.py /path/to/photos --force
 
 # Plain output, first 10 photos:
@@ -153,7 +155,7 @@ python3 birdid.py /path/to/photos --region DE
 python3 birdid.py --list-candidates
 ```
 
-Defaults are fine: data in `/data/offline-data/bird/ebird`, region `DE`.
+Defaults are fine: data in the repo's `ebird/` folder, region `DE`.
 
 ## Folder structure
 
@@ -187,7 +189,7 @@ the layout and a worked example.
   adds that day's observed species to the candidate list (highest priority).
   Use `--no-checklist` to ignore. Works fully offline - it is just a CSV.
 - **Centralized checklist exports** (feature 2): drop your exported eBird
-  checklists (one file per checklist, e.g. `S296663962_observations.csv`) into
+  checklists (one file per checklist, e.g. `S123456789_observations.csv`) into
   the central folder (`~/.config/birdid/checklists/`, or `--checklists-dir` /
   `$BIRDID_CHECKLISTS_DIR`; created by `--initialize`). Each row's
   `Observation Date` (e.g. `Jan 28, 2026`) keys the species by (year, month),
@@ -221,7 +223,7 @@ the layout and a worked example.
   shares a single compiled backbone, and each species' embedding is computed
   once ever and cached centrally under `~/.cache/birdid/embeddings/` (override
   with `--cache-dir`; kept out of the photo folders and the repo so no derived
-  files land in an IMatch-managed tree; keyed by model: `embeddings.npy` +
+  files land in your photo software's tree; keyed by model: `embeddings.npy` +
   `index.json`). Per photo the cost is one image encode + a cached softmax,
   independent of candidate-list size. The first time a region's species are
   seen the one-time per-species encode runs with visible progress; later runs
@@ -270,16 +272,16 @@ the layout and a worked example.
   is top in every frame dominates, so N looks at the same bird *accumulate*
   evidence and a 3-frame burst usually beats any single frame (a plain
   probability average would only smooth, not compound). The shared result is
-  written to **every** frame's sidecar + manifest, so IMatch sees one consistent
-  ID across the burst. Frames that fail the similarity gate (a different bird,
+  written to **every** frame's sidecar + manifest, so your photo software sees
+  one consistent ID across the burst. Frames that fail the similarity gate (a different bird,
   or a non-bird subject that walked through the burst) keep their own
   single-frame result, so a rapid cut between subjects is never merged. Without
   `--burst` the per-capture mode is exactly unchanged.
 - **Low-confidence handling** (`--min-confidence`, default 0.50): a capture
   whose top score stays below the threshold (blurry / distant / ambiguous bird)
   is *not* silently tagged. It still gets a sidecar with its best guess +
-  confidence, but with `status = low-confidence` - so it shows in IMatch marked
-  as uncertain. On re-runs such captures are **skipped** (they do not count as
+  confidence, but with `status = low-confidence` - so it shows in your photo
+  software marked as uncertain. On re-runs such captures are **skipped** (they do not count as
   done) and the run summary lists them least-confident-first under
   "low-confidence photos for review". In TUI mode the run then asks whether to
   re-analyse them; a `yes` re-invokes the same command with
@@ -294,8 +296,9 @@ the layout and a worked example.
   reruns skip it. `--force` re-identifies **every** capture in place: existing
   sidecars are kept (nothing is deleted) and only the bird-ID fields
   (`bird:*` + `dc:subject`/`dc:description`) are overwritten, so a forced run
-  is safe on an IMatch-managed folder - any other XMP content IMatch wrote is
-  preserved. The keep-best guard is bypassed (the new result is written even
+  is safe on a folder managed by your photo software - any other XMP content
+  it wrote is preserved. The keep-best guard is bypassed (the new result is
+  written even
   if it scores lower). Without `--force`, delete the stale sidecars (+ manifest
   + report) first to re-tag a folder - originals are never touched.
 
@@ -314,7 +317,7 @@ top guess), `bird:topConfidence`,
 `dc:description` (includes the scientific name, and the Avibase link), and
 `dc:subject` keywords
 `Birds/<species>`. Register `http://ns.birdpipeline/1.0/` as a custom metadata
-panel in IMatch.
+namespace in your photo software (e.g. a DAM).
 
 Names are normalised against the official eBird taxonomy: the model's answer is
 matched case-insensitively, a scientific-name answer is converted back to the

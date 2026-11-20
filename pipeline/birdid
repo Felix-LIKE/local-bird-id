@@ -178,7 +178,7 @@ fi
 if [ "$#" -eq 0 ]; then
     say "usage: birdid /path/to/photos [birdid.py args...]"
     say "       (--force re-identifies an already-tagged folder in place,"
-    say "        keeping the IMatch sidecars and only overwriting the bird-ID"
+    say "        keeping the existing sidecars and only overwriting the bird-ID"
     say "        fields)"
     say "       (--burst combines a rapid series of shots of the same bird"
     say "        into one stronger ID - opt-in; the per-capture mode stays"

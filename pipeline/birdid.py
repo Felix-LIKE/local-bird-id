@@ -16,7 +16,8 @@ tagged:
      sits in the photo folder
   4. classify the photo with BioCLIP 2 (pybioclip, CPU) and get a ranked
      species + confidence
-  5. write ONE IMatch-safe XMP sidecar per capture:  <base>.xmp
+  5. write ONE XMP sidecar per capture (readable by any photo-management
+     program):  <base>.xmp
      (never <base>.jpg.xmp / <base>.cr2.xmp)
   6. keep a resumable manifest + CSV report, and show a live TUI
 
@@ -58,7 +59,7 @@ See --help for all options. Examples:
   birdid.py ~/Pictures/birds                        # process everything
   birdid.py ~/Pictures/birds --force                # re-ID an already-tagged
                                                     # folder in place (keeps the
-                                                    # IMatch sidecars, overwrites
+                                                    # existing sidecars, overwrites
                                                     # only the bird-ID fields)
   birdid.py ~/Pictures/birds --max 10 --no-tui      # first 10, plain output
   birdid.py ~/Pictures/birds --burst                # combine a rapid series of
@@ -105,14 +106,14 @@ def _default_cache_dir() -> Path:
 
     Lives under the XDG cache home (~/.cache/birdid/embeddings) - NOT inside
     the photo folders, the repo, or the eBird data dir - so the derived cache
-    files never end up in an IMatch-managed tree. Override with --cache-dir.
+    files never end up in your photo software's tree. Override with --cache-dir.
     """
     xdg = os.environ.get("XDG_CACHE_HOME")
     base = Path(xdg) if xdg else Path.home() / ".cache"
     return base / "birdid" / "embeddings"
 
 # Centralized eBird checklist exports (one file per checklist, e.g.
-# S296663962_observations.csv). Override with --checklists-dir or
+# S123456789_observations.csv). Override with --checklists-dir or
 # BIRDID_CHECKLISTS_DIR; created by --initialize.
 DEFAULT_CHECKLISTS_DIR = os.environ.get(
     "BIRDID_CHECKLISTS_DIR") or str(Path.home() / ".config" / "birdid" / "checklists")
@@ -727,7 +728,7 @@ def _parse_checklist_date(s: str) -> datetime | None:
 class CentralChecklists:
     """Centralized eBird checklist exports: species by (year, month).
 
-    One file per exported checklist (e.g. ``S296663962_observations.csv``) in a
+    One file per exported checklist (e.g. ``S123456789_observations.csv``) in a
     single folder (default ``~/.config/birdid/checklists/``). Each row carries a
     ``Species`` and an ``Observation Date``. A persistent index
     (``<dir>/index.json``) remembers each file's mtime+size and its parsed
@@ -1104,7 +1105,7 @@ class SpeciesEmbeddingCache:
 
     Layout in a central cache dir (default ~/.cache/birdid/embeddings, override
     with --cache-dir - kept out of the photo folders, the repo and the eBird
-    data dir so no derived files land in an IMatch-managed tree):
+    data dir so no derived files land in your photo software's tree):
       index.json      {"model": <bioclip model str>, "names": [n, ...]}
       embeddings.npy  float32 [N, D]   (row i == embedding of names[i];
                                         D = model embedding dim, 768 for
@@ -1847,7 +1848,7 @@ def make_classifier(args) -> Classifier:
 
 
 # --------------------------------------------------------------------------
-# XMP sidecars (IMatch-safe, merge-aware)
+# XMP sidecars (merge-aware; safe for any photo-management program)
 # --------------------------------------------------------------------------
 
 _XMP_TPL = """<?xml version="1.0" encoding="UTF-8"?>
@@ -2013,7 +2014,7 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
             note += f" | Avibase: {avibase_url}"
         _set_text(desc, "description", _nsmap()["dc"], note)
 
-        # dc:subject -> Birds/<species> keywords (convenience, IMatch-managed);
+        # dc:subject -> Birds/<species> keywords (convenience for photo software);
         # non-bird subjects get Non-bird/<category> so they stay separate.
         kw_prefix = "Non-bird" if status == "non-bird" else "Birds"
         for old in _find(root, "//dc:subject"):
@@ -2547,7 +2548,7 @@ def main():
                     help="central per-user BioCLIP 2 species-embedding cache "
                          "(embeddings.npy + index.json). Kept out of the photo "
                          "folders and the eBird data dir so no derived files "
-                         "land in an IMatch-managed tree. "
+                         "land in your photo software's tree. "
                          f"Default: {_default_cache_dir()}")
     ap.add_argument("--region", default=DEFAULT_REGION,
                     help="default region when no GPS can be resolved; DE/SG/TH "
@@ -2559,7 +2560,7 @@ def main():
                          "(both in photo folders and the centralized checklists dir)")
     ap.add_argument("--checklists-dir", default=DEFAULT_CHECKLISTS_DIR,
                     help="centralized eBird checklist exports (one file per "
-                         "checklist, e.g. S296663962_observations.csv); "
+                         "checklist, e.g. S123456789_observations.csv); "
                          "entries are keyed by Observation Date and boost the "
                          "candidate list for matching folders. Default: "
                          "~/.config/birdid/checklists (or $BIRDID_CHECKLISTS_DIR)")
@@ -2584,10 +2585,11 @@ def main():
                          "already has sidecars: every capture is re-processed "
                          "and ONLY the bird-ID fields in the existing XMP are "
                          "overwritten (bird:* + dc:subject/dc:description). "
-                         "Everything else in the sidecar - e.g. metadata IMatch "
-                         "has written - is preserved, and no file is deleted, "
-                         "so a forced re-run is safe on an IMatch-managed "
-                         "folder. Also overrides the keep-best guard (the new "
+                         "Everything else in the sidecar - e.g. metadata your "
+                         "photo software has written - is preserved, and no "
+                         "file is deleted, so a forced re-run is safe on a "
+                         "folder managed by your photo software. Also "
+                         "overrides the keep-best guard (the new "
                          "result is written even if it scores lower).")
     ap.add_argument("--expand-threshold", type=float, default=0.35,
                     help="below this top score, re-score against the wider "
@@ -2728,7 +2730,7 @@ def main():
                 initialize(data_dir, data_dir / "regions")
                 Path(args.checklists_dir).mkdir(parents=True, exist_ok=True)
                 print(f"birdid: central checklists dir: {args.checklists_dir} "
-                      "(drop eBird exports like S296663962_observations.csv there)")
+                      "(drop eBird exports like S123456789_observations.csv there)")
             elif args.api is not None:
                 from ebird_data import handle_api
                 handle_api(args.api)
@@ -3204,7 +3206,8 @@ def main():
                 summary_lines.append(
                     "\nforced re-run: captures with existing sidecars were "
                     "re-identified; only the bird-ID fields were overwritten "
-                    "(all other XMP content - e.g. IMatch metadata - preserved).")
+                    "(all other XMP content - e.g. metadata from your photo "
+                    "software - preserved).")
             summary_lines.append(
                 f"\ndone: {done_n} tagged, {lc_new} low-confidence, "
                 f"{nd_n} no-data, {nb_n} non-bird, "

@@ -56,7 +56,8 @@ API_BASE = "https://api.ebird.org/v2"
 TAXONOMY_URL = f"{API_BASE}/ref/taxonomy/ebird?fmt=csv"
 
 DEFAULT_REGION = "DE"                 # matches birdid.py DEFAULT_REGION
-DEFAULT_DATA_DIR = "/data/offline-data/bird/ebird"
+# repo-relative fallback (birdid.py always passes an explicit data_dir)
+DEFAULT_DATA_DIR = str(Path(__file__).resolve().parent.parent / "ebird")
 
 CONFIG_DIR = Path(os.path.expanduser("~/.config/birdid"))
 KEY_PATH = CONFIG_DIR / "ebird_api_key"
