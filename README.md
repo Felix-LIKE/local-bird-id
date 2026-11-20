@@ -290,6 +290,8 @@ pipeline/birdid --initialize
 pipeline/birdid ~/Pictures/birds            # BioCLIP 2, no server
 pipeline/birdid ~/Pictures/birds --dry-run  # plan only
 pipeline/birdid --list-candidates           # inspect region/month tables
+pipeline/birdid --doctor                    # launcher self-diagnostics (if a run
+                                            # ever ends in a confusing bash error)
 ```
 
 ## Photo folder structure

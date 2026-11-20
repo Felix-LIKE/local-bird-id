@@ -28,6 +28,8 @@
 #   birdid --initialize                # one-time: taxonomy + BioCLIP 2 backends
 #   birdid --download-backends         # (same backend part as --initialize)
 #   birdid --list-candidates           # inspect the region/month tables
+#   birdid --doctor                    # launcher self-diagnostics (run whenever
+#                                      # a run ends in a confusing bash error)
 #
 # Exit codes:
 #   0  success (or nothing to do)
@@ -48,6 +50,114 @@ PIPELINE="$SCRIPT_DIR/birdid.py"
 # ---- helpers --------------------------------------------------------------
 say() { printf '%s\n' "$*"; }
 die() { printf 'birdid: ERROR: %s\n' "$*" >&2; exit 1; }
+
+# ---- doctor: launcher self-diagnostics -------------------------------------
+# `birdid --doctor` verifies this launcher's own health so a confusing mid-run
+# syntax error (the file being edited while bash is reading it) is instantly
+# diagnosable. It runs EARLY and exits BEFORE the pipeline invocation, so it can
+# inspect a launcher whose tail is corrupt (the two past failure signatures:
+# a stray 'cache (no region = drop stale)"' line and a stray extra 'fi').
+_doctor() {
+    local bad=0 tmp repo real inst
+    tmp="/tmp/birdid_doctor_$$.syntax"
+    echo "birdid: --doctor: launcher self-diagnostics"
+    echo "  script      : $(readlink -f "$0")"
+    echo "  pipeline    : $PIPELINE"
+
+    # 1. this file parses
+    if bash -n "$0" 2>"$tmp"; then
+        echo "  [ok] bash -n: syntax OK"
+    else
+        echo "  [!!] bash -n reports a syntax error:"
+        sed 's/^/        /' "$tmp"
+        bad=1
+    fi
+    rm -f "$tmp"
+
+    # 2. control-keyword balance (catches a stray extra fi/esac/done)
+    local nif nfi ncase nesac nfor ndone
+    nif=$(grep -cE '^[[:space:]]*if[[:space:]]' "$0" || true)
+    nfi=$(grep -cE '^[[:space:]]*fi([[:space:]]|$)' "$0" || true)
+    ncase=$(grep -cE '^[[:space:]]*case[[:space:]]' "$0" || true)
+    nesac=$(grep -cE '^[[:space:]]*esac([[:space:]]|$)' "$0" || true)
+    nfor=$(grep -cE '^[[:space:]]*for[[:space:]]' "$0" || true)
+    ndone=$(grep -cE '^[[:space:]]*done([[:space:]]|$)' "$0" || true)
+    echo "  structural : if=$nif fi=$nfi case=$ncase esac=$nesac for=$nfor done=$ndone"
+    if [ "$nif" -ne "$nfi" ] || [ "$ncase" -ne "$nesac" ] || [ "$nfor" -ne "$ndone" ]; then
+        echo "  [!!] unbalanced control keywords (stray fragment?)"
+        bad=1
+    else
+        echo "  [ok] control keywords balanced"
+    fi
+
+    # 3. known stray-fragment signature (the 'cache (no region = drop stale)"' error)
+    if grep -qE '^[[:space:]]*cache \(no region = drop stale\)"?' "$0"; then
+        echo "  [!!] stray help fragment found (bare 'cache (no region = drop stale)')"
+        bad=1
+    else
+        echo "  [ok] no known stray fragments"
+    fi
+
+    # 4. matches the committed version
+    repo="$(cd "$SCRIPT_DIR/.." && pwd)"
+    if [ -d "$repo/.git" ]; then
+        if git -C "$repo" diff --quiet -- pipeline/birdid 2>/dev/null \
+           && [ -z "$(git -C "$repo" status --porcelain -- pipeline/birdid)" ]; then
+            echo "  [ok] launcher matches the committed version (HEAD)"
+        else
+            echo "  [!!] launcher differs from the committed version:"
+            git -C "$repo" diff --stat -- pipeline/birdid 2>/dev/null | sed 's/^/        /'
+            bad=1
+        fi
+    else
+        echo "  [?] no git repo at $repo (committed-version check skipped)"
+    fi
+
+    # 5. install layout: ~/.local/bin/birdid is a symlink to this file
+    real="$(readlink -f "$0")"
+    if [ -L "$HOME/.local/bin/birdid" ]; then
+        inst="$(readlink -f "$HOME/.local/bin/birdid")"
+        if [ "$inst" = "$real" ]; then
+            echo "  [ok] ~/.local/bin/birdid -> $real"
+        else
+            echo "  [!!] ~/.local/bin/birdid -> $inst (points elsewhere, not $real)"
+            bad=1
+        fi
+    elif [ -f "$HOME/.local/bin/birdid" ]; then
+        echo "  [!!] ~/.local/bin/birdid is a REGULAR file (the symlink was replaced)"
+        bad=1
+    else
+        echo "  [?] ~/.local/bin/birdid not present (not installed via ~/.local/bin)"
+    fi
+
+    # 6. pipeline + venv present
+    if [ -f "$PIPELINE" ]; then
+        echo "  [ok] pipeline present: $PIPELINE"
+    else
+        echo "  [!!] pipeline missing: $PIPELINE"
+        bad=1
+    fi
+    if [ -x "$VENV/bin/python" ]; then
+        echo "  [ok] project venv python: $VENV/bin/python"
+    else
+        echo "  [~] no project venv (will use $PY)"
+    fi
+
+    if [ "$bad" -eq 0 ]; then
+        echo "birdid: --doctor: all checks passed"
+    else
+        echo "birdid: --doctor: PROBLEMS FOUND - restore the launcher with:"
+        echo "  git -C $repo checkout -- pipeline/birdid"
+        echo "  ln -sf $repo/pipeline/birdid $HOME/.local/bin/birdid"
+    fi
+    exit "$bad"
+}
+
+# run --doctor before anything heavy so a launcher whose tail is corrupt can
+# still be inspected (a corrupt tail never gets parsed if we exit here).
+if [ "$#" -ge 1 ] && [ "$1" = "--doctor" ]; then
+    _doctor
+fi
 
 # ---- main -----------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
@@ -79,6 +189,7 @@ if [ "$#" -eq 0 ]; then
     say "  birdid --api [<key>]               store / show the eBird API key"
     say "  birdid --initialize                one-time: taxonomy + BioCLIP 2 backends"
     say "  birdid --list-candidates           inspect the region/month tables"
+    say "  birdid --doctor                    check the launcher's own health"
     say ""
     say "run 'birdid --help' for all options"
     exit 2
@@ -96,7 +207,7 @@ MGMT=0
 OFFLINE=0
 for a in "$@"; do
     case "$a" in
-        -d|--download|-u|--update|--list|--api|--initialize|--download-backends|--cache|--list-candidates|-h|--help)
+        -d|--download|-u|--update|--list|--api|--initialize|--download-backends|--cache|--list-candidates|--doctor|-h|--help)
             MGMT=1 ;;
         --download=*|--update=*|--list=*|--api=*|--initialize=*) MGMT=1 ;;
     esac

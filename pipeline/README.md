@@ -26,6 +26,8 @@ birdid /path/to/photos --burst    # combine a rapid series of shots of the same
                                   # bird into one stronger ID (opt-in; the
                                   # per-capture mode stays the default)
 birdid --list-candidates          # inspect the region/month tables
+birdid --doctor                   # launcher self-diagnostics (run this whenever a
+                                  # run ends in a confusing bash syntax error)
 birdid --list                     # what's available to download
 birdid --list downloadable        # every eBird country (offline reference)
 birdid --api [<key>]              # store / show the eBird API key
