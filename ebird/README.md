@@ -136,9 +136,14 @@ the seeds while present, but must never be committed (eBird API data may not be
 redistributed). Remove one with `rm ebird/regions_generated/AS/AS-SOUTHEAST/SG.csv`.
 
 `birdid --list downloadable` shows every eBird country (from the bundled ISO
-reference) plus, with the API key, a country's subregions
-(`--list downloadable subnational1 DE`); any listed code works with
-`birdid --download country <CODE>`.
+reference) with its **pool hierarchy** `country -> subcontinent -> continent`
+(e.g. `DE -> EU-WEST -> EUROPE`), so you can grep it to pick the subcontinent
+to download (`birdid --download region EU-WEST` gets DE and its region) or the
+whole continent (`region EUROPE`). With the API key it can also list a
+country's subregions (`--list downloadable subnational1 DE`); any listed code
+works with `birdid --download country <CODE>`. Every country belongs to a
+subcontinent pool, and every subcontinent to a continent pool (from the
+bundled `continents.csv`; `AS-SOUTHEAST` is shown as its curated alias `SEA`).
 
 ## Updating the taxonomy (newer Clements release)
 

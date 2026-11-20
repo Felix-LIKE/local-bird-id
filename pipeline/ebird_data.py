@@ -1083,15 +1083,6 @@ def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
     curated_dir = data_dir / "regions"
     generated_dir = data_dir / GENERATED_DIR
 
-    member_of: dict[str, str] = {}
-    # smallest pool a country belongs to: its subcontinent (e.g. SG -> 
-    # AS-SOUTHEAST), else its continent. Curated pools (SEA/EUROPE) override.
-    for code in country_continent_map():
-        member_of[code] = country_subcontinent_map().get(code) or country_continent_map()[code]
-    for pool in ("SEA", "EUROPE"):
-        for m in POOLS[pool]["members"]:
-            member_of[m] = pool
-
     rest = [t for t in tokens if t != "downloadable"]
     if rest:
         rtype = rest[0]
@@ -1126,16 +1117,23 @@ def list_downloadable(data_dir: Path, tokens: list[str], key: str | None):
     keyline = f" (API key ....{key[-4:]})" if key else " (no key - local reference)"
     print(f"eBird countries available to download ({len(countries)}){keyline}:")
     print("  birdid --download <CODE>   or   --download country <CODE>")
+    print("  pool hierarchy: country -> subcontinent -> continent (continents.csv)")
     for code in sorted(countries):
         name = countries[code]
         src, n = region_table_info(curated_dir, generated_dir, code)
         local = f"{src} ({n} spp)" if src else "-"
-        pool = member_of.get(code, "-")
-        print(f"  {code:<5} {name:<34} local: {local:<16} pool: {pool}")
+        sub = country_subcontinent_map().get(code, "-")
+        sub_disp = POOL_ALIASES.get(sub, sub)      # AS-SOUTHEAST shows as SEA
+        cont = (subcontinent_continent_map().get(sub)
+                or country_continent_map().get(code, "-"))
+        print(f"  {code:<5} {name:<34} local: {local:<16} "
+              f"sub: {sub_disp:<12} continent: {cont}")
     print()
     print("  local = a region CSV already in the data dir: 'curated' = committed "
           "seed (no key), 'generated' = API-derived (gitignored, preferred);")
-    print("  pool = member of a --download pool (e.g. SEA, EUROPE, AS-SOUTHEAST).")
+    print("  sub/continent = the pool each country downloads into "
+          "(e.g. DE -> EU-WEST -> EUROPE): download 'region <SUB>' to get that "
+          "subcontinent, 'region <CONTINENT>' for the whole continent.")
     print("  subnational regions:  birdid --list downloadable subnational1 <CODE>")
 
 
@@ -1162,12 +1160,17 @@ def list_regions(data_dir: Path, filter_tokens: list[str]):
     print()
 
     if show_countries:
-        print("countries (pool = wider region used by the two-tier fallback):")
+        print("countries (pool hierarchy: country -> subcontinent -> continent):")
         for code in sorted(COUNTRIES):
             info = COUNTRIES[code]
             src, n = region_table_info(curated_dir, generated_dir, code)
             tbl = f"{src} ({n} spp)" if src else "none"
-            print(f"  {code:<5} {info['name']:<22} table: {tbl:<20} pool: {info['pool']}")
+            sub = country_subcontinent_map().get(code, "-")
+            sub_disp = POOL_ALIASES.get(sub, sub)
+            cont = (subcontinent_continent_map().get(sub)
+                    or country_continent_map().get(code, "-"))
+            print(f"  {code:<5} {info['name']:<22} table: {tbl:<20} "
+                  f"sub: {sub_disp:<10} continent: {cont}")
         print()
 
     if show_pools:

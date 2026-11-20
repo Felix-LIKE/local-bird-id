@@ -154,7 +154,8 @@ def _build_region_pools() -> dict[str, str]:
     Tightest pool first: a country's subcontinent (MY -> AS-SOUTHEAST/SEA),
     then its continent (MY -> AS). Continent codes are excluded as KEYS so a
     GPS box (AF/SA/NA/AS/OC) never resolves through a same-named ISO country.
-    Explicit curated overrides (SG/TH -> SEA, DE -> EUROPE) win last.
+    SG/TH -> SEA uses the aliased (curated) subcontinent name; every other
+    country keeps its subcontinent (e.g. DE -> EU-WEST -> EUROPE via the tree).
     """
     pools: dict[str, str] = {}
     for code, pool in country_subcontinent_map().items():
@@ -163,7 +164,7 @@ def _build_region_pools() -> dict[str, str]:
     for code, pool in country_continent_map().items():
         if code not in CONTINENT_CODES and code not in pools:
             pools[code] = pool
-    pools.update({"SG": "SEA", "TH": "SEA", "DE": "EUROPE"})
+    pools.update({"SG": "SEA", "TH": "SEA"})
     return pools
 
 
