@@ -195,3 +195,21 @@ the older v2023 taxonomy (which the API's observation data is aligned to); most
 other endpoints (recent/historic observations, region refs) return `403` without
 one - `birdid --download` surfaces that as a clear "run `birdid --api
 <your-key>`" message.
+
+## Data attribution
+
+The bundled `eBird-Clements_Integrated_Checklist.csv` (offline taxonomy +
+Avibase ids) is derived from the **eBird/Clements Checklist of Birds of the
+World** by the Cornell Lab of Ornithology:
+
+> Clements, J. F., P. C. Rasmussen, T. S. Schulenberg, M. J. Iliff, J. A.
+> Gerbracht, D. Lepage, A. Spencer, S. M. Billerman, B. L. Sullivan, and C. L.
+> Wood. The eBird/Clements checklist of Birds of the World: v2026. Downloaded
+> from https://www.birds.cornell.edu/clementschecklist/download/
+
+The Clements Checklist dataset is published under **CC BY 4.0** (GBIF dataset
+https://www.gbif.org/dataset/47f16512-bf31-410f-b272-d151c996b2f6). This
+project uses the checklist as a non-commercial offline taxonomy reference; see
+Cornell's terms of use (https://www.birds.cornell.edu/home/terms-of-use/) for
+any other use. eBird **observation** data (the API-derived `regions_generated/`
+tables) is separate and is *not* redistributed with this repository.

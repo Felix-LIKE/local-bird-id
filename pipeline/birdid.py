@@ -95,8 +95,11 @@ from ebird_data import (COARSE_LABELS, TAXONOMY_2023, TAXONOMY_2026,
 # --------------------------------------------------------------------------
 
 # data dir: defaults to <repo>/ebird (the bundled eBird data), so a fresh
-# clone works without any --data-dir override. Override with --data-dir.
-DEFAULT_DATA_DIR = str(Path(__file__).resolve().parent.parent / "ebird")
+# clone works without any --data-dir override. Override with --data-dir, or
+# set BIRDID_DATA_DIR (the packaged/AUR launcher uses it to point at a
+# user-writable copy when the shipped data is installed read-only).
+DEFAULT_DATA_DIR = (os.environ.get("BIRDID_DATA_DIR")
+                    or str(Path(__file__).resolve().parent.parent / "ebird"))
 DEFAULT_REGION = "DE"
 PIPELINE_VERSION = "1"
 
@@ -2543,7 +2546,8 @@ def main():
     ap.add_argument("folder", nargs="?", default=None, help="folder (recursive) of photos to scan")
     ap.add_argument("--data-dir", default=DEFAULT_DATA_DIR,
                     help="dir containing eBird data (regions/, regions_generated/, "
-                         "taxonomy). Default: <repo>/ebird")
+                         "taxonomy). Default: <repo>/ebird; override with "
+                         "BIRDID_DATA_DIR")
     ap.add_argument("--cache-dir", default=str(_default_cache_dir()),
                     help="central per-user BioCLIP 2 species-embedding cache "
                          "(embeddings.npy + index.json). Kept out of the photo "

@@ -553,6 +553,13 @@ region prior may be too narrow (download a wider pool to cover them).
 > entirely, delete them (+ `birdid_manifest.json` + the per-folder
 > `birdid_report.csv`/`birdid_index.csv` files) — originals are never touched.
 
+## License
+
+MIT — see [`LICENSE`](LICENSE). The bundled eBird/Clements taxonomy data is
+attributed to the Cornell Lab of Ornithology (see `ebird/README.md` →
+*Data attribution*); eBird observation data is not redistributed with this
+repository.
+
 ## Status
 
 Working end-to-end (validated on real photos: Blue Tit, Robin, Great Tit with
