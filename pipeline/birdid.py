@@ -1870,6 +1870,10 @@ _XMP_TPL = """<?xml version="1.0" encoding="UTF-8"?>
 
 def _xmp_tree(sidecar: Path):
     from lxml import etree
+    # Force the bird namespace to serialise under the stable `bird:` prefix,
+    # even when a parsed sidecar used auto-generated prefixes (ns0, ns1, ...).
+    # See write_sidecar's normalisation step for the full story.
+    etree.register_namespace("bird", BIRD_NS)
     parser = etree.XMLParser(remove_blank_text=False, recover=True)
     if sidecar.exists():
         try:
@@ -2011,6 +2015,19 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # fields and never touches the foreign dc:* fields, so existing keywords and
     # captions are preserved instead of being clobbered.
     owned = (not preexisted) or bool(_find(root, "//bird:dcOwned")) or _dc_keywords_owned(root)
+
+    # Normalise the bird namespace to a single stable prefix (`bird:`). lxml
+    # keeps whatever prefix it parsed, so an old sidecar (or one a bare
+    # ExifTool re-serialised) carries auto-generated ns0/ns1/... prefixes for
+    # the SAME URI. Drop every existing element in the bird namespace and let
+    # the _set_* calls below re-create them; with register_namespace() above
+    # they serialise as `bird:` regardless of the file that was parsed. All
+    # bird:* fields are always re-written below, so nothing is lost, and the
+    # `owned` flag above was already read from the untouched tree.
+    for el in list(desc):
+        if el.tag.startswith(f"{{{BIRD_NS}}}"):
+            desc.remove(el)
+
     if owned:
         _set_text(desc, "dcOwned", BIRD_NS, "true")
 
