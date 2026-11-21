@@ -81,11 +81,41 @@ So:
 
 ## 3. XnViewMP
 
-XnViewMP's IPTC/XMP panel only maps *standard* namespaces, and it has no
-user-extensible namespace registry, so the `bird:` tags will **not** appear
-there. Use ExifTool (above) or IMatch to view them, or open the `.xmp` in any
-text/XML editor and look at the `xmlns:ns0="http://ns.birdpipeline/1.0/"`
-elements.
+XnViewMP bundles its own ExifTool and can display the `bird:` fields in
+several places:
+
+- **XMP tab of the Info panel** — lists *all* XMP tags, including the custom
+  `bird:` namespace (this works out of the box; the tags are shown under their
+  raw namespace label, e.g. `ns0:`).
+- **Info panel → Favorites tab** — right-click any bird field on the XMP tab
+  and choose **Add to Favorites panel**; the fields then stay visible in a
+  persistent Favorites tab (works for any metadata, standard or custom).
+- **Info Overlay** (the panel you get with **`I`** in the viewer) — the
+  overlay text is a template (in `xnview.ini` under `[Preview] >
+  infoTemplate`, or the Info settings dialog). It accepts
+  `{exiftool:group:tag}` placeholders, so you can add a bird block such as:
+
+  ```
+  Bird: {exiftool:xmp-bird:topSpecies} ({exiftool:xmp-bird:scientificName}) {exiftool:xmp-bird:topConfidence}
+  {exiftool:xmp-bird:summary}
+  Status: {exiftool:xmp-bird:status}
+  ```
+
+  For `{exiftool:xmp-bird:...}` to resolve, ExifTool must know the namespace
+  prefix `bird`. XnViewMP's bundled ExifTool reads the user config
+  (`~/.ExifTool_config` on Linux/macOS, `C:\Users\<you>\.ExifTool_config` on
+  Windows) just like the standalone tool, so installing
+  [`birdid.config`](birdid.config) there gives XnViewMP the `xmp-bird` group
+  name too. Without it the group is `xmp-ns0`
+  (e.g. `{exiftool:xmp-ns0:topSpecies}`).
+
+  If you enable the full ExifTool metadata import in
+  `Tools > Settings > Metadata > Import > Exiftool` and run **Update
+  metadata**, these overlay fields are served from XnViewMP's database instead
+  of a per-image ExifTool call (faster on large folders).
+
+For plain XML viewing, open the `.xmp` in any text/XML editor and look for the
+`xmlns:ns0="http://ns.birdpipeline/1.0/"` elements.
 
 ---
 
