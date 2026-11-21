@@ -30,6 +30,48 @@ The tags birdid writes (see `pipeline/README.md` → "Output per photo"):
 | `bird:pipelineVersion`, `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning` | provenance of the ID |
 | `bird:dcOwned`, `bird:error` | housekeeping |
 
+> **Standard XMP fields are opt-in.** By default birdid writes **only** its
+> `bird:*` fields and never touches the standard XMP fields (`dc:description`,
+> `dc:subject`, …) — so it never fights your DAM over who owns the caption and
+> keywords. If you want birdid to maintain them too (so even a viewer that
+> knows nothing about the `bird` namespace shows a caption and keywords), pass
+> **`--dc-fields`** on the command line — see [the section
+> below](#standard-xmp-fields-dcdescription--dcsubject-are-opt-in).
+
+---
+
+## Standard XMP fields (`dc:description` / `dc:subject`) are opt-in
+
+Run with **`--dc-fields`** to have birdid also write the standard, widely
+readable XMP fields on the sidecars it created:
+
+```bash
+birdid ~/Pictures/birds --dc-fields
+```
+
+With the flag, on **birdid-owned** sidecars (ones birdid itself created,
+marked `bird:dcOwned`) it additionally writes:
+
+- **`dc:description`** — a human-readable one-liner: top species, scientific
+  name, confidence, alternatives and the Avibase link;
+- **`dc:subject`** — keywords `Birds/<species>` (or `Non-bird/<category>`),
+  up to the top five candidates — the fields XnViewMP, Windows Explorer and
+  most simple viewers show as caption / keywords.
+
+Two guarantees hold in **both** modes (flag on or off):
+
+- **Foreign sidecars are never touched.** A sidecar that pre-existed from other
+  software (no `bird:dcOwned` marker, no `Birds/…` keyword) always gets only
+  the `bird:*` fields — with or without `--dc-fields` — so captions and
+  keywords written by your photo software are preserved.
+- **Nothing is ever deleted.** Without the flag birdid simply stops writing
+  `dc:*`; it does **not** remove `dc:description`/`dc:subject` that are already
+  in a sidecar (they just go stale if the species later changes). To fully
+  clear them, delete the sidecars and re-run.
+
+Without `--dc-fields`, `dc:*` in a birdid-owned sidecar behaves like any other
+metadata written by your photo software: birdid's re-runs leave it untouched.
+
 ---
 
 ## 1. ExifTool (any OS)
@@ -90,9 +132,10 @@ in Lightroom's metadata panel. Practically that means:
   that the block is still there: `exiftool -G1 -bird:all IMG_1234.xmp`.
 - To *see* the values, use ExifTool, IMatch, or open the `.xmp` in a text/XML
   editor — Lightroom itself will not display them.
-- The tags survive because birdid keeps the namespace self-contained and never
-  touches the fields Lightroom manages (`dc:subject`, `dc:description`, …), so
-  a Lightroom save cannot clobber the identification results either.
+- The tags survive because birdid keeps the namespace self-contained; by
+  default it never touches the fields Lightroom manages (`dc:subject`,
+  `dc:description`, … — see the `--dc-fields` section above), so a Lightroom
+  save cannot clobber the identification results either.
 
 ## 4. Other DAMs (Photo Mechanic, Digikam, XnViewMP …)
 

@@ -2008,8 +2008,12 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
         raise RuntimeError("could not locate rdf:Description in sidecar XML")
     desc = descs[0]
 
-    # A sidecar birdid created (or already manages) is "owned": birdid may also
-    # maintain the human-readable dc:description and dc:subject keywords there.
+    # A sidecar birdid created (or already manages) is "owned": with the
+    # opt-in --dc-fields flag birdid may also maintain the human-readable
+    # dc:description and dc:subject keywords there. By default (no flag) it
+    # writes ONLY its bird:* fields and leaves dc:* untouched, so the standard
+    # XMP fields stay clean unless explicitly asked for - and existing dc:*
+    # content is never deleted, just not maintained.
     # A sidecar that pre-existed and carries no birdid marker (e.g. one written
     # by IMatch or any other tool) is FOREIGN: birdid adds ONLY its bird:*
     # fields and never touches the foreign dc:* fields, so existing keywords and
@@ -2069,9 +2073,10 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
         reasoning = result.get("reasoning", "")
         _set_text(desc, "reasoning", BIRD_NS, reasoning[:1000])
 
-        if owned:
+        if owned and getattr(cfg, "dc_fields", False):
             # dc:description (human readable) and dc:subject keywords - only on
-            # sidecars birdid owns, so foreign captions/keywords are preserved
+            # sidecars birdid owns AND only when --dc-fields is given (opt-in),
+            # so foreign captions/keywords are preserved either way.
             note = f"{species} ({scientific}) {confidence*100:.0f}%" if scientific else f"{species} ({confidence*100:.0f}%)"
             if alts:
                 note += "; alternatives: " + ", ".join(alts[:3])
@@ -2657,8 +2662,9 @@ def main():
                     help="force a fresh identification run for a folder that "
                          "already has sidecars: every capture is re-processed "
                          "and ONLY the bird-ID fields in the existing XMP are "
-                         "overwritten (bird:*; dc:subject/dc:description only "
-                         "on sidecars birdid itself created). dc:subject and "
+                         "overwritten (bird:* always; dc:subject/dc:description "
+                         "on sidecars birdid itself created only when "
+                         "--dc-fields is also given). dc:subject and "
                          "dc:description written by other software are never "
                          "touched. Everything else in the sidecar - e.g. "
                          "metadata your photo software has written - is "
@@ -2708,6 +2714,18 @@ def main():
                          "the whole tree of life) instead of recording them as "
                          "'non-bird' and skipping them. Previously skipped "
                          "non-bird photos are re-analysed on rerun.")
+    ap.add_argument("--dc-fields", action="store_true",
+                    help="also write the standard XMP fields dc:description "
+                         "(human-readable caption) and dc:subject keywords "
+                         "(Birds/<species>, Non-bird/<category>) - OPT-IN, and "
+                         "only on sidecars birdid itself created (marked with "
+                         "bird:dcOwned). By default birdid writes ONLY its "
+                         "bird:* fields and never touches dc:* - existing "
+                         "captions/keywords are preserved, never deleted; they "
+                         "simply aren't maintained by birdid without this "
+                         "flag. Foreign sidecars (pre-existing, no birdid "
+                         "marker) never get dc:* written, with or without "
+                         "this flag.")
     ap.add_argument("--dry-run", action="store_true", help="scan + plan only, no model calls")
     ap.add_argument("--no-tui", action="store_true", help="plain log output, no fullscreen UI")
     ap.add_argument("--list-candidates", action="store_true",

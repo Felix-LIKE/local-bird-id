@@ -23,6 +23,8 @@ birdid /path/to/photos --dry-run  # plan only, no model work
 birdid /path/to/photos --month-grace 0   # strict month, no ±1-month grace
 birdid /path/to/photos --analyze-all  # also analyse non-bird subjects (no pre-filter)
 birdid /path/to/photos --force    # re-ID every capture in place (keeps sidecars)
+birdid /path/to/photos --dc-fields  # also write dc:description + dc:subject keywords
+                                    # (opt-in; default writes only the bird:* fields)
 birdid /path/to/photos --burst    # combine a rapid series of shots of the same
                                   # bird into one stronger ID (opt-in; the
                                   # per-capture mode stays the default)
@@ -290,21 +292,23 @@ the layout and a worked example.
   captures back in the processing queue, or lower `--min-confidence` to accept
   more marginal shots as `done`.
 - **Sidecars are merged**, never blind-rewritten: existing XMP elements are
-  preserved and only the `bird:` fields are updated. `dc:subject` /
-  `dc:description` are managed **only on sidecars birdid itself created** (it
-  marks them with `bird:dcOwned`) - on a sidecar written by other software
-  (e.g. IMatch) birdid adds its `bird:*` fields and leaves `dc:subject` /
-  `dc:description` untouched, so foreign keywords and captions are never
-  clobbered.
+  preserved and only the `bird:` fields are updated. By default birdid writes
+  **only its own `bird:*` fields** — the standard XMP fields `dc:subject` /
+  `dc:description` are **opt-in** via `--dc-fields` (see below), and even then
+  they are managed **only on sidecars birdid itself created** (it marks them
+  with `bird:dcOwned`). On a sidecar written by other software (e.g. IMatch)
+  birdid adds its `bird:*` fields and leaves `dc:subject` / `dc:description`
+  untouched, so foreign keywords and captions are never clobbered — with or
+  without `--dc-fields`.
 - **Forcing a re-run**: a capture counts as *done* iff its sidecar is done, so
   reruns skip it. `--force` re-identifies **every** capture in place: existing
   sidecars are kept (nothing is deleted) and only the bird-ID fields are
-  overwritten (`bird:*`, plus `dc:subject`/`dc:description` on birdid-owned
-  sidecars), so a forced run is safe on a folder managed by your photo
-  software - any other XMP content it wrote is preserved. The keep-best guard
-  is bypassed (the new result is written even if it scores lower). Without
-  `--force`, delete the stale sidecars (+ manifest + report) first to re-tag a
-  folder - originals are never touched.
+  overwritten (`bird:*` always; `dc:subject`/`dc:description` on birdid-owned
+  sidecars **only when `--dc-fields` is also given**), so a forced run is safe
+  on a folder managed by your photo software - any other XMP content it wrote
+  is preserved. The keep-best guard is bypassed (the new result is written even
+  if it scores lower). Without `--force`, delete the stale sidecars (+ manifest
+  + report) first to re-tag a folder - originals are never touched.
 
 ## Output per photo (XMP sidecar)
 
@@ -319,11 +323,14 @@ top guess), `bird:topConfidence`,
 `bird:status` (done / low-confidence / non-bird / error), `bird:pipelineVersion`,
 `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning`,
 `bird:dcOwned` (set to `true` on sidecars birdid created, marking them as
-birdid-owned), plus — **only on birdid-owned sidecars** —
-`dc:description` (includes the scientific name, and the Avibase link) and
-`dc:subject` keywords
-`Birds/<species>`. On a sidecar that pre-existed from other software, only the
-`bird:*` fields are added and the foreign `dc:*` content is left untouched.
+birdid-owned). **Standard XMP fields are opt-in**: `dc:description` (includes
+the scientific name, and the Avibase link) and `dc:subject` keywords
+`Birds/<species>` are written **only when `--dc-fields` is given**, and only on
+birdid-owned sidecars. By default birdid writes **only its `bird:*` fields**
+and leaves the standard `dc:*` fields alone — existing captions/keywords are
+never deleted, just not maintained by birdid. On a sidecar that pre-existed
+from other software, only the `bird:*` fields are added and the foreign `dc:*`
+content is left untouched either way.
 Register `http://ns.birdpipeline/1.0/` as a custom metadata
 namespace in your photo software (e.g. a DAM). Ready-made registration for
 ExifTool and IMatch (so the tags show up as `bird:*` / `XMP-bird` with

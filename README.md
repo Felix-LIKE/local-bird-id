@@ -307,6 +307,47 @@ Done — see **Quick usage** below.
 
 ---
 
+### Updating to a newer version
+
+The program improves over time (new flags, fixes, species data). How you update
+depends on how you installed it — both ways below assume the original install
+worked.
+
+**Path 1 (autoinstall) — one command.** From inside the project folder, run the
+installer's update mode; it pulls the latest code and re-syncs your setup in
+one go:
+
+```bash
+cd local-bird-id
+./bootstrap.sh --update
+```
+
+**Path 2 (manual) — pull the code, re-sync if needed.** From inside the project
+folder:
+
+```bash
+cd local-bird-id
+git pull
+```
+
+That is normally all you need — the Python code updates itself. Only if a
+release changes the Python libraries does a re-sync become necessary: re-run
+the environment step once (for a manual install, the `pip install` command from
+Step 3; the autoinstaller does this automatically as part of `--update`). If
+you ever see a `ModuleNotFoundError` when starting birdid after an update, that
+is the step you missed.
+
+> **Installed from a ZIP?** There is no git history to pull. Re-download the
+> latest ZIP from the GitHub page (green **Code** button → **Download ZIP**),
+> unpack it over your existing folder (keeping the `ebird/` data and your
+> `pipeline/.venv/`), then re-run the installer once (`./bootstrap.sh`, or the
+> Step 3 pip line for a manual install).
+
+To see what changed in the new version, open the project's GitHub page and read
+the latest commits / release notes.
+
+---
+
 ### Running on macOS or Windows
 
 The core pipeline (`birdid.py`) is pure Python and runs on macOS and Windows —
@@ -606,9 +647,11 @@ region prior may be too narrow (download a wider pool to cover them).
 > rerun skips it. For a fresh identification run, use
 > `birdid <folder> --force` — every capture is re-identified **in place**: the
 > existing `<base>.xmp` is kept (nothing is deleted) and only the bird-ID
-> fields are overwritten (the `dc:subject`/`dc:description` your software wrote
-> are never touched), so it is safe on folders managed by your photo
-> software where the sidecars also hold metadata written by that software.
+> fields are overwritten (`bird:*` always; birdid-owned
+> `dc:subject`/`dc:description` only when `--dc-fields` is also given; the
+> `dc:subject`/`dc:description` your software wrote are never touched), so it
+> is safe on folders managed by your photo software where the sidecars also
+> hold metadata written by that software.
 > Only if you want to wipe the sidecars
 > entirely, delete them (+ `birdid_manifest.json` + the per-folder
 > `birdid_report.csv`/`birdid_index.csv` files) — originals are never touched.
