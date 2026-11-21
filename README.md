@@ -112,44 +112,73 @@ fallback.
 
 ## Installation
 
-Written for people who have never used git, Python or a terminal before. You
-will, in order:
+Two ways to install — pick **one** and follow it to the end. Both finish with
+the same result and the same one-time model download. You don't need any
+previous experience with git, Python or a terminal.
 
-1. install a few small programs (git, Python, exiftool),
-2. copy this project onto your computer,
-3. install the project's Python libraries into a private folder,
-4. run one setup command that downloads the AI models (~4 GB, one time),
-5. point `birdid` at a folder of photos.
+| | **Path 1 · Autoinstall** | **Path 2 · Manual** |
+|---|---|---|
+| Commands you run | ~4 | ~8 |
+| What happens | one script does everything | you run each step yourself |
+| Recommended for | most people | anyone who wants to see every step |
 
 `sudo` in the commands below asks for your password — that is normal (it is the
 same password you log in with). If a command says `command not found`, a
 previous step has not finished yet — re-run it.
 
-> **Quick start (skips the manual steps below).** First install `git`, `python3`
-> and `exiftool` — **Step 1** below has the one-liner for your distro. (No git
-> yet? Download the ZIP instead — Step 2, Option B — and run `./bootstrap.sh`
-> from the unpacked folder: it installs git + Python + exiftool for you and
-> skips the clone.) Then, from a terminal:
->
-> ```bash
-> git clone https://github.com/Felix-LIKE/local-bird-id.git
-> cd local-bird-id
-> ./bootstrap.sh --dry-run    # safe: only prints what it would do
-> ./bootstrap.sh              # installs system deps, creates the venv, adds birdid to PATH
-> birdid --initialize         # one-time AI-model download (~4 GB)
-> ```
->
-> After `./bootstrap.sh`, reopen the terminal (or `source ~/.bashrc`; zsh:
-> `source ~/.zshrc`) so `birdid` is on your PATH. `bootstrap.sh` detects your
-> distro (Arch / Debian / Ubuntu / Fedora / openSUSE / macOS), installs
-> git + Python + exiftool, builds the project's private Python environment and
-> links `birdid` into `~/.local/bin`. It never touches your system Python. The
-> steps below do the same thing by hand.
+---
 
-### Step 1 — Install the basic tools
+### Path 1 — Autoinstall (the easy way)
 
-Open a terminal (most distros: press `Ctrl+Alt+T`). Pick the block for your
-distro and paste the whole thing in, then press Enter.
+One script (`bootstrap.sh`) detects your distro, installs the few system
+programs (git, Python, exiftool), builds a **private** Python environment and
+puts `birdid` on your PATH — it never touches your system Python.
+
+**1. Get the code.** Either way, you end up in a folder that contains a
+subfolder called `pipeline/`:
+
+- **If you have `git`** — paste and run:
+
+  ```bash
+  git clone https://github.com/Felix-LIKE/local-bird-id.git
+  cd local-bird-id
+  ```
+
+- **If you don't** — open the GitHub page, click the green **Code** button →
+  **Download ZIP**, unpack the archive, then `cd` into the unpacked folder.
+
+**2. Run the installer** (from inside that folder):
+
+```bash
+./bootstrap.sh --dry-run   # optional & safe: only prints what it will do
+./bootstrap.sh             # installs the system packages, builds the
+                           # environment, links `birdid` into ~/.local/bin
+```
+
+It may ask for your sudo password once (for the system packages). Supported:
+Arch-based, Debian/Ubuntu, Fedora, openSUSE and macOS (Homebrew).
+
+**3. Reopen the terminal** (or run `source ~/.bashrc`; zsh: `source ~/.zshrc`)
+so the new `birdid` command is found.
+
+**4. Download the AI model once (~4 GB):**
+
+```bash
+birdid --initialize
+```
+
+That's it — `birdid` now works from any folder. See **Quick usage** below.
+
+---
+
+### Path 2 — Manual install (step by step)
+
+The same result as Path 1, but you run each step yourself. Do them in order.
+
+#### Step 1 — Install the basic tools
+
+Open a terminal (most distros: `Ctrl+Alt+T`). Pick the block for your distro
+and paste the whole thing in, then press Enter.
 
 <details>
 <summary><b>Ubuntu / Debian</b></summary>
@@ -187,7 +216,7 @@ Not sure which family your distro belongs to? Run `cat /etc/os-release` and
 look at the `ID=` line: `ubuntu`/`debian` → first block, `fedora` → second,
 `arch`/`manjaro`/`endeavouros`/`cachyos` → third.
 
-### Step 2 — Get the code
+#### Step 2 — Get the code
 
 The project lives on GitHub. Two ways to get it onto your computer.
 
@@ -211,7 +240,7 @@ folder (the one that contains a subfolder called `pipeline/`).
 Run `pwd` afterwards and make sure it ends in `local-bird-id` — the remaining
 steps assume you are in that folder.
 
-### Step 3 — Create the Python environment
+#### Step 3 — Create the Python environment
 
 This installs the project's Python libraries into a private folder
 (`pipeline/.venv`) instead of touching your system Python — so nothing else on
@@ -231,18 +260,7 @@ This downloads a few hundred MB and can take several minutes.
 > build that bundles ~3 GB of NVIDIA GPU libraries — useless unless you have an
 > NVIDIA graphics card.
 
-### Step 4 — One-time setup (downloads the AI models)
-
-```bash
-pipeline/birdid --initialize
-```
-
-This downloads the **BioCLIP 2** image classifier and the **TreeOfLife**
-datafile (~4.2 GB) into `~/.cache/huggingface`, plus the eBird taxonomy. It is
-needed exactly once — afterwards, identification runs are **fully offline**.
-Nothing here needs an API key.
-
-### Step 5 — (optional) Put `birdid` on your PATH
+#### Step 4 — Put `birdid` on your PATH (recommended)
 
 To just type `birdid` instead of `pipeline/birdid`, link it into a folder that
 is already on your PATH:
@@ -260,15 +278,30 @@ echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### Step 6 — Test it
+#### Step 5 — Check the install
 
 ```bash
-birdid --list          # shows the built-in data (no key needed)
-birdid --help          # all options
+birdid --doctor    # if "birdid: command not found", use pipeline/birdid --doctor
+birdid --list      # shows the built-in data (no key needed)
 ```
 
 If you get a `Permission denied` when running `pipeline/birdid`, make it
 executable first: `chmod +x pipeline/birdid`.
+
+#### Step 6 — One-time model download (~4 GB)
+
+```bash
+birdid --initialize
+```
+
+This downloads the **BioCLIP 2** image classifier and the **TreeOfLife**
+datafile (~4.2 GB) into `~/.cache/huggingface`, plus the eBird taxonomy. It is
+needed exactly once — afterwards, identification runs are **fully offline**.
+Nothing here needs an API key.
+
+Done — see **Quick usage** below.
+
+---
 
 ### Running on macOS or Windows
 
@@ -282,8 +315,8 @@ in hardcoded system paths.
 
 1. Install `exiftool` — a hard requirement, it reads the GPS + date out of your
    photos: `brew install exiftool` (install [Homebrew](https://brew.sh) first).
-2. Create the Python environment exactly as in Step 3 — the venv uses the same
-   `bin/python` layout as Linux:
+2. Create the Python environment exactly as in manual Step 3 — the venv uses the
+   same `bin/python` layout as Linux:
 
    ```bash
    python3 -m venv pipeline/.venv
@@ -334,8 +367,8 @@ for the keyless, bundled install described above.
   the password prompt and re-run it.
 - `pip ... externally-managed-environment` → you installed into the system
   Python by accident; always use `pipeline/.venv/bin/pip`, never `pip` alone.
-- `ModuleNotFoundError: No module named 'torch'` → Step 3 did not finish; re-run
-  it.
+- `ModuleNotFoundError: No module named 'torch'` → manual Step 3 did not finish;
+  re-run it.
 - `exiftool: command not found` → the exiftool package from Step 1 is missing.
 - `Permission denied` on `pipeline/birdid` → `chmod +x pipeline/birdid`.
 - The clone asks for a username and password → use a GitHub **personal access
