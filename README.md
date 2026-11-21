@@ -147,6 +147,10 @@ subfolder called `pipeline/`:
 - **If you don't** — open the GitHub page, click the green **Code** button →
   **Download ZIP**, unpack the archive, then `cd` into the unpacked folder.
 
+  (In case you don't have `git` but want to use it, follow [Step 1 — Install
+  the basic tools](#step-1--install-the-basic-tools) of the manual install,
+  then come back here and run the `git clone` command above.)
+
 **2. Run the installer** (from inside that folder):
 
 ```bash
@@ -615,6 +619,12 @@ MIT — see [`LICENSE`](LICENSE). The bundled eBird/Clements taxonomy data is
 attributed to the Cornell Lab of Ornithology (see `ebird/README.md` →
 *Data attribution*); eBird observation data is not redistributed with this
 repository.
+
+The **BioCLIP 2** image classifier (`imageomics/bioclip-2`, MIT) and the
+**TreeOfLife** datafile (`imageomics/TreeOfLife-200M`, CC0-1.0) are downloaded
+from Hugging Face by `birdid --initialize` and are **not bundled** with this
+repository; they belong to their respective authors (Allen Institute for AI /
+Imageomics).
 
 ## Status
 
