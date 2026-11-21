@@ -104,5 +104,13 @@ viewers) simply ignore unknown namespaces or list them under an auto-generated
 prefix (`ns0:`); the data is still there and visible on an XMP tab or via
 ExifTool.
 
+One caution: birdid always writes the namespace under the stable `bird:`
+prefix, but a tool that re-serialises the sidecar through a bare ExifTool
+*without* the `birdid.config` (Section 1) will rename the prefix to an
+auto-generated `ns0:`/`ns1:`… — the data is unchanged, only the label moves.
+If you ever see `XMP-ns0`/`ns0:` where `XMP-bird`/`bird:` used to be, a tool
+re-serialised the file without the config loaded. birdid's own re-runs restore
+the `bird:` prefix automatically.
+
 For plain XML viewing, open the `.xmp` in any text/XML editor and look for the
 `xmlns:ns0="http://ns.birdpipeline/1.0/"` elements.
