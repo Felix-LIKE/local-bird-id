@@ -12,8 +12,8 @@ don't know the namespace, so by default they either ignore the tags or show
 them with an ugly auto-generated prefix (`XMP-ns0`, `ns0:`…).
 
 This page shows how to register the namespace so the tags get the friendly
-`bird:` prefix / `XMP-bird` group, for the two tools most likely to matter to
-you (ExifTool and IMatch), plus what to expect in XnViewMP.
+`bird:` prefix / `XMP-bird` group, and what to expect from photo-administration
+software (Lightroom, IMatch, …).
 
 The tags birdid writes (see `pipeline/README.md` → "Output per photo"):
 
@@ -79,50 +79,30 @@ So:
    these tags for **searching, sorting, collections and data-driven
    categories**.
 
-## 3. XnViewMP
+## 3. Adobe Lightroom / Photoshop
 
-XnViewMP bundles its own ExifTool and can display the `bird:` fields in
-several places:
+Adobe's programs read the standard XMP namespaces, and when they rewrite a
+sidecar they keep a custom namespace such as `bird` **untouched**. They have no
+user-extensible namespace registry, though, so the bird fields are **not shown**
+in Lightroom's metadata panel. Practically that means:
 
-- **XMP tab of the Info panel** — lists *all* XMP tags, including the custom
-  `bird:` namespace (this works out of the box; the tags are shown under their
-  raw namespace label, e.g. `ns0:`).
-- **Info panel → Favorites tab** — right-click any bird field on the XMP tab
-  and choose **Add to Favorites panel**; the fields then stay visible in a
-  persistent Favorites tab (works for any metadata, standard or custom).
-- **Info Overlay** (the panel you get with **`I`** in the viewer) — the
-  overlay text is a template (in `xnview.ini` under `[Preview] >
-  infoTemplate`, or the Info settings dialog). It accepts
-  `{exiftool:group:tag}` placeholders, so you can add a bird block such as:
+- The tags survive a Lightroom save. Verify once after the first round-trip
+  that the block is still there: `exiftool -G1 -bird:all IMG_1234.xmp`.
+- To *see* the values, use ExifTool, IMatch, or open the `.xmp` in a text/XML
+  editor — Lightroom itself will not display them.
+- The tags survive because birdid keeps the namespace self-contained and never
+  touches the fields Lightroom manages (`dc:subject`, `dc:description`, …), so
+  a Lightroom save cannot clobber the identification results either.
 
-  ```
-  Bird: {exiftool:xmp-bird:topSpecies} ({exiftool:xmp-bird:scientificName}) {exiftool:xmp-bird:topConfidence}
-  {exiftool:xmp-bird:summary}
-  Status: {exiftool:xmp-bird:status}
-  ```
+## 4. Other DAMs (Photo Mechanic, Digikam, XnViewMP …)
 
-  For `{exiftool:xmp-bird:...}` to resolve, ExifTool must know the namespace
-  prefix `bird`. XnViewMP's bundled ExifTool reads the user config
-  (`~/.ExifTool_config` on Linux/macOS, `C:\Users\<you>\.ExifTool_config` on
-  Windows) just like the standalone tool, so installing
-  [`birdid.config`](birdid.config) there gives XnViewMP the `xmp-bird` group
-  name too. Without it the group is `xmp-ns0`
-  (e.g. `{exiftool:xmp-ns0:topSpecies}`).
-
-  If you enable the full ExifTool metadata import in
-  `Tools > Settings > Metadata > Import > Exiftool` and run **Update
-  metadata**, these overlay fields are served from XnViewMP's database instead
-  of a per-image ExifTool call (faster on large folders).
+The general rule: **any** program that lets you register a custom XMP namespace
+(IMatch, Photo Mechanic, Digikam…) can be pointed at
+`http://ns.birdpipeline/1.0/` — that makes the tags first-class citizens with a
+stable `bird:` prefix. Programs *without* a registry (XnViewMP, many simple
+viewers) simply ignore unknown namespaces or list them under an auto-generated
+prefix (`ns0:`); the data is still there and visible on an XMP tab or via
+ExifTool.
 
 For plain XML viewing, open the `.xmp` in any text/XML editor and look for the
 `xmlns:ns0="http://ns.birdpipeline/1.0/"` elements.
-
----
-
-## Registering the namespace as a *custom* namespace (the general option)
-
-Any DAM that lets you register a custom XMP namespace (IMatch, Photo Mechanic,
-Digikam… ) can be pointed at `http://ns.birdpipeline/1.0/`. That is the
-"proper" way to make the tags first-class citizens with a stable prefix; the
-ExifTool config above is the zero-config shortcut that works everywhere
-ExifTool is involved.
