@@ -114,9 +114,16 @@ So:
 2. Append the two hash blocks from [`birdid.config`](birdid.config)
    (`%Image::ExifTool::UserDefined` and
    `%Image::ExifTool::UserDefined::bird`, plus the final `1;`).
-3. "Touch" the file (or restart IMatch) so IMatch re-imports the tags into
-   its database. IMatch then shows the fields in its **Metadata Browser** and
-   you can add them to a **custom Metadata panel**.
+3. "Touch" the file so IMatch re-imports the tags into its database. IMatch
+   then shows the fields in its **Metadata Browser**, where you can add them to
+   a **custom Metadata panel**.
+   - **Restart needed for the Tag Selector:** touching the config only updates
+     the metadata database. To see the group in the **Tag Selector / Tag
+     Manager** with its proper names, fully restart IMatch — a machine reboot
+     also works (observed behaviour).
+   - The tags then live under the tag group **`UserDefined::bird`** — that's
+     where they appear in the Tag Selector, and how they show up in panel
+     variables (`{File.MD.UserDefined::bird\…}`).
 4. Because IMatch stores imported metadata in its database, you can also use
    these tags for **searching, sorting, collections and data-driven
    categories**.
