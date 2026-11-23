@@ -202,9 +202,11 @@ BIRD_NS = "http://ns.birdpipeline/1.0/"
 DWC_NS = "http://rs.tdwg.org/dwc/index.htm"
 
 # The controlled vocabulary value birdid writes for the confirmation status.
-# Not in the canonical HISPID/ABCD integer list, but the camtrap convention for
-# exactly this case: a human verified the identification from recorded media.
-DWC_CONFIRM_STATUS = "verified using recorded media"
+# Not in the canonical HISPID/ABCD integer list, but the convention for exactly
+# this case: a human verified the identification. Its presence ALSO freezes the
+# sidecar (see sidecar_frozen) — even --force must not rewrite a record a
+# person has verified.
+DWC_CONFIRM_STATUS = "verified by Person"
 
 # --------------------------------------------------------------------------
 # eBird region x month data
@@ -2029,6 +2031,41 @@ def sidecar_confirmed(sidecar: Path) -> str | None:
     return None
 
 
+def _root_frozen(root) -> bool:
+    """True when a parsed sidecar must never be re-written: a user
+    confirmation (``bird:confirmed``) is set, OR the DarwinCore mirror marks
+    the identification as verified by a person
+    (``dwc:identificationVerificationStatus`` = ``DWC_CONFIRM_STATUS``).
+
+    Either marker means a human verified the record, so even ``--force`` must
+    not clobber it. The dwc check reads the specific status value birdid (or
+    the user) writes — a generic ``dwc:*`` verification from other software is
+    not treated as a birdid freeze.
+    """
+    for el in _find(root, "//bird:confirmed"):
+        if el.text and el.text.strip():
+            return True
+    for el in _find(root, "//dwc:Identification/dwc:identificationVerificationStatus"):
+        if el.text and el.text.strip() == DWC_CONFIRM_STATUS:
+            return True
+    return False
+
+
+def sidecar_frozen(sidecar: Path) -> bool:
+    """True when the sidecar must never be re-written: a user confirmation
+    (``bird:confirmed``) is set, OR the DarwinCore mirror carries
+    ``dwc:identificationVerificationStatus = "verified by Person"``.
+
+    Either way a human verified it — ``--force`` must not clobber the record.
+    """
+    if not sidecar.exists():
+        return False
+    try:
+        return _root_frozen(_xmp_tree(sidecar))
+    except Exception:
+        return False
+
+
 def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
                   dt: datetime, status: str, cfg, error: str = None, scientific: str = "",
                   avibase_url: str = "", avibase_id: str = ""):
@@ -2047,8 +2084,9 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # confirmed captures out before they reach this function, but this is the
     # backstop so no future code path (a review pass, --analyze-all, a burst)
     # can clobber a record the user has verified. Un-confirm to re-identify.
-    _conf = _find(root, "//bird:confirmed")
-    if _conf and _conf[0].text and _conf[0].text.strip():
+    # The DarwinCore 'verified by Person' status freezes the record just like
+    # bird:confirmed does.
+    if _root_frozen(root):
         return
 
     # A sidecar birdid created (or already manages) is "owned": with the
@@ -2419,7 +2457,11 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
         rel = f"{sidecar.parent.name}/{sidecar.stem}"
         cur = sidecar_confirmed(sidecar)
         if unconfirm:
-            if not cur:
+            # --unconfirm must lift EITHER freeze marker: bird:confirmed or the
+            # dwc 'verified by Person' status (sidecar_frozen covers both).
+            # _set_confirmed(sidecar, None) clears the dwc mirror and removes
+            # bird:confirmed, so a dwc-only freeze is lifted too.
+            if not cur and not sidecar_frozen(sidecar):
                 skipped += 1
                 continue
             _set_confirmed(sidecar, None)
@@ -2546,14 +2588,15 @@ def sidecar_status(sidecar: Path):
 def classify_capture(cap: Capture, force: bool = False) -> str:
     """done / confirmed / low-confidence / non-bird / no-data / error / pending
     - a capture is done iff its single sidecar is done. A capture whose sidecar
-    carries a user confirmation (bird:confirmed) is 'confirmed' and is NEVER
-    re-processed - not even under ``force``: the user's verification is final
-    and birdid must not clobber it. Un-confirm (--unconfirm) to re-identify.
+    is frozen — a user confirmation (``bird:confirmed``) OR a DarwinCore
+    'verified by Person' status — is 'confirmed' and is NEVER re-processed, not
+    even under ``force``: the user's verification is final and birdid must not
+    clobber it. Un-confirm (--unconfirm) to re-identify.
     'no-data' captures are re-analysed on re-run (the region may have been
     downloaded since). With ``force=True`` every OTHER capture is 'pending': an
     existing sidecar is re-identified in place (only its bird-ID fields are
     overwritten, nothing is deleted)."""
-    if sidecar_confirmed(cap.sidecar()):
+    if sidecar_frozen(cap.sidecar()):
         return "confirmed"
     if force:
         return "pending"
@@ -3047,18 +3090,19 @@ def main():
                          "the confirmed pick, status -> done; also mirrors the "
                          "verdict as a standard DarwinCore XMP block - "
                          "dwc:recordedBy from the photo's Artist, "
-                         "dwc:identificationVerificationStatus='verified using "
-                         "recorded media', dwc:Taxon hierarchy). A confirmed "
+                         "dwc:identificationVerificationStatus='verified by "
+                         "Person', dwc:Taxon hierarchy). A confirmed "
                          "capture is FROZEN: birdid never re-writes its "
                          "sidecar, not even with --force - the confirmation is "
                          "the user's final say. Use --photo to confirm one "
                          "capture instead of the whole folder. Lift it later "
                          "with --unconfirm.")
     ap.add_argument("--unconfirm", action="store_true",
-                    help="remove bird:confirmed (and its DarwinCore mirror) "
-                         "from the matching sidecar(s), un-freezing them so a "
-                         "later run can re-identify. The species fields are "
-                         "left as they are. Use --photo to target one capture.")
+                    help="remove bird:confirmed (and its DarwinCore mirror, "
+                         "including the 'verified by Person' status) from the "
+                         "matching sidecar(s), un-freezing them so a later run "
+                         "can re-identify. The species fields are left as they "
+                         "are. Use --photo to target one capture.")
     ap.add_argument("--photo", metavar="BASE", default=None,
                     help="with --confirm/--unconfirm: apply to the single "
                          "capture whose base name matches (e.g. IMG_1234) "

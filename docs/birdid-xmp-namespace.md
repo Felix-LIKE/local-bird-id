@@ -95,7 +95,7 @@ What `--confirm` writes (see `pipeline/README.md` → *User confirmation*):
 |---|---|---|
 | `dwc:Occurrence` → `dwc:recordedBy` | the photographer | photo's `Artist` tag — only when actually present |
 | `dwc:Identification` → `dwc:dateIdentified` | confirmation date | today (when you ran `--confirm`) |
-| `…→ dwc:identificationVerificationStatus` | `verified using recorded media` | fixed value (camtrap convention for human-verified-from-photo IDs) |
+| `…→ dwc:identificationVerificationStatus` | `verified by Person` | fixed value birdid writes; its presence freezes the record (see below) |
 | `…→ dwc:verbatimIdentification` | the species string you typed | your `--confirm` argument |
 | `dwc:Taxon` → `dwc:scientificName` / `dwc:vernacularName` | *Parus major* / Great Tit | eBird taxonomy |
 | `…→ dwc:kingdom`…`dwc:class` | Animalia / Chordata / Aves | constant for birds |
@@ -107,13 +107,23 @@ assigned the taxon, so it never invents an identifier — that element only
 appears if you add it yourself. `dwc:recordedBy` is likewise only written when
 the photo actually carries an `Artist`.
 
-This mirror does **not** change the freeze guarantee: `bird:confirmed` remains
-the authority, and the dwc block is written/refreshed only by `--confirm` and
-removed by `--unconfirm`. ExifTool shows it out of the box:
+**The status value itself freezes the record.** `dwc:identificationVerificationStatus
+= "verified by Person"` marks the identification as human-verified, so even a
+sidecar that carries no `bird:confirmed` is treated as **frozen**: `--force`
+will not rewrite it, `classify_capture` reports it as `confirmed`, and the
+`write_sidecar` backstop refuses to touch it (a generic `dwc:*` verification
+from other software with a *different* value is not treated as a birdid
+freeze). `--unconfirm` removes the status (with the whole dwc block), lifting
+the freeze. `bird:confirmed` remains the *primary* authority; the dwc status is
+a second, independent freeze marker that generic photo software can set too.
+
+This mirror does **not** otherwise change the freeze guarantee: the dwc block
+is written/refreshed only by `--confirm` and removed by `--unconfirm`.
+ExifTool shows it out of the box:
 
 ```bash
 exiftool -G1 -XMP-dwc:all IMG_1234.xmp
-# [XMP-dwc]  Identification Verification Status: verified using recorded media
+# [XMP-dwc]  Identification Verification Status: verified by Person
 # [XMP-dwc]  Taxon Vernacular Name           : Great Tit
 # ...
 ```

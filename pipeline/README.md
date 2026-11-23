@@ -385,8 +385,8 @@ What `--confirm` does to the capture's `<base>.xmp`:
   nothing about the `bird` namespace can still read the verified species:
   `dwc:Occurrence/dwc:recordedBy` (the photographer, read from the photo's
   `Artist` tag — only when actually present), `dwc:Identification` with
-  `dwc:dateIdentified`, `dwc:identificationVerificationStatus = "verified using
-  recorded media"` and `dwc:verbatimIdentification` (the species you typed), and
+  `dwc:dateIdentified`, `dwc:identificationVerificationStatus = "verified by
+  Person"` and `dwc:verbatimIdentification` (the species you typed), and
   a `dwc:Taxon` block with `dwc:scientificName`/`dwc:vernacularName` plus the
   `kingdom`…`family`/`genus`/`specificEpithet` ladder from the Clements v2026
   checklist when available. `dwc:identifiedBy` is **not** written — birdid has
@@ -402,6 +402,14 @@ Once `bird:confirmed` is present the sidecar is **frozen**:
   code path can clobber one either;
 - the confirmation travels in the XMP itself (`bird:confirmed`), so it survives
   moves/re-imports and is visible to any tool that reads the namespace.
+
+The DarwinCore status value is a **second, independent freeze marker**: a
+sidecar whose `dwc:identificationVerificationStatus = "verified by Person"`
+counts as frozen even without `bird:confirmed` — `--force` won't rewrite it and
+`classify_capture` reports it as `confirmed`. So a "verified by a person" verdict
+written by birdid *or by other software* protects the record; only a generic
+`dwc:*` status with a different value is ignored. `--unconfirm` lifts both
+markers.
 
 `--unconfirm` removes only the `bird:confirmed` element and its DarwinCore
 mirror (so a stale "verified" claim can't linger) — the species fields are left
