@@ -403,13 +403,14 @@ Once `bird:confirmed` is present the sidecar is **frozen**:
 - the confirmation travels in the XMP itself (`bird:confirmed`), so it survives
   moves/re-imports and is visible to any tool that reads the namespace.
 
-The DarwinCore status value is a **second, independent freeze marker**: a
-sidecar whose `dwc:identificationVerificationStatus = "verified by Person"`
+The DarwinCore status is a **second, independent freeze marker**: a sidecar
+whose `dwc:identificationVerificationStatus` carries *any* non-empty value
 counts as frozen even without `bird:confirmed` — `--force` won't rewrite it and
-`classify_capture` reports it as `confirmed`. So a "verified by a person" verdict
-written by birdid *or by other software* protects the record; only a generic
-`dwc:*` status with a different value is ignored. `--unconfirm` lifts both
-markers.
+`classify_capture` reports it as `confirmed`. Checking non-empty rather than
+birdid's exact value (`verified by Person`) is deliberate: birdid only writes
+that field on `--confirm`, so any value — a verdict written by birdid *or by
+other DarwinCore-aware software* — is respected as a human verdict and protects
+the record. `--unconfirm` lifts both markers.
 
 `--unconfirm` removes only the `bird:confirmed` element and its DarwinCore
 mirror (so a stale "verified" claim can't linger) — the species fields are left

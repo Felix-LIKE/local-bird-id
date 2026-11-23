@@ -107,15 +107,18 @@ assigned the taxon, so it never invents an identifier — that element only
 appears if you add it yourself. `dwc:recordedBy` is likewise only written when
 the photo actually carries an `Artist`.
 
-**The status value itself freezes the record.** `dwc:identificationVerificationStatus
-= "verified by Person"` marks the identification as human-verified, so even a
-sidecar that carries no `bird:confirmed` is treated as **frozen**: `--force`
-will not rewrite it, `classify_capture` reports it as `confirmed`, and the
-`write_sidecar` backstop refuses to touch it (a generic `dwc:*` verification
-from other software with a *different* value is not treated as a birdid
-freeze). `--unconfirm` removes the status (with the whole dwc block), lifting
-the freeze. `bird:confirmed` remains the *primary* authority; the dwc status is
-a second, independent freeze marker that generic photo software can set too.
+**The status value itself freezes the record.** Any non-empty
+`dwc:identificationVerificationStatus` marks the identification as
+human-verified, so even a sidecar that carries no `bird:confirmed` is treated
+as **frozen**: `--force` will not rewrite it, `classify_capture` reports it as
+`confirmed`, and the `write_sidecar` backstop refuses to touch it. Checking
+non-empty rather than birdid's exact value (`verified by Person`) is
+deliberate — birdid only writes the field on `--confirm`, so *any* value,
+including DarwinCore data written by other software, is respected as a human
+verdict and protects the record. `--unconfirm` removes the status (with the
+whole dwc block), lifting the freeze. `bird:confirmed` remains the *primary*
+authority; the dwc status is a second, independent freeze marker that generic
+photo software can set too.
 
 This mirror does **not** otherwise change the freeze guarantee: the dwc block
 is written/refreshed only by `--confirm` and removed by `--unconfirm`.

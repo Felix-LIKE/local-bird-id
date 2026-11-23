@@ -205,7 +205,10 @@ DWC_NS = "http://rs.tdwg.org/dwc/index.htm"
 # Not in the canonical HISPID/ABCD integer list, but the convention for exactly
 # this case: a human verified the identification. Its presence ALSO freezes the
 # sidecar (see sidecar_frozen) — even --force must not rewrite a record a
-# person has verified.
+# person has verified. The freeze check keys on ANY non-empty value (birdid
+# only writes this on --confirm, and other software's dwc data is treated as a
+# human verdict too), so DWC_CONFIRM_STATUS is what birdid writes, not what it
+# matches against.
 DWC_CONFIRM_STATUS = "verified by Person"
 
 # --------------------------------------------------------------------------
@@ -2033,28 +2036,30 @@ def sidecar_confirmed(sidecar: Path) -> str | None:
 
 def _root_frozen(root) -> bool:
     """True when a parsed sidecar must never be re-written: a user
-    confirmation (``bird:confirmed``) is set, OR the DarwinCore mirror marks
-    the identification as verified by a person
-    (``dwc:identificationVerificationStatus`` = ``DWC_CONFIRM_STATUS``).
+    confirmation (``bird:confirmed``) is set, OR the DarwinCore mirror carries
+    an identification verification status at all
+    (``dwc:identificationVerificationStatus`` is non-empty).
 
-    Either marker means a human verified the record, so even ``--force`` must
-    not clobber it. The dwc check reads the specific status value birdid (or
-    the user) writes — a generic ``dwc:*`` verification from other software is
-    not treated as a birdid freeze.
+    Either marker means the identification was verified by a person, so even
+    ``--force`` must not clobber it. Checking "non-empty" rather than the exact
+    birdid value (``DWC_CONFIRM_STATUS``) is deliberate: birdid only ever
+    writes that field on ``--confirm``, so *any* value — including one written
+    by other DarwinCore-aware software — signals a human verdict and protects
+    the record from being rewritten.
     """
     for el in _find(root, "//bird:confirmed"):
         if el.text and el.text.strip():
             return True
     for el in _find(root, "//dwc:Identification/dwc:identificationVerificationStatus"):
-        if el.text and el.text.strip() == DWC_CONFIRM_STATUS:
+        if el.text and el.text.strip():
             return True
     return False
 
 
 def sidecar_frozen(sidecar: Path) -> bool:
     """True when the sidecar must never be re-written: a user confirmation
-    (``bird:confirmed``) is set, OR the DarwinCore mirror carries
-    ``dwc:identificationVerificationStatus = "verified by Person"``.
+    (``bird:confirmed``) is set, OR the DarwinCore mirror carries a non-empty
+    ``dwc:identificationVerificationStatus``.
 
     Either way a human verified it — ``--force`` must not clobber the record.
     """
@@ -2084,8 +2089,9 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # confirmed captures out before they reach this function, but this is the
     # backstop so no future code path (a review pass, --analyze-all, a burst)
     # can clobber a record the user has verified. Un-confirm to re-identify.
-    # The DarwinCore 'verified by Person' status freezes the record just like
-    # bird:confirmed does.
+    # Any DarwinCore identificationVerificationStatus freezes the record too —
+    # birdid only writes it on confirm, and other software's dwc data is
+    # likewise treated as a human verdict.
     if _root_frozen(root):
         return
 
@@ -2457,10 +2463,10 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
         rel = f"{sidecar.parent.name}/{sidecar.stem}"
         cur = sidecar_confirmed(sidecar)
         if unconfirm:
-            # --unconfirm must lift EITHER freeze marker: bird:confirmed or the
-            # dwc 'verified by Person' status (sidecar_frozen covers both).
-            # _set_confirmed(sidecar, None) clears the dwc mirror and removes
-            # bird:confirmed, so a dwc-only freeze is lifted too.
+            # --unconfirm must lift EITHER freeze marker: bird:confirmed or any
+            # non-empty dwc identificationVerificationStatus (sidecar_frozen
+            # covers both). _set_confirmed(sidecar, None) clears the dwc mirror
+            # and removes bird:confirmed, so a dwc-only freeze is lifted too.
             if not cur and not sidecar_frozen(sidecar):
                 skipped += 1
                 continue
@@ -2588,10 +2594,10 @@ def sidecar_status(sidecar: Path):
 def classify_capture(cap: Capture, force: bool = False) -> str:
     """done / confirmed / low-confidence / non-bird / no-data / error / pending
     - a capture is done iff its single sidecar is done. A capture whose sidecar
-    is frozen — a user confirmation (``bird:confirmed``) OR a DarwinCore
-    'verified by Person' status — is 'confirmed' and is NEVER re-processed, not
-    even under ``force``: the user's verification is final and birdid must not
-    clobber it. Un-confirm (--unconfirm) to re-identify.
+    is frozen — a user confirmation (``bird:confirmed``) OR any non-empty
+    ``dwc:identificationVerificationStatus`` — is 'confirmed' and is NEVER
+    re-processed, not even under ``force``: the user's verification is final
+    and birdid must not clobber it. Un-confirm (--unconfirm) to re-identify.
     'no-data' captures are re-analysed on re-run (the region may have been
     downloaded since). With ``force=True`` every OTHER capture is 'pending': an
     existing sidecar is re-identified in place (only its bird-ID fields are
