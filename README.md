@@ -23,6 +23,10 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
 - **Common + scientific names**: every result is normalised against the official
   eBird taxonomy (e.g. `Great Tit` / *`Parus major`*), and the top guess links
   to its **Avibase** species page (`https://avibase.ca/<id>`).
+- **Your verdict is final**: confirm a capture (`birdid <folder> --confirm
+  "Great Tit"`) and birdid writes `bird:confirmed` and **never overwrites it**
+  again — not on re-runs, not with `--force` (the future confirm-UI writes the
+  same flag; see `pipeline/README.md` → *User confirmation*).
 - **Staged candidate ladder** (fast + accurate): the base region is always
   scored with the ±1-month grace window applied (a species at a season
   boundary - e.g. Asian Openbill in early Jan, when its month record starts in
@@ -655,6 +659,9 @@ region prior may be too narrow (download a wider pool to cover them).
 > Only if you want to wipe the sidecars
 > entirely, delete them (+ `birdid_manifest.json` + the per-folder
 > `birdid_report.csv`/`birdid_index.csv` files) — originals are never touched.
+> **User-confirmed captures are exempt from `--force`**: a capture with
+> `bird:confirmed` set is frozen and never re-written (lift it with
+> `birdid <folder> --unconfirm`).
 
 ## License
 

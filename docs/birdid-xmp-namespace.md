@@ -26,6 +26,7 @@ The tags birdid writes (see `pipeline/README.md` → "Output per photo"):
 | `bird:scientificName` | best guess (e.g. *Zosterops simplex*) |
 | `bird:avibaseId` / `bird:avibaseUrl` | Avibase reference for the top guess |
 | `bird:topConfidence` | score of the best guess |
+| `bird:confirmed` | user-confirmed species (e.g. `Great Tit`) — once set, the record is **frozen**: birdid never overwrites it |
 | `bird:status` | `done` / `low-confidence` / `non-bird` / `error` |
 | `bird:pipelineVersion`, `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning` | provenance of the ID |
 | `bird:dcOwned`, `bird:error` | housekeeping |
@@ -71,6 +72,28 @@ Two guarantees hold in **both** modes (flag on or off):
 
 Without `--dc-fields`, `dc:*` in a birdid-owned sidecar behaves like any other
 metadata written by your photo software: birdid's re-runs leave it untouched.
+
+## User confirmation (`bird:confirmed`)
+
+birdid never deletes or second-guesses an identification a human has verified.
+To mark a capture's record as **user-confirmed**, set the `bird:confirmed`
+element to the species (e.g. `bird:confirmed = "Great Tit"`). Once present,
+birdid treats the sidecar as **frozen**:
+
+- It is never re-written — not on a re-run, not with `--force`, not by a review
+  pass or burst mode. The identification you confirmed is the final one.
+- The pipeline's CLI sets it for you (see `pipeline/README.md` → *User
+  confirmation*): `birdid --confirm "Great Tit" <folder>`, or per photo with
+  `--photo`. `birdid --unconfirm <folder>` lifts the freeze if you want birdid
+  to re-identify later.
+- Your photo software can simply *show* the flag; it never has to write it. Any
+  tool that can edit the sidecar can set/clear `bird:confirmed` (a future
+  birdid viewer does this through the same CLI).
+
+> The freeze is on purpose: it is the guarantee that your manual verdict will
+> never be clobbered by a later automated run. `bird:confirmed` carries the
+> confirmed species, so the record stays self-describing ("the user verified
+> *this* species").
 
 ---
 

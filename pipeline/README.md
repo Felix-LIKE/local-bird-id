@@ -307,8 +307,18 @@ the layout and a worked example.
   sidecars **only when `--dc-fields` is also given**), so a forced run is safe
   on a folder managed by your photo software - any other XMP content it wrote
   is preserved. The keep-best guard is bypassed (the new result is written even
-  if it scores lower). Without `--force`, delete the stale sidecars (+ manifest
+  if it scores lower). **User-confirmed captures are exempt from `--force`**
+  (see *User confirmation* below): a confirmed sidecar is never re-written.
+  Without `--force`, delete the stale sidecars (+ manifest
   + report) first to re-tag a folder - originals are never touched.
+- **User confirmation**: birdid's guess is a guess; the final word is yours.
+  Set `bird:confirmed=<species>` on a capture (CLI below) and birdid treats
+  that sidecar as **frozen** - no re-run, `--force`, review pass or burst will
+  overwrite it. This is the guarantee that a verdict you verified manually is
+  never clobbered by a later automated run. The confirmation travels in the
+  sidecar (`bird:confirmed`), so photo software shows both the result and that
+  it was verified. `birdid --unconfirm` lifts the freeze to let birdid re-ID
+  later.
 
 ## Output per photo (XMP sidecar)
 
@@ -319,7 +329,8 @@ One sidecar per capture, `<base>.xmp` (e.g. `IMG_1234.xmp` for
 ("Great Tit 95% | ..."), `bird:topSpecies`, `bird:scientificName`
 (e.g. `Parus major`), `bird:avibaseId` (e.g. `E15BC0CB`), `bird:avibaseUrl`
 (short link `https://avibase.ca/E15BC0CB` → the Avibase species page for the
-top guess), `bird:topConfidence`,
+top guess), `bird:topConfidence`, `bird:confirmed` (user-confirmed species,
+present only after a manual confirmation — the record is then **frozen**),
 `bird:status` (done / low-confidence / non-bird / error), `bird:pipelineVersion`,
 `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning`,
 `bird:dcOwned` (set to `true` on sidecars birdid created, marking them as
@@ -346,6 +357,46 @@ bundled Clements checklist (`eBird-Clements_Integrated_Checklist.csv`,
 'taxon concept ID' column); when that file is missing the Avibase fields are
 simply omitted. The same link is printed on the per-capture console line and
 stored in the report + manifest.
+
+## User confirmation (`--confirm` / `--unconfirm`)
+
+birdid's identification is a *suggestion*; the final verdict is yours. Once you
+have verified a photo (in any viewer — the future birdid UI does this through
+the same CLI), mark it confirmed and birdid will **never** overwrite it:
+
+```bash
+birdid ~/Pictures/birds --confirm "Great Tit"            # whole folder
+birdid ~/Pictures/birds --confirm "Parus major" --photo IMG_1234   # one capture
+birdid ~/Pictures/birds --unconfirm --photo IMG_1234     # lift the freeze
+```
+
+What `--confirm` does to the capture's `<base>.xmp`:
+
+- writes `bird:confirmed=<species>` (the species is normalised against the
+  eBird taxonomy; a scientific name is converted to the common name, and a name
+  that isn't in the taxonomy prints a "check spelling" note but is stored as
+  given);
+- aligns the species fields to the confirmed pick so the sidecar is
+  self-consistent: `bird:species` becomes a single-entry list, `bird:confidence`
+  → `1.00`, `bird:topSpecies`/`bird:topConfidence`/`bird:summary` reflect the
+  confirmed species (100% — you verified it), and `bird:status` → `done`.
+
+Once `bird:confirmed` is present the sidecar is **frozen**:
+
+- `classify_capture` reports it as `confirmed`, which is **never** re-processed
+  — not by a normal re-run, not by `--force`, not by `--include-low-confidence`,
+  `--analyze-all`, a review pass or burst mode (the run summary counts these
+  separately);
+- `write_sidecar` also hard-refuses to modify a confirmed sidecar, so no future
+  code path can clobber one either;
+- the confirmation travels in the XMP itself (`bird:confirmed`), so it survives
+  moves/re-imports and is visible to any tool that reads the namespace.
+
+`--unconfirm` removes only the `bird:confirmed` element — the species fields are
+left as they are, and a later run can re-identify the capture. Use `--photo` to
+target a single capture (base name, e.g. `IMG_1234`) instead of the whole
+folder. Confirmed captures are recorded in the manifest with a `confirmed`
+entry so reports and review lists can reflect them.
 
 ## Report (CSV)
 

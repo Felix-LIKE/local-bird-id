@@ -1959,7 +1959,7 @@ _XMP_DESC_ORDER = [
     ("bird", "species"), ("bird", "confidence"), ("bird", "summary"),
     ("bird", "topSpecies"), ("bird", "scientificName"),
     ("bird", "avibaseId"), ("bird", "avibaseUrl"), ("bird", "topConfidence"),
-    ("bird", "status"), ("bird", "pipelineVersion"), ("bird", "region"),
+    ("bird", "confirmed"), ("bird", "status"), ("bird", "pipelineVersion"), ("bird", "region"),
     ("bird", "month"), ("bird", "datetime"), ("bird", "reasoning"),
     ("bird", "dcOwned"), ("bird", "error"), ("dc", "description"), ("dc", "subject"),
 ]
@@ -1995,6 +1995,27 @@ def sidecar_done(sidecar: Path) -> bool:
         return False
 
 
+def sidecar_confirmed(sidecar: Path) -> str | None:
+    """The user-confirmed species (bird:confirmed) if the sidecar is frozen by
+    a user confirmation, else None.
+
+    A confirmed capture is FINAL: birdid must never re-write its bird:*
+    fields, whatever the run (including --force, review passes and burst
+    mode). The confirmation travels with the sidecar, so photo software shows
+    both the result and the fact that it was manually verified.
+    """
+    if not sidecar.exists():
+        return None
+    try:
+        root = _xmp_tree(sidecar)
+        el = _find(root, "//bird:confirmed")
+        if el and el[0].text and el[0].text.strip():
+            return el[0].text.strip()
+    except Exception:
+        pass
+    return None
+
+
 def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
                   dt: datetime, status: str, cfg, error: str = None, scientific: str = "",
                   avibase_url: str = "", avibase_id: str = ""):
@@ -2007,6 +2028,15 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     if not descs:
         raise RuntimeError("could not locate rdf:Description in sidecar XML")
     desc = descs[0]
+
+    # A user-confirmed sidecar is FROZEN: birdid must never overwrite its
+    # bird:* fields, whatever the run. classify_capture normally filters
+    # confirmed captures out before they reach this function, but this is the
+    # backstop so no future code path (a review pass, --analyze-all, a burst)
+    # can clobber a record the user has verified. Un-confirm to re-identify.
+    _conf = _find(root, "//bird:confirmed")
+    if _conf and _conf[0].text and _conf[0].text.strip():
+        return
 
     # A sidecar birdid created (or already manages) is "owned": with the
     # opt-in --dc-fields flag birdid may also maintain the human-readable
@@ -2115,6 +2145,45 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     sidecar.write_bytes(out.getvalue())
 
 
+def _set_confirmed(sidecar: Path, species: str | None, scientific: str = ""):
+    """Set (or, with ``species=None``, clear) the user-confirmation flag on a
+    sidecar, preserving every other element (foreign fields included).
+
+    Setting a confirmation also aligns the species fields to the confirmed pick
+    so the sidecar is self-consistent: ``bird:species`` becomes a single-entry
+    list, ``topSpecies``/``topConfidence``/``summary`` reflect the confirmed
+    species (100% - the user has verified it) and ``status`` becomes 'done'.
+    The confirmation is what freezes the record: once ``bird:confirmed`` is
+    set, birdid never re-writes the sidecar (see write_sidecar /
+    classify_capture). Clearing it (``species=None``) only removes the flag and
+    leaves the species fields as they are."""
+    from lxml import etree
+    root = _xmp_tree(sidecar)
+    descs = _find(root, "//rdf:Description")
+    if not descs:
+        raise RuntimeError(f"could not locate rdf:Description in {sidecar}")
+    desc = descs[0]
+    if species is None:
+        for el in desc.findall(f"{{{BIRD_NS}}}confirmed"):
+            desc.remove(el)
+    else:
+        _set_list(desc, "species", BIRD_NS, [species], "Seq")
+        _set_list(desc, "confidence", BIRD_NS, ["1.00"], "Seq")
+        _set_text(desc, "summary", BIRD_NS, f"{species} 100%")
+        _set_text(desc, "topSpecies", BIRD_NS, species)
+        _set_text(desc, "topConfidence", BIRD_NS, "1.00")
+        if scientific:
+            _set_text(desc, "scientificName", BIRD_NS, scientific)
+        _set_text(desc, "confirmed", BIRD_NS, species)
+        _set_text(desc, "status", BIRD_NS, "done")
+    _canonicalize_desc(desc)
+    _ensure_xpacket(root)
+    out = io.BytesIO()
+    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
+                                  pretty_print=True)
+    sidecar.write_bytes(out.getvalue())
+
+
 # --------------------------------------------------------------------------
 # Manifest (resume-safe)
 # --------------------------------------------------------------------------
@@ -2141,6 +2210,70 @@ def _low_confidence_review(manifest: dict) -> list[tuple[float, str, str]]:
           Path(k).parent.name + "/" + Path(k).stem)
          for k, e in manifest.items() if e.get("status") == "low-confidence"),
         key=lambda t: t[0])
+
+
+def run_confirm(root: Path, photo: str | None, species: str | None,
+                unconfirm: bool, manifest_path: Path, taxonomy: dict,
+                ) -> tuple[int, int, list[str]]:
+    """Set or clear the user-confirmation flag (bird:confirmed) on sidecars.
+
+    With ``photo`` (a capture base name) given, only that capture's sidecar is
+    touched; otherwise every ``*.xmp`` sidecar under ``root`` is considered.
+    ``--confirm`` normalises the species against the eBird taxonomy, writes
+    ``bird:confirmed=<species>`` and aligns the species fields to the confirmed
+    pick (single-entry list at 100%). ``--unconfirm`` removes the flag, leaving
+    the species fields as they are. A confirmed sidecar is frozen - later
+    birdid runs (incl. --force) never re-write it.
+
+    Returns (touched, skipped, notes): ``touched`` sidecars modified, plus
+    existing sidecars left alone (an unconfirm on a sidecar without the flag,
+    or a confirm on one already carrying the same confirmation).
+    """
+    sidecars = sorted(p for p in root.rglob("*.xmp") if p.is_file()
+                      and (not photo or p.stem == photo))
+    if not sidecars:
+        raise ValueError(f"no sidecar(s) found under {root}"
+                         + (f" for capture '{photo}'" if photo else ""))
+
+    species_norm, scientific = "", ""
+    if not unconfirm:
+        species_norm, scientific = normalize_species(species or "", taxonomy)
+        if species_norm == "unknown":
+            raise ValueError(
+                f"confirm: empty species - use e.g. --confirm 'Great Tit'")
+
+    touched = skipped = 0
+    notes: list[str] = []
+    if not unconfirm and scientific == "" and \
+            species_norm.lower() not in {k.lower() for k in taxonomy}:
+        notes.append(
+            f"  note: '{species_norm}' not in eBird taxonomy - check spelling "
+            f"(the confirmation is stored as given)")
+    manifest = load_manifest(manifest_path)
+    for sidecar in sidecars:
+        rel = f"{sidecar.parent.name}/{sidecar.stem}"
+        cur = sidecar_confirmed(sidecar)
+        if unconfirm:
+            if not cur:
+                skipped += 1
+                continue
+            _set_confirmed(sidecar, None)
+            m = manifest.get(str(sidecar))
+            if m and "confirmed" in m:
+                del m["confirmed"]
+            notes.append(f"  {rel}: user-confirmed flag cleared")
+        else:
+            if cur == species_norm:
+                skipped += 1
+                continue
+            _set_confirmed(sidecar, species_norm, scientific)
+            m = manifest.setdefault(str(sidecar), {})
+            m["confirmed"] = species_norm
+            notes.append(f"  {rel}: confirmed as '{species_norm}'"
+                         + (f" (was '{cur}')" if cur else ""))
+        touched += 1
+    save_manifest(manifest_path, manifest)
+    return touched, skipped, notes
 
 
 # --------------------------------------------------------------------------
@@ -2242,11 +2375,17 @@ def sidecar_status(sidecar: Path):
 
 
 def classify_capture(cap: Capture, force: bool = False) -> str:
-    """done / low-confidence / non-bird / no-data / error / pending - a capture
-    is done iff its single sidecar is done. 'no-data' captures are re-analysed
-    on re-run (the region may have been downloaded since). With ``force=True``
-    every capture is 'pending': an existing sidecar is re-identified in place
-    (only its bird-ID fields are overwritten, nothing is deleted)."""
+    """done / confirmed / low-confidence / non-bird / no-data / error / pending
+    - a capture is done iff its single sidecar is done. A capture whose sidecar
+    carries a user confirmation (bird:confirmed) is 'confirmed' and is NEVER
+    re-processed - not even under ``force``: the user's verification is final
+    and birdid must not clobber it. Un-confirm (--unconfirm) to re-identify.
+    'no-data' captures are re-analysed on re-run (the region may have been
+    downloaded since). With ``force=True`` every OTHER capture is 'pending': an
+    existing sidecar is re-identified in place (only its bird-ID fields are
+    overwritten, nothing is deleted)."""
+    if sidecar_confirmed(cap.sidecar()):
+        return "confirmed"
     if force:
         return "pending"
     return sidecar_status(cap.sidecar()) or "pending"
@@ -2731,6 +2870,27 @@ def main():
     ap.add_argument("--list-candidates", action="store_true",
                     help="print candidate counts per region/month and exit")
 
+    # --- user-confirmation commands (needs a photo folder) ---
+    ap.add_argument("--confirm", metavar="SPECIES", default=None,
+                    help="mark the matching sidecar(s) as user-confirmed with "
+                         "this species (writes bird:confirmed=<species> and "
+                         "aligns bird:species/topSpecies/confidence/summary to "
+                         "the confirmed pick, status -> done). A confirmed "
+                         "capture is FROZEN: birdid never re-writes its "
+                         "sidecar, not even with --force - the confirmation is "
+                         "the user's final say. Use --photo to confirm one "
+                         "capture instead of the whole folder. Lift it later "
+                         "with --unconfirm.")
+    ap.add_argument("--unconfirm", action="store_true",
+                    help="remove bird:confirmed from the matching sidecar(s), "
+                         "un-freezing them so a later run can re-identify. The "
+                         "species fields are left as they are. Use --photo to "
+                         "target one capture.")
+    ap.add_argument("--photo", metavar="BASE", default=None,
+                    help="with --confirm/--unconfirm: apply to the single "
+                         "capture whose base name matches (e.g. IMG_1234) "
+                         "instead of every .xmp sidecar in the folder.")
+
     # --- data management commands (no photo folder needed) ---
     ap.add_argument("-d", "--download", nargs="+", metavar="SPEC",
                     help="write real eBird region tables to the gitignored "
@@ -2859,6 +3019,30 @@ def main():
         if not root.is_dir():
             sys.exit(f"folder not found: {root}")
 
+    # --- user confirmation (set/clear bird:confirmed) - no model run ---
+    if args.confirm is not None or args.unconfirm:
+        try:
+            taxonomy_path = find_taxonomy(data_dir)
+            taxonomy = load_taxonomy(taxonomy_path)
+            manifest_path = Path(args.manifest) if args.manifest \
+                else root / "birdid_manifest.json"
+            touched, skipped, notes = run_confirm(
+                root, args.photo, args.confirm, args.unconfirm,
+                manifest_path, taxonomy)
+            for line in notes:
+                print(line)
+            if args.unconfirm:
+                print(f"birdid: un-confirmed {touched} sidecar(s)"
+                      + (f", {skipped} already had no flag" if skipped else ""))
+            else:
+                print(f"birdid: confirmed {touched} sidecar(s) as "
+                      f"'{args.confirm}'"
+                      + (f", {skipped} already carried that confirmation"
+                         if skipped else ""))
+        except (ValueError, OSError, RuntimeError) as e:
+            sys.exit(f"birdid: ERROR: {e}")
+        return
+
     data_dir = Path(args.data_dir)
     regions_dir = data_dir / "regions"
     taxonomy_path = find_taxonomy(data_dir)
@@ -2913,12 +3097,17 @@ def main():
         done_n = 0
         nb_n = 0
         error_n = 0
+        confirmed_n = 0
         for i, cap in enumerate(captures, 1):
             tui.progress("status", i, len(captures),
                          "checking existing sidecars")
             status = classify_capture(cap, args.force)
             if status == "pending":
                 pending.append(cap)
+            elif status == "confirmed":
+                # user-confirmed: frozen - never re-processed, even under
+                # --force. Un-confirm (birdid --unconfirm) to re-identify.
+                confirmed_n += 1
             elif status == "done":
                 done_n += 1
             elif status == "non-bird":
@@ -2947,12 +3136,14 @@ def main():
 
         if args.dry_run:
             summary_lines.append(
-                f"scan: {len(captures)} captures | {done_n} done | {nb_n} non-bird | "
+                f"scan: {len(captures)} captures | {done_n} done | "
+                f"{confirmed_n} confirmed | {nb_n} non-bird | "
                 f"{error_n} error | {len(pending)} pending")
             if args.force:
                 summary_lines.append(
                     "forced run: all captures would be re-identified in place "
-                    "(sidecars kept, only bird-ID fields overwritten).")
+                    "(sidecars kept, only bird-ID fields overwritten; "
+                    "user-confirmed captures are exempt).")
             for cap in pending[:20]:
                 summary_lines.append(f"  [pending] {cap.primary()} -> {cap.sidecar()}")
             if len(pending) > 20:
@@ -2960,7 +3151,8 @@ def main():
             summary_lines.append("dry-run: nothing processed.")
         elif not pending:
             summary_lines.append(
-                f"scan: {len(captures)} captures | {done_n} done | {nb_n} non-bird | "
+                f"scan: {len(captures)} captures | {done_n} done | "
+                f"{confirmed_n} confirmed | {nb_n} non-bird | "
                 f"{error_n} error | 0 pending - nothing to do.")
 
         if not summary_lines:
@@ -3300,10 +3492,12 @@ def main():
                     "\nforced re-run: captures with existing sidecars were "
                     "re-identified; only the bird-ID fields were overwritten "
                     "(all other XMP content - e.g. metadata from your photo "
-                    "software - preserved).")
+                    "software - preserved). User-confirmed captures were "
+                    "exempt (un-confirm with 'birdid --unconfirm' to re-ID).")
             summary_lines.append(
                 f"\ndone: {done_n} tagged, {lc_new} low-confidence, "
-                f"{nd_n} no-data, {nb_n} non-bird, "
+                f"{confirmed_n} confirmed, {nd_n} no-data, "
+                f"{nb_n} non-bird, "
                 f"{error_n} errors -> manifest {manifest_path}")
             if args.burst and burst_groups:
                 summary_lines.append(
