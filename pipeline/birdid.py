@@ -195,6 +195,17 @@ REGION_POOLS = _build_region_pools()
 
 BIRD_NS = "http://ns.birdpipeline/1.0/"
 
+# Darwin Core XMP namespace (the URI ExifTool/Exiv2/IMatch's bundled ExifTool
+# declare for the DarwinCore XMP schema — chosen over the canonical
+# http://rs.tdwg.org/dwc/terms/ so the mirror reads as clean `XMP-dwc:*` with
+# zero config in the photo toolchain birdid already speaks to).
+DWC_NS = "http://rs.tdwg.org/dwc/index.htm"
+
+# The controlled vocabulary value birdid writes for the confirmation status.
+# Not in the canonical HISPID/ABCD integer list, but the camtrap convention for
+# exactly this case: a human verified the identification from recorded media.
+DWC_CONFIRM_STATUS = "verified using recorded media"
+
 # --------------------------------------------------------------------------
 # eBird region x month data
 # --------------------------------------------------------------------------
@@ -1874,6 +1885,7 @@ def _xmp_tree(sidecar: Path):
     # even when a parsed sidecar used auto-generated prefixes (ns0, ns1, ...).
     # See write_sidecar's normalisation step for the full story.
     etree.register_namespace("bird", BIRD_NS)
+    etree.register_namespace("dwc", DWC_NS)
     parser = etree.XMLParser(remove_blank_text=False, recover=True)
     if sidecar.exists():
         try:
@@ -1911,6 +1923,7 @@ def _nsmap():
         "rdf": "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
         "dc": "http://purl.org/dc/elements/1.1/",
         "bird": BIRD_NS,
+        "dwc": DWC_NS,
     }
 
 
@@ -2145,7 +2158,138 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     sidecar.write_bytes(out.getvalue())
 
 
-def _set_confirmed(sidecar: Path, species: str | None, scientific: str = ""):
+def _photo_for_sidecar(sidecar: Path) -> Path | None:
+    """The capture's primary photo file for a sidecar (to read Artist)."""
+    if not sidecar.parent.is_dir():
+        return None
+    stem = sidecar.stem
+    cands = [p for p in sidecar.parent.iterdir()
+             if p.is_file() and p.stem == stem and p.suffix.lower() in ALL_EXTS]
+    if not cands:
+        return None
+    for p in cands:
+        if p.suffix.lower() in VIEWABLE_EXTS:
+            return p
+    return cands[0]
+
+
+def read_artist(path: Path | None) -> str:
+    """Photographer name from the photo's Artist / Creator metadata, or ''.
+
+    ``dwc:recordedBy`` (the photographer) is only filled from data birdid can
+    actually read off the capture — never invented. The user-confirmation flow
+    writes the mirror whenever a confirmation is set, and the photographer is
+    the one place a name is legitimately known (the person behind the camera).
+    """
+    if not path or not path.exists():
+        return ""
+    cmd = ["exiftool", "-json", "-Artist", "-XMP-dc:Creator", str(path)]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=60).stdout
+        if not out.strip():
+            return ""
+        d = json.loads(out)[0]
+        for tag in ("Artist", "Creator"):
+            v = d.get(tag)
+            if v and str(v).strip():
+                return str(v).strip().lstrip("\ufeff© \t")
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError,
+            IndexError, KeyError):
+        pass
+    return ""
+
+
+def load_taxonomy_hierarchy(path: Path | None) -> dict[str, tuple[str, str]]:
+    """sci-name (lowercased) -> (order, family) from the Clements v2026
+    integrated checklist. The v2023 eBird API file has no order/family columns,
+    so installs using it simply get an empty map (order/family are then omitted
+    from the DarwinCore mirror rather than guessed)."""
+    hier: dict[str, tuple[str, str]] = {}
+    if not path:
+        return hier
+    try:
+        with open(path, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                if not row:
+                    continue
+                if (row.get("category") or "").strip() != "species":
+                    continue
+                sci = (row.get("scientific name") or "").strip()
+                if not sci:
+                    continue
+                order = (row.get("order") or "").strip()
+                family = (row.get("family") or "").strip()
+                if " (" in family:      # "Paridae (Tits, Chickadees, ...)" -> "Paridae"
+                    family = family.split(" (", 1)[0].strip()
+                hier[sci.lower()] = (order, family)
+    except OSError:
+        pass
+    return hier
+
+
+def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
+                    order="", family="", verbatim=""):
+    """Write (or, with ``species=None``, clear) the DarwinCore mirror of a
+    user confirmation, as the standard ExifTool-readable nested block:
+
+        dwc:Occurrence     -> dwc:recordedBy (photographer)
+        dwc:Identification -> dwc:dateIdentified, dwc:identificationVerificationStatus
+                              (= DWC_CONFIRM_STATUS), dwc:verbatimIdentification
+        dwc:Taxon          -> dwc:kingdom/phylum/class/order/family/genus/
+                              specificEpithet/scientificName/vernacularName
+
+    ``dwc:identifiedBy`` is deliberately NOT written: birdid has no record of
+    who assigned the taxon, so a name there would be an unfounded claim (the
+    user only wants it present when that data is actually known). ``recordedBy``
+    is only written when the photographer is actually readable off the photo.
+
+    On unconfirm the whole block is removed so the ``verified`` claim can't go
+    stale; on a re-confirm the block is refreshed in place.
+    """
+    from lxml import etree
+    rdf = _nsmap()["rdf"]
+    # refresh/clear: drop any existing birdid-written dwc block first
+    for tag in ("Occurrence", "Identification", "Taxon"):
+        for el in desc.findall(f"{{{DWC_NS}}}{tag}"):
+            desc.remove(el)
+    if not species:
+        return
+
+    def res(tag):
+        el = etree.SubElement(desc, f"{{{DWC_NS}}}{tag}")
+        el.set(f"{{{rdf}}}parseType", "Resource")
+        return el
+
+    if photographer:
+        occ = res("Occurrence")
+        etree.SubElement(occ, f"{{{DWC_NS}}}recordedBy").text = photographer
+
+    ident = res("Identification")
+    etree.SubElement(ident, f"{{{DWC_NS}}}dateIdentified").text = (
+        datetime.today().strftime("%Y-%m-%d"))
+    etree.SubElement(ident, f"{{{DWC_NS}}}identificationVerificationStatus").text = (
+        DWC_CONFIRM_STATUS)
+    if verbatim:
+        etree.SubElement(ident, f"{{{DWC_NS}}}verbatimIdentification").text = verbatim
+
+    tax = res("Taxon")
+    for local, val in (("kingdom", "Animalia"), ("phylum", "Chordata"),
+                       ("class", "Aves"), ("order", order), ("family", family)):
+        if val:
+            etree.SubElement(tax, f"{{{DWC_NS}}}{local}").text = val
+    if scientific:
+        parts = scientific.split()
+        if len(parts) >= 2:
+            etree.SubElement(tax, f"{{{DWC_NS}}}genus").text = parts[0]
+            etree.SubElement(tax, f"{{{DWC_NS}}}specificEpithet").text = parts[1]
+        etree.SubElement(tax, f"{{{DWC_NS}}}scientificName").text = scientific
+    if species:
+        etree.SubElement(tax, f"{{{DWC_NS}}}vernacularName").text = species
+
+
+def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
+                   *, photographer: str = "", order: str = "", family: str = "",
+                   verbatim: str = ""):
     """Set (or, with ``species=None``, clear) the user-confirmation flag on a
     sidecar, preserving every other element (foreign fields included).
 
@@ -2156,7 +2300,14 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = ""):
     The confirmation is what freezes the record: once ``bird:confirmed`` is
     set, birdid never re-writes the sidecar (see write_sidecar /
     classify_capture). Clearing it (``species=None``) only removes the flag and
-    leaves the species fields as they are."""
+    leaves the species fields as they are.
+
+    A confirmation additionally mirrors the pick as a standard DarwinCore XMP
+    block (see ``_set_dwc_mirror``) so generic photo software that knows
+    nothing about the ``bird`` namespace can read the verified species.
+    ``photographer`` (from the photo's Artist) fills ``dwc:recordedBy`` only
+    when actually known; ``dwc:identifiedBy`` is never written (birdid has no
+    record of who assigned the taxon)."""
     from lxml import etree
     root = _xmp_tree(sidecar)
     descs = _find(root, "//rdf:Description")
@@ -2166,6 +2317,7 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = ""):
     if species is None:
         for el in desc.findall(f"{{{BIRD_NS}}}confirmed"):
             desc.remove(el)
+        _set_dwc_mirror(desc, species=None)
     else:
         _set_list(desc, "species", BIRD_NS, [species], "Seq")
         _set_list(desc, "confidence", BIRD_NS, ["1.00"], "Seq")
@@ -2176,6 +2328,9 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = ""):
             _set_text(desc, "scientificName", BIRD_NS, scientific)
         _set_text(desc, "confirmed", BIRD_NS, species)
         _set_text(desc, "status", BIRD_NS, "done")
+        _set_dwc_mirror(desc, species=species, scientific=scientific,
+                        photographer=photographer, order=order, family=family,
+                        verbatim=verbatim)
     _canonicalize_desc(desc)
     _ensure_xpacket(root)
     out = io.BytesIO()
@@ -2214,6 +2369,7 @@ def _low_confidence_review(manifest: dict) -> list[tuple[float, str, str]]:
 
 def run_confirm(root: Path, photo: str | None, species: str | None,
                 unconfirm: bool, manifest_path: Path, taxonomy: dict,
+                taxonomy_path: Path | None = None,
                 ) -> tuple[int, int, list[str]]:
     """Set or clear the user-confirmation flag (bird:confirmed) on sidecars.
 
@@ -2224,6 +2380,12 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
     pick (single-entry list at 100%). ``--unconfirm`` removes the flag, leaving
     the species fields as they are. A confirmed sidecar is frozen - later
     birdid runs (incl. --force) never re-write it.
+
+    Each confirmation also writes a DarwinCore XMP mirror block (see
+    ``_set_dwc_mirror``): ``dwc:recordedBy`` comes from the photo's Artist tag,
+    ``dwc:identificationVerificationStatus`` is DWC_CONFIRM_STATUS, and the
+    Taxon hierarchy (order/family) comes from the Clements v2026 file when
+    available (``taxonomy_path``). ``dwc:identifiedBy`` is never written.
 
     Returns (touched, skipped, notes): ``touched`` sidecars modified, plus
     existing sidecars left alone (an unconfirm on a sidecar without the flag,
@@ -2241,6 +2403,9 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
         if species_norm == "unknown":
             raise ValueError(
                 f"confirm: empty species - use e.g. --confirm 'Great Tit'")
+
+    hier = load_taxonomy_hierarchy(taxonomy_path) if not unconfirm else {}
+    verbatim = (species or "").strip() or species_norm
 
     touched = skipped = 0
     notes: list[str] = []
@@ -2266,7 +2431,11 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
             if cur == species_norm:
                 skipped += 1
                 continue
-            _set_confirmed(sidecar, species_norm, scientific)
+            order, family = hier.get(scientific.lower(), ("", ""))
+            photographer = read_artist(_photo_for_sidecar(sidecar))
+            _set_confirmed(sidecar, species_norm, scientific,
+                           photographer=photographer, order=order, family=family,
+                           verbatim=verbatim)
             m = manifest.setdefault(str(sidecar), {})
             m["confirmed"] = species_norm
             notes.append(f"  {rel}: confirmed as '{species_norm}'"
@@ -2875,17 +3044,21 @@ def main():
                     help="mark the matching sidecar(s) as user-confirmed with "
                          "this species (writes bird:confirmed=<species> and "
                          "aligns bird:species/topSpecies/confidence/summary to "
-                         "the confirmed pick, status -> done). A confirmed "
+                         "the confirmed pick, status -> done; also mirrors the "
+                         "verdict as a standard DarwinCore XMP block - "
+                         "dwc:recordedBy from the photo's Artist, "
+                         "dwc:identificationVerificationStatus='verified using "
+                         "recorded media', dwc:Taxon hierarchy). A confirmed "
                          "capture is FROZEN: birdid never re-writes its "
                          "sidecar, not even with --force - the confirmation is "
                          "the user's final say. Use --photo to confirm one "
                          "capture instead of the whole folder. Lift it later "
                          "with --unconfirm.")
     ap.add_argument("--unconfirm", action="store_true",
-                    help="remove bird:confirmed from the matching sidecar(s), "
-                         "un-freezing them so a later run can re-identify. The "
-                         "species fields are left as they are. Use --photo to "
-                         "target one capture.")
+                    help="remove bird:confirmed (and its DarwinCore mirror) "
+                         "from the matching sidecar(s), un-freezing them so a "
+                         "later run can re-identify. The species fields are "
+                         "left as they are. Use --photo to target one capture.")
     ap.add_argument("--photo", metavar="BASE", default=None,
                     help="with --confirm/--unconfirm: apply to the single "
                          "capture whose base name matches (e.g. IMG_1234) "
@@ -3028,7 +3201,7 @@ def main():
                 else root / "birdid_manifest.json"
             touched, skipped, notes = run_confirm(
                 root, args.photo, args.confirm, args.unconfirm,
-                manifest_path, taxonomy)
+                manifest_path, taxonomy, taxonomy_path)
             for line in notes:
                 print(line)
             if args.unconfirm:

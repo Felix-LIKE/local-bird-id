@@ -26,7 +26,10 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
 - **Your verdict is final**: confirm a capture (`birdid <folder> --confirm
   "Great Tit"`) and birdid writes `bird:confirmed` and **never overwrites it**
   again — not on re-runs, not with `--force` (the future confirm-UI writes the
-  same flag; see `pipeline/README.md` → *User confirmation*).
+  same flag; see `pipeline/README.md` → *User confirmation*). A confirmation
+  also mirrors the verdict as standard **DarwinCore XMP** (`dwc:*`), so generic
+  photo software can read the verified species without knowing the `bird`
+  namespace.
 - **Staged candidate ladder** (fast + accurate): the base region is always
   scored with the ±1-month grace window applied (a species at a season
   boundary - e.g. Asian Openbill in early Jan, when its month record starts in

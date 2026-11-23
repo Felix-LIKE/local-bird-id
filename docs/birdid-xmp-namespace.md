@@ -73,6 +73,51 @@ Two guarantees hold in **both** modes (flag on or off):
 Without `--dc-fields`, `dc:*` in a birdid-owned sidecar behaves like any other
 metadata written by your photo software: birdid's re-runs leave it untouched.
 
+## DarwinCore mirror (written with every `--confirm`)
+
+Since a confirmation is exactly the "this identification was verified" fact that
+DarwinCore exists to express, `--confirm` additionally mirrors `bird:confirmed`
+as a standard **DarwinCore XMP** block in the namespace ExifTool/Exiv2/IMatch's
+bundled ExifTool all declare for DarwinCore XMP:
+
+```
+http://rs.tdwg.org/dwc/index.htm
+```
+
+(The canonical `http://rs.tdwg.org/dwc/terms/` was deliberately *not* used:
+ExifTool only labels `terms/` as `XMP-dwc` if registered in a config, and then
+warns about a namespace-prefix conflict on every run. The legacy URI reads as
+clean `XMP-dwc:*` with zero config in the whole photo toolchain.)
+
+What `--confirm` writes (see `pipeline/README.md` → *User confirmation*):
+
+| dwc element | content | source |
+|---|---|---|
+| `dwc:Occurrence` → `dwc:recordedBy` | the photographer | photo's `Artist` tag — only when actually present |
+| `dwc:Identification` → `dwc:dateIdentified` | confirmation date | today (when you ran `--confirm`) |
+| `…→ dwc:identificationVerificationStatus` | `verified using recorded media` | fixed value (camtrap convention for human-verified-from-photo IDs) |
+| `…→ dwc:verbatimIdentification` | the species string you typed | your `--confirm` argument |
+| `dwc:Taxon` → `dwc:scientificName` / `dwc:vernacularName` | *Parus major* / Great Tit | eBird taxonomy |
+| `…→ dwc:kingdom`…`dwc:class` | Animalia / Chordata / Aves | constant for birds |
+| `…→ dwc:order` / `dwc:family` | e.g. Passeriformes / Paridae | Clements v2026 checklist (omitted if unavailable) |
+| `…→ dwc:genus` / `dwc:specificEpithet` | Parus / major | from the scientific name |
+
+`dwc:identifiedBy` is **deliberately not written**: birdid has no record of who
+assigned the taxon, so it never invents an identifier — that element only
+appears if you add it yourself. `dwc:recordedBy` is likewise only written when
+the photo actually carries an `Artist`.
+
+This mirror does **not** change the freeze guarantee: `bird:confirmed` remains
+the authority, and the dwc block is written/refreshed only by `--confirm` and
+removed by `--unconfirm`. ExifTool shows it out of the box:
+
+```bash
+exiftool -G1 -XMP-dwc:all IMG_1234.xmp
+# [XMP-dwc]  Identification Verification Status: verified using recorded media
+# [XMP-dwc]  Taxon Vernacular Name           : Great Tit
+# ...
+```
+
 ## User confirmation (`bird:confirmed`)
 
 birdid never deletes or second-guesses an identification a human has verified.

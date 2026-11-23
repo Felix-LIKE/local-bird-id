@@ -380,6 +380,17 @@ What `--confirm` does to the capture's `<base>.xmp`:
   self-consistent: `bird:species` becomes a single-entry list, `bird:confidence`
   → `1.00`, `bird:topSpecies`/`bird:topConfidence`/`bird:summary` reflect the
   confirmed species (100% — you verified it), and `bird:status` → `done`.
+- writes a **DarwinCore XMP mirror** of the confirmation in the standard
+  `http://rs.tdwg.org/dwc/index.htm` namespace, so photo software that knows
+  nothing about the `bird` namespace can still read the verified species:
+  `dwc:Occurrence/dwc:recordedBy` (the photographer, read from the photo's
+  `Artist` tag — only when actually present), `dwc:Identification` with
+  `dwc:dateIdentified`, `dwc:identificationVerificationStatus = "verified using
+  recorded media"` and `dwc:verbatimIdentification` (the species you typed), and
+  a `dwc:Taxon` block with `dwc:scientificName`/`dwc:vernacularName` plus the
+  `kingdom`…`family`/`genus`/`specificEpithet` ladder from the Clements v2026
+  checklist when available. `dwc:identifiedBy` is **not** written — birdid has
+  no record of who assigned the taxon, so it never invents an identifier.
 
 Once `bird:confirmed` is present the sidecar is **frozen**:
 
@@ -392,8 +403,9 @@ Once `bird:confirmed` is present the sidecar is **frozen**:
 - the confirmation travels in the XMP itself (`bird:confirmed`), so it survives
   moves/re-imports and is visible to any tool that reads the namespace.
 
-`--unconfirm` removes only the `bird:confirmed` element — the species fields are
-left as they are, and a later run can re-identify the capture. Use `--photo` to
+`--unconfirm` removes only the `bird:confirmed` element and its DarwinCore
+mirror (so a stale "verified" claim can't linger) — the species fields are left
+as they are, and a later run can re-identify the capture. Use `--photo` to
 target a single capture (base name, e.g. `IMG_1234`) instead of the whole
 folder. Confirmed captures are recorded in the manifest with a `confirmed`
 entry so reports and review lists can reflect them.
