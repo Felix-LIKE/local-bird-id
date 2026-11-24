@@ -2298,14 +2298,22 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # bird:* fields are always re-written below, so nothing is lost, and the
     # `owned` flag above was already read from the untouched tree.
     # A GROUP-partial prefilter is consumed by this identification: the viewer
-    # pinned the group with bird:status='partial' + a dwc:Taxon ladder; once
-    # birdid has identified the species, the pin (status) is consumed but the
-    # ladder is KEPT — it is the identified species' class, which birdid knows
-    # for certain (the species was scored inside exactly that group). Keeping it
-    # lets the viewer confirm the resolved species (e.g. "Cat") in its real
-    # group (Mammalia) instead of defaulting it into Aves because the model
-    # label is not in the bundled bird taxonomy. (Only --confirm writes the full
-    # per-species dwc mirror; this is a class-only ladder and stays accurate.)
+    # pinned the group with bird:status='partial' + a dwc:Taxon ladder. Whether
+    # the ladder survives depends on HOW the identification ran (see below):
+    #   - the group was honored (a partial rerun scored the species inside
+    #     exactly that group) -> the ladder is KEPT, because it is the
+    #     identified species' real class (the viewer confirms the resolved
+    #     species in that group instead of defaulting it into Aves);
+    #   - --analyze-all OVERRODE the pin (whole-tree search) -> the stale
+    #     pinned ladder is removed, since the unrestricted verdict supersedes
+    #     the group pin.
+    # (Only --confirm writes the full per-species dwc mirror; the partial
+    # ladder is a class-only ladder.)
+    was_partial = False
+    for el in _find(root, "//bird:status"):
+        if el.text and el.text.strip() == "partial":
+            was_partial = True
+            break
     for el in list(desc):
         if el.tag.startswith(f"{{{BIRD_NS}}}"):
             desc.remove(el)
@@ -2352,13 +2360,16 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
         _set_text(desc, "reasoning", BIRD_NS, reasoning[:1000])
 
         # The group-partial pin (bird:status='partial') is consumed by this
-        # identification — status becomes 'done' — but its dwc:Taxon ladder is
-        # KEPT: it is the identified species' class, which birdid knows for
-        # certain (the species was scored inside exactly that group). The viewer
-        # uses it to confirm the resolved species in its real group (e.g. a
-        # mammal resolved to "Cat" stays Mammalia) instead of defaulting it
-        # into Aves because the model label is not in the bundled taxonomy.
-        # (Only --confirm writes the full per-species dwc mirror.)
+        # identification — status becomes 'done'. Its dwc:Taxon ladder is KEPT
+        # when the group was honored (the species was scored inside that group,
+        # so the ladder is its real class — the viewer confirms in the right
+        # group, e.g. a mammal resolved to "Cat" stays Mammalia). When
+        # --analyze-all overrode the pin (result['_pin_overridden']), the
+        # whole-tree verdict supersedes it, so the stale pinned ladder is
+        # dropped rather than kept as a wrong "current" class.
+        if was_partial and result.get("_pin_overridden"):
+            for el in desc.findall(f"{{{DWC_NS}}}Taxon"):
+                desc.remove(el)
 
         if owned and getattr(cfg, "dc_fields", False):
             # dc:description (human readable) and dc:subject keywords - only on
@@ -3895,11 +3906,27 @@ def main():
                         group_label = (prefilter.get("class") or
                                        prefilter.get("phylum") or
                                        prefilter.get("kingdom") or "?")
-                        tui.set(stage="classify",
-                                message=f"classifying {primary.name} "
-                                        f"(group '{group_label}')")
-                        result = classifier.classify_partial_prefilter(
-                            primary, taxonomy, prefilter)
+                        if getattr(args, "analyze_all", False) and not args.partial_only:
+                            # --analyze-all: the user asked for a fresh,
+                            # UNRESTRICTED analysis. The group pin is a search
+                            # restriction and --analyze-all explicitly means
+                            # "no prefilter", so override the pin and score
+                            # against the whole tree of life (the complement of
+                            # --partial-only). The old pinned ladder is dropped
+                            # by write_sidecar (result['_pin_overridden']).
+                            tui.set(stage="classify",
+                                    message=f"classifying {primary.name} "
+                                            f"(--analyze-all, whole tree)")
+                            result = classifier.classify_no_prefilter(
+                                primary, taxonomy, region)
+                            result["_pin_overridden"] = True
+                        else:
+                            tui.set(stage="classify",
+                                    message=f"classifying {primary.name} "
+                                            f"(group '{group_label}')")
+                            result = classifier.classify_partial_prefilter(
+                                primary, taxonomy, prefilter)
+                            result["_pin_overridden"] = False
                     elif sum(len(st) for _, st in ladder) == 0:
                         if region not in no_data_choice_cache:
                             no_data_choice_cache[region] = ask_no_data_choice(tui, region)

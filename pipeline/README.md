@@ -449,6 +449,13 @@ How birdid handles it:
   "Cat" stays `Mammalia`) instead of defaulting it into `Aves` when the model
   label is not in the bundled bird taxonomy. (Only `--confirm` writes the full,
   verified per-species dwc mirror.)
+- `--analyze-all` is the **escape hatch**: it explicitly means "no prefilter",
+  so it overrides the group pin and re-identifies the partial against the
+  **whole tree of life** instead of its pinned group. The old pinned ladder is
+  then dropped (the unrestricted verdict supersedes the pin). This is the
+  complement of `--partial-only` (group-restricted) and `--force` (which still
+  honors the pin — a partial is a deliberate restriction, not a verdict to
+  override).
 
 ### Refining only the partials: `--partial-only`
 
