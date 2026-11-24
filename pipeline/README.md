@@ -352,7 +352,9 @@ Names are normalised against the official eBird taxonomy: the model's answer is
 matched case-insensitively, a scientific-name answer is converted back to the
 common name, and dropped leading qualifiers are restored (e.g. "Blue Tit" ->
 "Eurasian Blue Tit", *Cyanistes caeruleus*). Unmatched names keep a blank
-scientific field and a "check spelling" note. The Avibase id comes from the
+scientific field and a note that the name has no vernacular name associated to
+it (not a spelling error — e.g. a bioclip-2 "Cat" label, which the bird
+taxonomy only carries as "Domestic Cat", is stored as given). The Avibase id comes from the
 bundled Clements checklist (`eBird-Clements_Integrated_Checklist.csv`,
 'taxon concept ID' column); when that file is missing the Avibase fields are
 simply omitted. The same link is printed on the per-capture console line and
@@ -374,8 +376,8 @@ What `--confirm` does to the capture's `<base>.xmp`:
 
 - writes `bird:confirmed=<species>` (the species is normalised against the
   eBird taxonomy; a scientific name is converted to the common name, and a name
-  that isn't in the taxonomy prints a "check spelling" note but is stored as
-  given);
+  that isn't in the taxonomy prints a "has no vernacular name associated to it"
+  note but is stored as given);
 - aligns the species fields to the confirmed pick so the sidecar is
   self-consistent: `bird:species` becomes a single-entry list, `bird:confidence`
   → `1.00`, `bird:topSpecies`/`bird:topConfidence`/`bird:summary` reflect the

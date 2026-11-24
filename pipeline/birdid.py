@@ -2704,8 +2704,12 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
     notes: list[str] = []
     if not unconfirm and scientific == "" and \
             species_norm.lower() not in {k.lower() for k in taxonomy}:
+        # The model's label is a real name that simply has no English/common
+        # name match in the bird taxonomy (e.g. a bioclip-2 "Cat" label vs. the
+        # taxonomy's "Domestic Cat") - that is not a spelling error, so the
+        # note says what actually happened instead of "check spelling".
         notes.append(
-            f"  note: '{species_norm}' not in eBird taxonomy - check spelling "
+            f"  note: '{species_norm}' has no vernacular name associated to it "
             f"(the confirmation is stored as given)")
     manifest = load_manifest(manifest_path)
     for sidecar in sidecars:
@@ -4021,7 +4025,11 @@ def main():
                         "done" if confidence >= args.min_confidence else "low-confidence")
                     if (species not in ("unknown", "") and scientific == ""
                             and taxonomy and status != "non-bird"):
-                        tui.plain_line(f"  note: '{species}' not in eBird taxonomy - check spelling")
+                        # A common name with no English-name match in the bird
+                        # taxonomy (bioclip-2 common label, no scientific name) -
+                        # not a spelling error, so say what actually happened.
+                        tui.plain_line(
+                            f"  note: '{species}' has no vernacular name associated to it")
                     # keep-best guard: a re-analysis (review pass, --analyze-all,
                     # a no-data retry) must never REGRESS a recorded result. The
                     # candidate ladder can change between runs (e.g. a region
