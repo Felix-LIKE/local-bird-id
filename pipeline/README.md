@@ -445,6 +445,25 @@ How birdid handles it:
   `low-confidence`, so the partial marker cannot linger as the record's
   "current" taxonomy. (Only `--confirm` writes a real, verified dwc mirror.)
 
+### Refining only the partials: `--partial-only`
+
+By default a run processes every partial it finds alongside the rest of the
+pending work. When you only want further clarity on the captures you already
+know the group of (not a full folder re-scan), restrict the run to them:
+
+```bash
+birdid /path/to/photos --partial-only
+```
+
+This queues **only** group-partial captures — each identified prefixed to its
+pinned group (`classify_partial_prefilter` above) — and skips everything else
+(done, confirmed, fresh/pending, non-bird, low-confidence, no-data). No
+`--force` is needed: a partial is always re-processed on its own. Because a
+successful re-ID consumes the pin (`bird:status` becomes `done`/`low-confidence`),
+re-running `--partial-only` is naturally idempotent — the next run has less to
+do. A dry-run (`--dry-run --partial-only`) lists exactly which captures it would
+refine.
+
 ## Report (CSV)
 
 Every folder that has captures gets its own full-snapshot report

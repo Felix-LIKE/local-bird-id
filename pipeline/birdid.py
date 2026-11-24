@@ -3266,6 +3266,18 @@ def main():
                          "By default such photos are left untouched and only "
                          "listed for review; this flag puts them back in the "
                          "processing queue.")
+    ap.add_argument("--partial-only", action="store_true",
+                    help="re-identify ONLY captures whose sidecar is a "
+                         "group-partial confirmation (bird:status='partial': "
+                         "the viewer pinned the subject's group - mammal / "
+                         "insect / ... - but not the species). Each is "
+                         "identified prefixed to its pinned group; every other "
+                         "capture (done, confirmed, pending, non-bird, ...) is "
+                         "skipped, so a run costs only the photos you want "
+                         "further clarity on. Already re-identified partials "
+                         "stop being partial (the pin is consumed), so "
+                         "re-running is naturally idempotent. No --force "
+                         "needed: partials are re-processed on their own.")
     ap.add_argument("--force", action="store_true",
                     help="force a fresh identification run for a folder that "
                          "already has sidecars: every capture is re-processed "
@@ -3620,18 +3632,24 @@ def main():
         error_n = 0
         confirmed_n = 0
         partial_n = 0
+        partial_only_skipped_n = 0
         for i, cap in enumerate(captures, 1):
             tui.progress("status", i, len(captures),
                          "checking existing sidecars")
             status = classify_capture(cap, args.force)
-            if status == "pending":
-                pending.append(cap)
-            elif status == "partial":
+            if status == "partial":
                 # group-partial confirmation: the viewer pinned the subject's
                 # group but not the species, so birdid must re-identify it —
                 # prefixed to that group via the sidecar's dwc:Taxon ladder.
+                # Always queued: it is the exact target set of --partial-only,
+                # and on a normal run a partial is just pending work.
                 pending.append(cap)
                 partial_n += 1
+            elif status == "pending":
+                if args.partial_only:
+                    partial_only_skipped_n += 1
+                else:
+                    pending.append(cap)
             elif status == "confirmed":
                 # user-confirmed: frozen - never re-processed, even under
                 # --force. Un-confirm (birdid --unconfirm) to re-identify.
@@ -3639,15 +3657,20 @@ def main():
             elif status == "done":
                 done_n += 1
             elif status == "non-bird":
-                if args.analyze_all:
+                if args.analyze_all and not args.partial_only:
                     # --analyze-all: re-analyse photos the pre-filter skipped
                     pending.append(cap)
                 else:
                     nb_n += 1
+                    if args.partial_only:
+                        partial_only_skipped_n += 1
             elif status == "low-confidence":
                 if args.include_low_confidence:
                     # review pass: re-analyse the flagged captures
-                    pending.append(cap)
+                    if args.partial_only:
+                        partial_only_skipped_n += 1
+                    else:
+                        pending.append(cap)
                 else:
                     lc_skipped.append(cap)
             elif status == "no-data":
@@ -3655,7 +3678,10 @@ def main():
                 # data. Re-analyse by default: a re-run after --download picks
                 # them up, and the per-region prompt lets the user choose
                 # whole-tree-of-life vs flag again.
-                pending.append(cap)
+                if args.partial_only:
+                    partial_only_skipped_n += 1
+                else:
+                    pending.append(cap)
             else:
                 error_n += 1
 
@@ -3667,6 +3693,11 @@ def main():
                 f"scan: {len(captures)} captures | {done_n} done | "
                 f"{confirmed_n} confirmed | {nb_n} non-bird | "
                 f"{partial_n} partial | {error_n} error | {len(pending)} pending")
+            if args.partial_only:
+                summary_lines.append(
+                    "partial-only: only group-partial captures queued "
+                    f"({partial_only_skipped_n} skipped - not a group-partial); "
+                    "each identified prefixed to its pinned group.")
             if args.force:
                 summary_lines.append(
                     "forced run: all captures would be re-identified in place "
@@ -3683,6 +3714,10 @@ def main():
                 f"scan: {len(captures)} captures | {done_n} done | "
                 f"{confirmed_n} confirmed | {nb_n} non-bird | "
                 f"{partial_n} partial | {error_n} error | 0 pending - nothing to do.")
+            if args.partial_only and partial_only_skipped_n:
+                summary_lines.append(
+                    "partial-only: no group-partial captures to re-identify "
+                    f"({partial_only_skipped_n} skipped - not a group-partial).")
 
         if not summary_lines:
             # --- Phase 1.5: one batched EXIF read for ALL photos, then GPS means ---
@@ -4110,6 +4145,14 @@ def main():
                     f"{confirmed_n} confirmed, {nd_n} no-data, "
                     f"{nb_n} non-bird, "
                     f"{error_n} errors -> manifest {manifest_path}")
+            if args.partial_only:
+                summary_lines.append(
+                    "partial-only run: only group-partial captures were "
+                    "re-identified, each prefixed to its pinned group "
+                    f"({partial_only_skipped_n} other capture(s) skipped). "
+                    "A re-identified partial's pin is consumed (status becomes "
+                    "done / low-confidence), so the next --partial-only run "
+                    "naturally has less to do.")
             if write_blocked:
                 if sidecars_written == 0 and not manifest_saved and not written:
                     saved_what = ("Nothing could be saved - the photo folder "
