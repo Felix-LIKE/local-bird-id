@@ -77,6 +77,7 @@ import csv
 import io
 import json
 import os
+import errno
 import re
 import subprocess
 import sys
@@ -210,6 +211,35 @@ DWC_NS = "http://rs.tdwg.org/dwc/index.htm"
 # human verdict too), so DWC_CONFIRM_STATUS is what birdid writes, not what it
 # matches against.
 DWC_CONFIRM_STATUS = "verified by Person"
+
+
+def _is_write_error(e: BaseException) -> bool:
+    """True when the exception is a filesystem WRITE rejection.
+
+    The distinguishing feature of a write rejection is that it recurs for
+    every file (a read-only mount refuses EROFS for everything, a full disk
+    ENOSPC for everything, an unwritable tree EACCES/EPERM for everything),
+    so retrying the write - or writing an 'error' sidecar to record it -
+    only produces a cascade of identical failures. Callers use it to:
+
+      * stop a run early on EROFS/ENOSPC (no result can ever be saved), and
+      * report the real cause (read-only mount / no permission / disk full)
+        instead of a bare '[Errno 13] Permission denied'.
+    """
+    if isinstance(e, PermissionError):
+        return True
+    if isinstance(e, OSError) and e.errno in (
+            errno.EROFS, errno.EACCES, errno.EPERM, errno.ENOSPC, errno.EDQUOT):
+        return True
+    return False
+
+
+def _write_rejection_hint() -> str:
+    """Actionable sentence for the end summary when the destination refused a
+    write: the usual cause is an external drive mounted read-only."""
+    return ("If this is an external drive it is probably mounted READ-ONLY - "
+            "remount it read-write ('mount -o remount,rw <mountpoint>') or "
+            "copy the photos to a writable folder, then rerun.")
 
 # --------------------------------------------------------------------------
 # eBird region x month data
@@ -430,7 +460,37 @@ def find_taxonomy(data_dir: Path) -> Path | None:
     return None
 
 
+# The Clements v2026 integrated checklist is ~12.7 MB / 36k rows. load_taxonomy,
+# load_avibase and load_taxonomy_hierarchy each parse it in full, so a normal
+# run parsed it twice and a --confirm run twice too. Cache each loader's result
+# keyed by (loader, path, mtime) - a rerun within the same process reads the
+# file once, and a changed file (a refresh) still invalidates the entry.
+_loader_cache: dict[tuple, tuple[int, object]] = {}
+
+
+def _cached_loader(path: Path | None, loader):
+    if not path:
+        return loader(path)
+    try:
+        sig = path.stat().st_mtime_ns
+    except OSError:
+        return loader(path)                 # unreadable -> don't cache
+    key = (loader.__name__, str(path))
+    hit = _loader_cache.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    val = loader(path)
+    _loader_cache[key] = (sig, val)
+    return val
+
+
 def load_taxonomy(path: Path | None) -> dict[str, str]:
+    """Common-name -> scientific-name map from either eBird taxonomy format.
+    (Result is cached per file+mtime; see _cached_loader.)"""
+    return _cached_loader(path, _load_taxonomy_uncached)
+
+
+def _load_taxonomy_uncached(path: Path | None) -> dict[str, str]:
     """Common-name -> scientific-name map from either eBird taxonomy format.
 
     Handles both the eBird API CSV (COMMON_NAME / SCIENTIFIC_NAME, v2023) and
@@ -458,6 +518,24 @@ def load_taxonomy(path: Path | None) -> dict[str, str]:
     return tax
 
 
+# normalize_species rebuilt its lowercase + reverse lookup dicts on EVERY call
+# (per capture, per checklist species, per central-checklist entry - hundreds
+# of times a run, each building two dicts over the ~18k-name taxonomy). Cache
+# them per taxonomy dict (identity-checked so a GC'd + id-reused dict can never
+# serve a stale entry; the strong reference also keeps the taxonomy alive).
+_normalize_map_cache: dict[int, tuple[dict, dict, dict]] = {}
+
+
+def _normalize_maps(tax: dict[str, str]) -> tuple[dict, dict]:
+    entry = _normalize_map_cache.get(id(tax))
+    if entry is None or entry[0] is not tax:
+        lower = {k.lower(): (k, v) for k, v in tax.items()}
+        rev = {v.lower(): k for k, v in tax.items()}
+        entry = (tax, lower, rev)
+        _normalize_map_cache[id(tax)] = entry
+    return entry[1], entry[2]
+
+
 def normalize_species(name: str, tax: dict[str, str]):
     """Return (common_name, scientific_name), tolerating case or a scientific name."""
     name = (name or "").strip()
@@ -465,11 +543,10 @@ def normalize_species(name: str, tax: dict[str, str]):
         return "unknown", ""
     if name in tax:
         return name, tax[name]
-    lower = {k.lower(): (k, v) for k, v in tax.items()}
+    lower, rev = _normalize_maps(tax)
     if name.lower() in lower:
         return lower[name.lower()]
     # maybe the model answered with the scientific name instead
-    rev = {v.lower(): k for k, v in tax.items()}
     if name.lower() in rev:
         common = rev[name.lower()]
         return common, tax[common]
@@ -496,11 +573,14 @@ def load_avibase(data_dir: Path) -> tuple[dict[str, str], dict[str, str]]:
     the eBird API v2023 taxonomy has no such column. The stored id is the bare
     form ('0DF27D63') used by both the short link (avibase.ca/<id>) and the
     full page (species.jsp?avibaseid=<id>). Both dicts are empty when the v2026
-    file isn't present, so the link is simply omitted.
-    """
+    file isn't present, so the link is simply omitted. (Result cached per
+    file+mtime; see _cached_loader.)"""
+    return _cached_loader(Path(data_dir) / TAXONOMY_2026, _load_avibase_uncached)
+
+
+def _load_avibase_uncached(p: Path) -> tuple[dict[str, str], dict[str, str]]:
     by_sci: dict[str, str] = {}
     by_common: dict[str, str] = {}
-    p = Path(data_dir) / TAXONOMY_2026
     if not p.is_file():
         return by_sci, by_common
     try:
@@ -681,8 +761,14 @@ _FOLDER_YYMM = re.compile(r"(?:^|[^0-9])(\d{4})(?:[-_]|$)")
 def folder_date(path: Path) -> datetime | None:
     """Guess a capture date from folder names like '260128-Botanic_Garden'
     (YYMMDD) inside '2601-Singapur' (YYMM). Returns None if nothing parses."""
-    # YYMMDD from the capture's own folder, then YYMM from its parent
+    # YYMMDD from the capture's own folder, then YYMM from its parent. The YYMM
+    # fallback must also look at the capture's own folder and grandparent: a
+    # flat layout ('2601-Singapur/IMG_0001.jpg') or one sublevel deeper
+    # ('2601-Singapur/sub/IMG_0001.jpg') has the YYMM folder one or two levels
+    # up - the old code only checked the great-grandparent, so those layouts
+    # silently lost the date and fell back to 'today'.
     for d, full in ((path.parent, True), (path.parent.parent, True),
+                    (path.parent, False), (path.parent.parent, False),
                     (path.parent.parent.parent, False)):
         m = _FOLDER_YYMMDD.search(d.name) if full else _FOLDER_YYMM.search(d.name)
         if not m:
@@ -719,10 +805,12 @@ def load_checklist(path: Path) -> list[str]:
     if not path:
         return species
     try:
+        seen: set[str] = set()
         with open(path, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 name = (row.get("Species") or "").strip()
-                if name and name not in species:
+                if name and name.lower() not in seen:
+                    seen.add(name.lower())
                     species.append(name)
     except OSError:
         pass
@@ -828,8 +916,22 @@ class CentralChecklists:
             with open(path, newline="", encoding="utf-8-sig") as f:
                 for row in csv.DictReader(f):
                     name = (row.get("Species") or "").strip()
-                    d = _parse_checklist_date(row.get("Observation Date"))
-                    if not name or d is None:
+                    if not name:
+                        continue
+                    date_cell = (row.get("Observation Date") or "").strip()
+                    overflow = row.get(None)
+                    if overflow:
+                        # An UNQUOTED 'Jan 28, 2026' (the format this code's
+                        # docs advertise) is split by the CSV parser: the date
+                        # reads 'Jan 28' and the ', 2026' lands in DictReader's
+                        # overflow bucket - every row was silently skipped.
+                        # Rejoin; the comma was consumed as a field delimiter.
+                        # Quoted dates (the real eBird export quotes them) have
+                        # no overflow and are untouched.
+                        date_cell = (date_cell + "," +
+                                     ",".join(str(x) for x in overflow)).strip()
+                    d = _parse_checklist_date(date_cell)
+                    if d is None:
                         continue
                     rows.append([name, d.strftime("%Y-%m-%d"), "central-checklist"])
         except OSError:
@@ -1121,6 +1223,9 @@ def _encode_text_name(backbone, name: str) -> np.ndarray:
     return feats.cpu().numpy().astype(np.float32)
 
 
+_APPEND_CHUNK = 100   # species encoded before one matrix rebuild + disk save
+
+
 class SpeciesEmbeddingCache:
     """Reusable on-disk per-species text-embedding cache.
 
@@ -1210,11 +1315,24 @@ class SpeciesEmbeddingCache:
         return vec
 
     def _append(self, name: str, vec: np.ndarray):
-        row = vec.reshape(1, -1).astype(np.float32)
-        self._matrix = (row if self._matrix.shape[0] == 0
-                        else np.vstack([self._matrix, row]))
-        self._names.append(name)
-        self._index[name] = len(self._names) - 1
+        self._append_block([name], [vec])
+
+    def _append_block(self, names: list[str], vecs: list[np.ndarray]):
+        """Append a batch of (name, vec) rows with ONE matrix rebuild and ONE
+        disk save for the whole block.
+
+        The old _append() saved the entire growing .npy to disk on EVERY
+        species (np.save + two os.replace per name) - a ~1500-species
+        `--cache build` did 1500 full rewrites of a multi-MB file. Batching
+        keeps the on-disk layout identical (same index.json / embeddings.npy
+        format, still atomically replaced) and crash-resumability (at most a
+        block of _APPEND_CHUNK in-progress species is lost on a crash)."""
+        block = np.vstack([v.reshape(1, -1).astype(np.float32) for v in vecs])
+        self._matrix = (block if self._matrix.shape[0] == 0
+                        else np.vstack([self._matrix, block]))
+        for n in names:
+            self._names.append(n)
+            self._index[n] = len(self._names) - 1
         self._save()
 
     def matrix_for(self, names: list[str], backbone,
@@ -1228,10 +1346,17 @@ class SpeciesEmbeddingCache:
             self._reset()          # different model -> rebuild for this one
             self._model = model
         miss = [n for n in names if n not in self._index]
-        for j, n in enumerate(miss, 1):
-            if on_progress:
-                on_progress(n, j, len(miss))
-            self._append(n, _encode_text_name(backbone, n))
+        if miss:
+            pending_n: list[str] = []
+            pending_v: list[np.ndarray] = []
+            for j, n in enumerate(miss, 1):
+                if on_progress:
+                    on_progress(n, j, len(miss))
+                pending_n.append(n)
+                pending_v.append(_encode_text_name(backbone, n))
+                if len(pending_n) >= _APPEND_CHUNK or j == len(miss):
+                    self._append_block(pending_n, pending_v)
+                    pending_n, pending_v = [], []
         cols = [self._matrix[self._index[n]] for n in names]
         return np.stack(cols, axis=1)
 
@@ -2247,7 +2372,12 @@ def load_taxonomy_hierarchy(path: Path | None) -> dict[str, tuple[str, str]]:
     """sci-name (lowercased) -> (order, family) from the Clements v2026
     integrated checklist. The v2023 eBird API file has no order/family columns,
     so installs using it simply get an empty map (order/family are then omitted
-    from the DarwinCore mirror rather than guessed)."""
+    from the DarwinCore mirror rather than guessed). (Result cached per
+    file+mtime; see _cached_loader.)"""
+    return _cached_loader(path, _load_taxonomy_hierarchy_uncached)
+
+
+def _load_taxonomy_hierarchy_uncached(path: Path | None) -> dict[str, tuple[str, str]]:
     hier: dict[str, tuple[str, str]] = {}
     if not path:
         return hier
@@ -2403,12 +2533,20 @@ def save_manifest(path: Path, manifest: dict):
 def _low_confidence_review(manifest: dict) -> list[tuple[float, str, str]]:
     """Sorted (confidence, species, folder/stem) list of low-confidence
     captures from the manifest, least-confident first. Used for the review
-    summary and for the in-TUI rerun offer."""
-    return sorted(
-        ((float(e.get("confidence", 0.0)), e.get("species", "?"),
-          Path(k).parent.name + "/" + Path(k).stem)
-         for k, e in manifest.items() if e.get("status") == "low-confidence"),
-        key=lambda t: t[0])
+    summary and for the in-TUI rerun offer. Tolerant of a hand-edited manifest
+    (a non-numeric confidence is treated as 0.0 rather than crashing the end
+    summary)."""
+    rows: list[tuple[float, str, str]] = []
+    for k, e in manifest.items():
+        if e.get("status") != "low-confidence":
+            continue
+        try:
+            conf = float(e.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            conf = 0.0
+        rows.append((conf, e.get("species", "?"),
+                     Path(k).parent.name + "/" + Path(k).stem))
+    return sorted(rows, key=lambda t: t[0])
 
 
 def run_confirm(root: Path, photo: str | None, species: str | None,
@@ -3228,6 +3366,10 @@ def main():
                          sample_dates=args.sample_dates,
                          subnational=args.subnational)
         except (ValueError, RuntimeError, OSError, KeyError) as e:
+            if _is_write_error(e):
+                sys.exit(f"birdid: ERROR: {e}\n"
+                         f"Writing was rejected - the destination is "
+                         f"read-only or unwritable. {_write_rejection_hint()}")
             sys.exit(f"birdid: ERROR: {e}")
         return
 
@@ -3263,6 +3405,10 @@ def main():
                       + (f", {skipped} already carried that confirmation"
                          if skipped else ""))
         except (ValueError, OSError, RuntimeError) as e:
+            if _is_write_error(e):
+                sys.exit(f"birdid: ERROR: {e}\n"
+                         f"Writing was rejected - the photo folder is "
+                         f"read-only or unwritable. {_write_rejection_hint()}")
             sys.exit(f"birdid: ERROR: {e}")
         return
 
@@ -3296,6 +3442,37 @@ def main():
     manifest_path = Path(args.manifest) if args.manifest else root / "birdid_manifest.json"
     manifest = load_manifest(manifest_path)
 
+    # --- write probe: fail fast on a read-only destination ---------------
+    # The pipeline writes <base>.xmp sidecars + a manifest INTO the photo
+    # folder. On a read-only mount (external drive mounted ro, no write
+    # permission) every write fails with EROFS/EACCES - but only AFTER the
+    # model has warmed and the photos have been classified, which used to end
+    # in a bare 'FATAL: [Errno 13] Permission denied' that explained nothing.
+    # Probe the folder now (before the TUI and any model work) so a read-only
+    # drive is reported clearly and nothing expensive is wasted. --dry-run
+    # writes nothing, so it skips the probe. The probe file is removed again;
+    # if the unlink somehow fails it is a 20-byte dotfile, harmless.
+    if not args.dry_run:
+        probe = root / ".birdid-write-test"
+        try:
+            # A stale probe file (left by a run killed between create+unlink)
+            # must not be misread as 'cannot write' via EEXIST - clear it first.
+            if probe.exists():
+                probe.unlink()
+            with open(probe, "xb") as f:
+                f.write(b"birdid write probe")
+        except OSError as e:
+            sys.exit(
+                f"birdid: ERROR: cannot write into the photo folder {root}:\n"
+                f"  {e}\n"
+                f"The pipeline must write <base>.xmp sidecars and a manifest "
+                f"there. {_write_rejection_hint()}")
+        else:
+            try:
+                probe.unlink()
+            except OSError:
+                pass
+
     tui = TUI(enabled=not args.no_tui)
     tui.start()
     tui_thread = threading.Thread(target=tui.run_loop, daemon=True)
@@ -3308,6 +3485,14 @@ def main():
     kept_n = 0
     kept_lines: list[str] = []
     lc_review: list[tuple[float, str, str]] = []
+    # write-state for the end summary: whether the manifest was ever saved, and
+    # the first write rejection seen (a read-only drive must not end with
+    # 'N errors -> manifest <path>' as if the manifest was written).
+    manifest_saved = False
+    manifest_err = ""
+    write_blocked = False
+    write_blocked_err = ""
+    sidecars_written = 0
     try:
         # --- Phase 1: scan & classify ---
         tui.set(phase="scanning", stage="scan", message="walking folder tree")
@@ -3474,8 +3659,23 @@ def main():
             burst_results: dict = {}      # str(primary.resolve()) -> shared result
             burst_done: set = set()       # group indices already classified
 
+            # Persist the manifest, remembering whether/why it failed so the
+            # end summary can say so honestly (a read-only drive must not end
+            # with '-> manifest <path>' as if the file was written).
+            def _save_manifest():
+                nonlocal manifest_saved, manifest_err
+                try:
+                    save_manifest(manifest_path, manifest)
+                    manifest_saved = True
+                    manifest_err = ""
+                except OSError as e:
+                    manifest_err = str(e)
+                    raise
+
             # --- Phase 3: process ---
             tui.set(phase="running")
+            stop_early = False            # set when no result can be saved
+            stop_early_note = ""
             for i, cap in enumerate(pending, 1):
                 if stop.is_set() or (args.max and i > args.max):
                     break
@@ -3631,6 +3831,7 @@ def main():
                         write_sidecar(sidecar, result, region, month, dt, status, args,
                                       scientific=scientific, avibase_url=avibase_url,
                                       avibase_id=avibase_id)
+                        sidecars_written += 1
                         manifest[str(sidecar)] = {
                             "files": [str(f) for f in cap_files],
                             "sidecar": str(sidecar), "region": region, "month": month,
@@ -3646,7 +3847,7 @@ def main():
                             "central_added": "; ".join(central_added),
                             "central_outside": "; ".join(central_outside),
                         }
-                        save_manifest(manifest_path, manifest)   # resumable: save after every capture
+                        _save_manifest()   # resumable: save after every capture
 
                         report_rows.append({
                             "capture": cap.base, "file": str(primary), "viewable": primary.name,
@@ -3674,41 +3875,86 @@ def main():
                     status = "error"
                     error_n += 1
                     last = f"ERROR: {e}"
-                    try:
-                        write_sidecar(sidecar, {}, region if "region" in dir() else args.region,
-                                      month if "month" in dir() else 1, None, "error", args, error=str(e))
-                        manifest[str(sidecar)] = {"files": [str(f) for f in cap_files],
-                                                  "sidecar": str(sidecar),
-                                                  "status": "error", "error": str(e),
-                                                  "pipelineVersion": PIPELINE_VERSION,
-                                                  "ts": datetime.now().isoformat(timespec="seconds"),
-                                                  "alternatives": [], "reasoning": str(e)[:500],
-                                                  "datetime": "",
-                                                  "central_added": "", "central_outside": ""}
-                        save_manifest(manifest_path, manifest)
-                        report_rows.append({"capture": cap.base, "file": str(primary), "viewable": primary.name,
-                                            "region": "", "month": "", "species": "", "scientific_name": "",
-                                            "confidence": "", "status": "error", "gps": "", "date_source": "",
-                                            "alternatives": "", "reasoning": str(e)[:500], "avibase_url": "",
-                                            "datetime": "",
-                                            "central_added": "", "central_outside": ""})
-                    except Exception as e2:  # noqa: BLE001
-                        last = f"ERROR (write failed too): {e2}"
-                        tui.plain_line(f"  {last}")
+                    if _is_write_error(e):
+                        # The destination rejected the write (read-only mount,
+                        # no write permission, disk full). This will fail for
+                        # every capture, so do NOT retry writing an 'error'
+                        # sidecar + manifest here (it would fail identically -
+                        # the old code produced the confusing 'ERROR (write
+                        # failed too)' cascade). Remember the cause for the end
+                        # summary, and stop the loop on a whole-filesystem
+                        # refusal (EROFS) or a full disk (ENOSPC): no result
+                        # can be saved for any remaining capture.
+                        if not write_blocked:
+                            write_blocked = True
+                            write_blocked_err = str(e)
+                        if isinstance(e, OSError) and e.errno in (
+                                errno.EROFS, errno.ENOSPC):
+                            stop_early = True
+                            stop_early_note = (
+                                f"{len(pending) - i} capture(s) left "
+                                f"unprocessed - the photo folder cannot be "
+                                f"written to (read-only or full), so no "
+                                f"result could be saved for them")
+                    else:
+                        # A genuine per-capture error (model, bad file, ...):
+                        # try to record it in the sidecar + manifest so the
+                        # run stays resumable.
+                        try:
+                            write_sidecar(sidecar, {}, region if "region" in dir() else args.region,
+                                          month if "month" in dir() else 1, None, "error", args, error=str(e))
+                            manifest[str(sidecar)] = {"files": [str(f) for f in cap_files],
+                                                      "sidecar": str(sidecar),
+                                                      "status": "error", "error": str(e),
+                                                      "pipelineVersion": PIPELINE_VERSION,
+                                                      "ts": datetime.now().isoformat(timespec="seconds"),
+                                                      "alternatives": [], "reasoning": str(e)[:500],
+                                                      "datetime": "",
+                                                      "central_added": "", "central_outside": ""}
+                            _save_manifest()
+                            report_rows.append({"capture": cap.base, "file": str(primary), "viewable": primary.name,
+                                                "region": "", "month": "", "species": "", "scientific_name": "",
+                                                "confidence": "", "status": "error", "gps": "", "date_source": "",
+                                                "alternatives": "", "reasoning": str(e)[:500], "avibase_url": "",
+                                                "datetime": "",
+                                                "central_added": "", "central_outside": ""})
+                        except Exception as e2:  # noqa: BLE001
+                            # Keep the ORIGINAL error visible: a recording
+                            # failure (e2) must not hide why the capture failed
+                            # (e) - that was the old confusing behaviour.
+                            last = f"ERROR (could not record): {e2}  [cause: {e}]"
+                            if _is_write_error(e2) and not write_blocked:
+                                write_blocked = True
+                                write_blocked_err = str(e2)
+                            tui.plain_line(f"  {last}")
 
                 tui.set(processed=i, done=done_n + lc_new, error=error_n, pending=len(pending) - i,
                         current="", stage="", message="", last=last)
                 tui.plain_line(f"[{i}/{len(pending)}] {rel}: {last}")
+                if stop_early:
+                    summary_lines.append(f"note: {stop_early_note}")
+                    break
 
             # --- report ---
             # Per-folder full-snapshot reports + a parent index (feature 1).
-            written = write_folder_reports(root, manifest, report_rows)
-            # --report <path> still writes a flat aggregate of this run.
-            if args.report and report_rows:
-                flat = Path(args.report)
-                flat.parent.mkdir(parents=True, exist_ok=True)
-                _write_csv(flat, report_rows)
-                written.append(str(flat))
+            # A read-only / full destination must NOT abort the run and hide
+            # the summary behind a bare FATAL: catch the write failure, say so
+            # clearly, and still print the run's verdict.
+            report_error = ""
+            try:
+                written = write_folder_reports(root, manifest, report_rows)
+                # --report <path> still writes a flat aggregate of this run.
+                if args.report and report_rows:
+                    flat = Path(args.report)
+                    flat.parent.mkdir(parents=True, exist_ok=True)
+                    _write_csv(flat, report_rows)
+                    written.append(str(flat))
+            except OSError as e:
+                report_error = str(e)
+                if not write_blocked:
+                    write_blocked = True
+                    write_blocked_err = str(e)
+                written = []
             tui.set(phase="done", message="finished")
             if args.force:
                 summary_lines.append(
@@ -3717,11 +3963,37 @@ def main():
                     "(all other XMP content - e.g. metadata from your photo "
                     "software - preserved). User-confirmed captures were "
                     "exempt (un-confirm with 'birdid --unconfirm' to re-ID).")
-            summary_lines.append(
-                f"\ndone: {done_n} tagged, {lc_new} low-confidence, "
-                f"{confirmed_n} confirmed, {nd_n} no-data, "
-                f"{nb_n} non-bird, "
-                f"{error_n} errors -> manifest {manifest_path}")
+            # The manifest line must be honest: '-> manifest <path>' only when
+            # the file was actually saved. A read-only drive gets '(NOT saved)'.
+            if manifest_err:
+                summary_lines.append(
+                    f"\ndone: {done_n} tagged, {lc_new} low-confidence, "
+                    f"{confirmed_n} confirmed, {nd_n} no-data, "
+                    f"{nb_n} non-bird, "
+                    f"{error_n} errors -> manifest {manifest_path} "
+                    f"(NOT saved: {manifest_err})")
+            else:
+                summary_lines.append(
+                    f"\ndone: {done_n} tagged, {lc_new} low-confidence, "
+                    f"{confirmed_n} confirmed, {nd_n} no-data, "
+                    f"{nb_n} non-bird, "
+                    f"{error_n} errors -> manifest {manifest_path}")
+            if write_blocked:
+                if sidecars_written == 0 and not manifest_saved and not written:
+                    saved_what = ("Nothing could be saved - the photo folder "
+                                  "is not writable. ")
+                else:
+                    saved_what = ("Some files could not be saved; the "
+                                  "manifest/reports above may be missing or "
+                                  "incomplete. ")
+                summary_lines.append(
+                    f"\nWRITE-BLOCKED: the photo folder could not be written to "
+                    f"({write_blocked_err}). {saved_what}"
+                    + _write_rejection_hint())
+            if report_error:
+                summary_lines.append(
+                    f"reports not written: {report_error} "
+                    f"(birdid_report.csv / birdid_index.csv)")
             if args.burst and burst_groups:
                 summary_lines.append(
                     f"burst mode: {len(burst_groups)} burst(s) grouped by EXIF "
@@ -3739,9 +4011,17 @@ def main():
             # manifest, so running a parent after its subfolders were processed
             # in separate runs still yields the hierarchical index.
             if not args.dry_run:
-                written = write_folder_reports(root, manifest, [])
-                for p in written:
-                    summary_lines.append(f"wrote: {p}")
+                try:
+                    written = write_folder_reports(root, manifest, [])
+                    for p in written:
+                        summary_lines.append(f"wrote: {p}")
+                except OSError as e:
+                    if not write_blocked:
+                        write_blocked = True
+                        write_blocked_err = str(e)
+                    summary_lines.append(
+                        f"reports not written: {e} "
+                        f"(birdid_report.csv / birdid_index.csv)")
             tui.set(phase="done", message="nothing to process")
 
         # --- in-TUI offer for the low-confidence review pass ---
@@ -3782,7 +4062,23 @@ def main():
         summary_lines = ["\ninterrupted. rerun the same command to resume."]
     except Exception as e:  # noqa: BLE001
         tui.set(phase="error", message=str(e))
-        summary_lines = [f"\nFATAL: {e}"]
+        # APPEND (not replace): a genuine FATAL (model load, exiftool batch,
+        # ...) must not hide an already-printed scan/status summary. This used
+        # to wipe summary_lines, so a read-only drive ended as a bare
+        # 'FATAL: [Errno 13] Permission denied' with no explanation.
+        if _is_write_error(e):
+            if not write_blocked:
+                write_blocked = True
+                write_blocked_err = str(e)
+            summary_lines.append(
+                f"\nFATAL: could not write results - {e}")
+            if not manifest_saved:
+                summary_lines.append(
+                    f"WRITE-BLOCKED: the photo folder could not be written to "
+                    f"({write_blocked_err}). Nothing could be saved. "
+                    f"{_write_rejection_hint()}")
+        else:
+            summary_lines.append(f"\nFATAL: {e}")
         fatal = True
     finally:
         tui.stop_flag.set()
