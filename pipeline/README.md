@@ -442,20 +442,21 @@ How birdid handles it:
   `classify_partial_prefilter` for the exact fallback.
 - Once birdid identifies the species, the **pin** is consumed: `bird:status`
   becomes `done` / `low-confidence`, so the partial marker cannot linger as the
-  record's "current" verdict. The group's `dwc:Taxon` ladder is **kept** — it is
-  the identified species' class, which birdid knows for certain because the
-  species was scored inside exactly that group. The viewer uses that ladder to
-  confirm the resolved species in its real group (e.g. a mammal resolved to
-  "Cat" stays `Mammalia`) instead of defaulting it into `Aves` when the model
-  label is not in the bundled bird taxonomy. (Only `--confirm` writes the full,
+  record's "current" verdict. The group's `dwc:Taxon` ladder is **kept**.
+- The confirmed ladder is **monotonic**: the user has already verified the
+  group, so no model run ever overrides or drops it — it can only be **added
+  to**. The species identification keeps it (it is the identified species'
+  class — birdid knows it for certain because the species was scored inside
+  exactly that group), and a later `--confirm` **completes** it (e.g. a mammal
+  resolved to "Cat" stays `Mammalia` instead of defaulting into `Aves` when
+  the model label is not in the bundled bird taxonomy). The only way to discard
+  a confirmed ladder is `--unconfirm`. (Only `--confirm` writes the full,
   verified per-species dwc mirror.)
-- `--analyze-all` is the **escape hatch**: it explicitly means "no prefilter",
-  so it overrides the group pin and re-identifies the partial against the
-  **whole tree of life** instead of its pinned group. The old pinned ladder is
-  then dropped (the unrestricted verdict supersedes the pin). This is the
-  complement of `--partial-only` (group-restricted) and `--force` (which still
-  honors the pin — a partial is a deliberate restriction, not a verdict to
-  override).
+- `--analyze-all` changes only the **search**: it means "no prefilter", so a
+  partial is re-identified against the **whole tree of life** instead of its
+  pinned group (the complement of `--partial-only`). The pin's `bird:status` is
+  still consumed (the partial is resolved to a species) and the user-confirmed
+  ladder is still kept — confirmed taxonomy is never overridden by a model run.
 
 ### Refining only the partials: `--partial-only`
 

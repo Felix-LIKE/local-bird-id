@@ -2298,22 +2298,18 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # bird:* fields are always re-written below, so nothing is lost, and the
     # `owned` flag above was already read from the untouched tree.
     # A GROUP-partial prefilter is consumed by this identification: the viewer
-    # pinned the group with bird:status='partial' + a dwc:Taxon ladder. Whether
-    # the ladder survives depends on HOW the identification ran (see below):
-    #   - the group was honored (a partial rerun scored the species inside
-    #     exactly that group) -> the ladder is KEPT, because it is the
-    #     identified species' real class (the viewer confirms the resolved
-    #     species in that group instead of defaulting it into Aves);
-    #   - --analyze-all OVERRODE the pin (whole-tree search) -> the stale
-    #     pinned ladder is removed, since the unrestricted verdict supersedes
-    #     the group pin.
-    # (Only --confirm writes the full per-species dwc mirror; the partial
-    # ladder is a class-only ladder.)
-    was_partial = False
-    for el in _find(root, "//bird:status"):
-        if el.text and el.text.strip() == "partial":
-            was_partial = True
-            break
+    # pinned the group with bird:status='partial' + a dwc:Taxon ladder. The
+    # ladder is ALWAYS KEPT: it is USER-CONFIRMED taxonomy (the user verified
+    # "this subject is in this group"), and a user confirmation is monotonic —
+    # a model run may ADD to it (the species identification below, and a later
+    # --confirm that completes it) but never override or drop it. So whether
+    # the rerun honored the pin (--partial-only, group-restricted search) or
+    # lifted the search restriction (--analyze-all, whole-tree search), the
+    # ladder survives as the identified species' class — the viewer confirms a
+    # resolved species (e.g. "Cat") in its real group (Mammalia) instead of
+    # defaulting it into Aves. The only way to drop a confirmed ladder is
+    # --unconfirm. (Only --confirm writes the full per-species dwc mirror; the
+    # partial ladder is a class-only ladder.)
     for el in list(desc):
         if el.tag.startswith(f"{{{BIRD_NS}}}"):
             desc.remove(el)
@@ -2360,16 +2356,8 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
         _set_text(desc, "reasoning", BIRD_NS, reasoning[:1000])
 
         # The group-partial pin (bird:status='partial') is consumed by this
-        # identification — status becomes 'done'. Its dwc:Taxon ladder is KEPT
-        # when the group was honored (the species was scored inside that group,
-        # so the ladder is its real class — the viewer confirms in the right
-        # group, e.g. a mammal resolved to "Cat" stays Mammalia). When
-        # --analyze-all overrode the pin (result['_pin_overridden']), the
-        # whole-tree verdict supersedes it, so the stale pinned ladder is
-        # dropped rather than kept as a wrong "current" class.
-        if was_partial and result.get("_pin_overridden"):
-            for el in desc.findall(f"{{{DWC_NS}}}Taxon"):
-                desc.remove(el)
+        # identification — status becomes 'done' — and its user-confirmed
+        # dwc:Taxon ladder is kept (never overridden; see the note above).
 
         if owned and getattr(cfg, "dc_fields", False):
             # dc:description (human readable) and dc:subject keywords - only on
@@ -2488,7 +2476,7 @@ def _load_taxonomy_hierarchy_uncached(path: Path | None) -> dict[str, tuple[str,
 
 
 def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
-                    order="", family="", verbatim=""):
+                    order="", family="", verbatim="", group_ladder=None):
     """Write (or, with ``species=None``, clear) the DarwinCore mirror of a
     user confirmation, as the standard ExifTool-readable nested block:
 
@@ -2502,6 +2490,13 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
     who assigned the taxon, so a name there would be an unfounded claim (the
     user only wants it present when that data is actually known). ``recordedBy``
     is only written when the photographer is actually readable off the photo.
+
+    For a species the eBird taxonomy cannot place (e.g. a BioCLIP tree-of-life
+    label like "Cat"), the class is NOT assumed to be Aves: ``group_ladder``
+    carries the user-confirmed group ladder (a group-partial pin, captured by
+    the caller before the pin is consumed), and its kingdom/phylum/class are
+    kept, so the confirmation COMPLETES the user's ladder instead of overriding
+    it. (A species resolvable in eBird is a bird and is written as Aves.)
 
     On unconfirm the whole block is removed so the ``verified`` claim can't go
     stale; on a re-confirm the block is refreshed in place.
@@ -2533,8 +2528,21 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
         etree.SubElement(ident, f"{{{DWC_NS}}}verbatimIdentification").text = verbatim
 
     tax = res("Taxon")
-    for local, val in (("kingdom", "Animalia"), ("phylum", "Chordata"),
-                       ("class", "Aves"), ("order", order), ("family", family)):
+    # A species resolvable in the eBird taxonomy is a bird -> Aves. Anything
+    # else ("Cat" is a ToL label, not in eBird) is NEVER asserted to be a bird:
+    # keep the user-confirmed group ladder (from the partial pin), or write no
+    # class at all.
+    if scientific:
+        ladder = {"kingdom": "Animalia", "phylum": "Chordata", "class": "Aves"}
+    else:
+        gl = group_ladder or {}
+        ladder = {"kingdom": gl.get("kingdom", ""),
+                  "phylum": gl.get("phylum", ""),
+                  "class": gl.get("class", "")}
+    for local, val in (("kingdom", ladder["kingdom"]),
+                       ("phylum", ladder["phylum"]),
+                       ("class", ladder["class"]),
+                       ("order", order), ("family", family)):
         if val:
             etree.SubElement(tax, f"{{{DWC_NS}}}{local}").text = val
     if scientific:
@@ -2579,6 +2587,23 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
             desc.remove(el)
         _set_dwc_mirror(desc, species=None)
     else:
+        # Completing a group-partial (no bird:confirmed yet): the dwc:Taxon
+        # block, if any, is the user-confirmed GROUP ladder (class-only: no
+        # order/family). Capture it BEFORE setting bird:confirmed below, so a
+        # species the eBird taxonomy can't place (e.g. the BioCLIP ToL label
+        # "Cat") is confirmed in its user-confirmed class instead of being
+        # forced into Aves — user-confirmed taxonomy is monotonic (a model run
+        # or a later confirm may ADD to it, never override it).
+        group_ladder = {}
+        if not desc.findall(f"{{{BIRD_NS}}}confirmed"):
+            tax_els = desc.findall(f"{{{DWC_NS}}}Taxon")
+            if tax_els and tax_els[0].find(f"{{{DWC_NS}}}order") is None \
+                    and tax_els[0].find(f"{{{DWC_NS}}}family") is None:
+                for rank in ("kingdom", "phylum", "class"):
+                    for el in tax_els[0].findall(f"{{{DWC_NS}}}{rank}"):
+                        if el.text and el.text.strip():
+                            group_ladder[rank] = el.text.strip()
+                            break
         _set_list(desc, "species", BIRD_NS, [species], "Seq")
         _set_list(desc, "confidence", BIRD_NS, ["1.00"], "Seq")
         _set_text(desc, "summary", BIRD_NS, f"{species} 100%")
@@ -2590,7 +2615,7 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
         _set_text(desc, "status", BIRD_NS, "done")
         _set_dwc_mirror(desc, species=species, scientific=scientific,
                         photographer=photographer, order=order, family=family,
-                        verbatim=verbatim)
+                        verbatim=verbatim, group_ladder=group_ladder)
     _canonicalize_desc(desc)
     _ensure_xpacket(root)
     out = io.BytesIO()
@@ -3908,25 +3933,25 @@ def main():
                                        prefilter.get("kingdom") or "?")
                         if getattr(args, "analyze_all", False) and not args.partial_only:
                             # --analyze-all: the user asked for a fresh,
-                            # UNRESTRICTED analysis. The group pin is a search
-                            # restriction and --analyze-all explicitly means
-                            # "no prefilter", so override the pin and score
+                            # UNRESTRICTED search, so the group pin is not used
+                            # as a search restriction — the species is scored
                             # against the whole tree of life (the complement of
-                            # --partial-only). The old pinned ladder is dropped
-                            # by write_sidecar (result['_pin_overridden']).
+                            # --partial-only). This changes only the SEARCH:
+                            # the pin is still consumed (status -> done) and
+                            # its user-confirmed ladder is still kept by
+                            # write_sidecar — confirmed taxonomy is never
+                            # overridden by a model run.
                             tui.set(stage="classify",
                                     message=f"classifying {primary.name} "
                                             f"(--analyze-all, whole tree)")
                             result = classifier.classify_no_prefilter(
                                 primary, taxonomy, region)
-                            result["_pin_overridden"] = True
                         else:
                             tui.set(stage="classify",
                                     message=f"classifying {primary.name} "
                                             f"(group '{group_label}')")
                             result = classifier.classify_partial_prefilter(
                                 primary, taxonomy, prefilter)
-                            result["_pin_overridden"] = False
                     elif sum(len(st) for _, st in ladder) == 0:
                         if region not in no_data_choice_cache:
                             no_data_choice_cache[region] = ask_no_data_choice(tui, region)
