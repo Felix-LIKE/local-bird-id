@@ -154,7 +154,16 @@ subfolder called `pipeline/`:
   ```
 
 - **If you don't** — open the GitHub page, click the green **Code** button →
-  **Download ZIP**, unpack the archive, then `cd` into the unpacked folder.
+  **Download ZIP**, unpack it into your home folder and rename the extracted
+  folder to `local-bird-id` (GitHub names it `local-bird-id-main` by
+  default). A fresh terminal starts in your home folder, so `cd
+  local-bird-id` — and every later step — then just works:
+
+  ```bash
+  unzip ~/Downloads/local-bird-id-main.zip -d ~
+  mv ~/local-bird-id-main ~/local-bird-id
+  cd local-bird-id
+  ```
 
   (In case you don't have `git` but want to use it, follow [Step 1 — Install
   the basic tools](#step-1--install-the-basic-tools) of the manual install,
@@ -242,8 +251,19 @@ cd local-bird-id
 ```
 
 **Option B — no git, download a ZIP:** open the GitHub page, click the green
-**Code** button → **Download ZIP**, unpack it, then `cd` into the unpacked
-folder (the one that contains a subfolder called `pipeline/`).
+**Code** button → **Download ZIP** and unpack it so the code lands in
+`~/local-bird-id`. GitHub names the extracted folder `local-bird-id-main`,
+so rename it after unpacking:
+
+```bash
+unzip ~/Downloads/local-bird-id-main.zip -d ~
+mv ~/local-bird-id-main ~/local-bird-id
+cd ~/local-bird-id
+```
+
+`cd local-bird-id` in a fresh terminal works too — it starts in your home
+folder. Either way you end up in the folder that contains a subfolder called
+`pipeline/`.
 
 > **Cloning tips.** If HTTPS clone asks for a username and password, use a
 > GitHub **personal access token** as the password (Settings → Developer
@@ -348,9 +368,9 @@ is the step you missed.
 
 > **Installed from a ZIP?** There is no git history to pull. Re-download the
 > latest ZIP from the GitHub page (green **Code** button → **Download ZIP**),
-> unpack it over your existing folder (keeping the `ebird/` data and your
-> `pipeline/.venv/`), then re-run the installer once (`./bootstrap.sh`, or the
-> Step 3 pip line for a manual install).
+> unpack it over your existing `~/local-bird-id` folder (keeping the
+> `ebird/` data and your `pipeline/.venv/`), then re-run the installer once
+> (`./bootstrap.sh`, or the Step 3 pip line for a manual install).
 
 To see what changed in the new version, open the project's GitHub page and read
 the latest commits / release notes.
