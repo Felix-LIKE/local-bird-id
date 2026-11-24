@@ -2299,14 +2299,13 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # `owned` flag above was already read from the untouched tree.
     # A GROUP-partial prefilter is consumed by this identification: the viewer
     # pinned the group with bird:status='partial' + a dwc:Taxon ladder; once
-    # birdid has actually identified the species, that pin has served its
-    # purpose and must not linger as a stale "current" taxonomy (it is not a
-    # confirmed identification - only --confirm writes the real dwc mirror).
-    was_partial = False
-    for el in _find(root, "//bird:status"):
-        if el.text and el.text.strip() == "partial":
-            was_partial = True
-            break
+    # birdid has identified the species, the pin (status) is consumed but the
+    # ladder is KEPT — it is the identified species' class, which birdid knows
+    # for certain (the species was scored inside exactly that group). Keeping it
+    # lets the viewer confirm the resolved species (e.g. "Cat") in its real
+    # group (Mammalia) instead of defaulting it into Aves because the model
+    # label is not in the bundled bird taxonomy. (Only --confirm writes the full
+    # per-species dwc mirror; this is a class-only ladder and stays accurate.)
     for el in list(desc):
         if el.tag.startswith(f"{{{BIRD_NS}}}"):
             desc.remove(el)
@@ -2352,13 +2351,14 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
         reasoning = result.get("reasoning", "")
         _set_text(desc, "reasoning", BIRD_NS, reasoning[:1000])
 
-        # The group-partial pin (bird:status='partial' + dwc:Taxon ladder) is
-        # consumed by this identification: remove the stale prefilter ladder so
-        # it does not linger as the record's "current" taxonomy (the identified
-        # species' real ladder only appears via --confirm's dwc mirror).
-        if was_partial:
-            for el in desc.findall(f"{{{DWC_NS}}}Taxon"):
-                desc.remove(el)
+        # The group-partial pin (bird:status='partial') is consumed by this
+        # identification — status becomes 'done' — but its dwc:Taxon ladder is
+        # KEPT: it is the identified species' class, which birdid knows for
+        # certain (the species was scored inside exactly that group). The viewer
+        # uses it to confirm the resolved species in its real group (e.g. a
+        # mammal resolved to "Cat" stays Mammalia) instead of defaulting it
+        # into Aves because the model label is not in the bundled taxonomy.
+        # (Only --confirm writes the full per-species dwc mirror.)
 
         if owned and getattr(cfg, "dc_fields", False):
             # dc:description (human readable) and dc:subject keywords - only on

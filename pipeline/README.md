@@ -440,10 +440,15 @@ How birdid handles it:
   phylum `Chordata`, because the TreeOfLife label set splits reptiles across
   the squamate orders rather than one `Reptilia` class). See
   `classify_partial_prefilter` for the exact fallback.
-- Once birdid identifies the species, the stale group pin is **consumed**: the
-  `dwc:Taxon` ladder is removed and `bird:status` becomes `done` /
-  `low-confidence`, so the partial marker cannot linger as the record's
-  "current" taxonomy. (Only `--confirm` writes a real, verified dwc mirror.)
+- Once birdid identifies the species, the **pin** is consumed: `bird:status`
+  becomes `done` / `low-confidence`, so the partial marker cannot linger as the
+  record's "current" verdict. The group's `dwc:Taxon` ladder is **kept** — it is
+  the identified species' class, which birdid knows for certain because the
+  species was scored inside exactly that group. The viewer uses that ladder to
+  confirm the resolved species in its real group (e.g. a mammal resolved to
+  "Cat" stays `Mammalia`) instead of defaulting it into `Aves` when the model
+  label is not in the bundled bird taxonomy. (Only `--confirm` writes the full,
+  verified per-species dwc mirror.)
 
 ### Refining only the partials: `--partial-only`
 
