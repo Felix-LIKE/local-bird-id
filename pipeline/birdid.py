@@ -1714,16 +1714,38 @@ class BioclipClassifier(Classifier):
             row = rows[0] if rows else {}
         else:
             row = rows
-        # row keys: file_name, kingdom..genus, species (sci), common_name, score
-        species = str(row.get("common_name") or row.get("species") or "unknown")
+        # row keys: file_name, kingdom..genus, species (sci), common_name, score.
+        # pybioclip's `species` is the exact binomial scientific name (e.g.
+        # "Felis catus"); `common_name` is its vernacular (often empty, and
+        # occasionally non-English). Resolve against the eBird bird taxonomy
+        # first - trying both the bioclip common name AND the bioclip
+        # scientific name, since either may be the key eBird uses:
+        #   - a BIRD (e.g. a no-data-region fallback) gets its common name AND
+        #     scientific name from eBird, exactly as the ladder path does;
+        #   - anything not in eBird (a non-bird) keeps the exact scientific
+        #     name as the primary label, so the viewer's confirm lookup
+        #     resolves it there and supplies the common name from the
+        #     taxonomy store.
+        sci = str(row.get("species") or "").strip()
+        common = str(row.get("common_name") or "").strip()
         p = float(row.get("score", 0.0))
-        common, sci = normalize_species(species, tax)
+        bird_common, bird_sci = normalize_species(common, tax)
+        if not bird_sci and sci:
+            bird_common, bird_sci = normalize_species(sci, tax)
+        if bird_sci:
+            common, sci = bird_common, bird_sci
+        elif sci:
+            common = sci
+        else:
+            common = common or "unknown"
         return {
             "species": common,
             "scientific": sci,
             "confidence": round(p, 4),
             "alternatives": [],
-            "reasoning": f"BioCLIP-2: whole tree of life -> {common} {p*100:.0f}%",
+            "reasoning": f"BioCLIP-2: whole tree of life -> {common}"
+                         f"{f' ({sci})' if sci and sci != common else ''}"
+                         f" {p*100:.0f}%",
         }
 
     def classify_no_prefilter(self, image, tax, region: str) -> dict:

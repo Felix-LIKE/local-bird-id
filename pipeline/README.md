@@ -256,7 +256,9 @@ the layout and a worked example.
   expensive whole-tree-of-life stage is **skipped**, so non-bird shots cost
   almost nothing. `--analyze-all` disables the pre-filter: non-bird subjects
   get the full TreeOfLife species analysis, and previously skipped non-bird
-  captures are re-analysed on the next run.
+  captures are re-analysed on the next run. A non-bird species result keeps
+  its **scientific name** (e.g. "Felis catus"), so it can be resolved to a
+  common name by the viewer's confirm dialog against the taxonomy store.
 - **Burst mode (`--burst`, opt-in)**: a photographer holding down the shutter
   on a Canon 5D Mark IV (~7 fps) or R5 (12-20 fps) produces a burst of frames
   tens-to-hundreds of ms apart - all the same bird. `--burst` recognises these
@@ -351,10 +353,13 @@ friendly names instead of `XMP-ns0`) is in
 Names are normalised against the official eBird taxonomy: the model's answer is
 matched case-insensitively, a scientific-name answer is converted back to the
 common name, and dropped leading qualifiers are restored (e.g. "Blue Tit" ->
-"Eurasian Blue Tit", *Cyanistes caeruleus*). Unmatched names keep a blank
-scientific field and a note that the name has no vernacular name associated to
-it (not a spelling error — e.g. a bioclip-2 "Cat" label, which the bird
-taxonomy only carries as "Domestic Cat", is stored as given). The Avibase id comes from the
+"Eurasian Blue Tit", *Cyanistes caeruleus*). A whole-tree-of-life result (a
+non-bird analysed with `--analyze-all`, or a bird in a no-data region) keeps
+its **scientific name** from pybioclip — the exact binomial (e.g. "Felis
+catus") is always stored, and a bird in the eBird taxonomy additionally gets
+its eBird common name. A name that resolves to neither keeps a blank scientific
+field and a note that it has no vernacular name associated to it (not a
+spelling error). The Avibase id comes from the
 bundled Clements checklist (`eBird-Clements_Integrated_Checklist.csv`,
 'taxon concept ID' column); when that file is missing the Avibase fields are
 simply omitted. The same link is printed on the per-capture console line and
@@ -485,8 +490,8 @@ Every folder that has captures gets its own full-snapshot report
 `<folder>/birdid_report.csv` with one row per capture (this run + previously
 recorded, merged from the manifest): `capture, file, viewable, region, month,
 species, scientific_name, confidence, status, gps, date_source, alternatives,
-reasoning, avibase_url, datetime, central_added, central_outside`. Both
-`species` (common) and `scientific_name` are always recorded; `gps` /
+reasoning, avibase_url, datetime, central_added, central_outside`. `species` (the common name for birds, the exact scientific name for a
+non-bird whole-tree result) and `scientific_name` are always recorded; `gps` /
 `date_source` say where the location and date came from (embedded / folder-mean
 / none and exif / folder / today), `avibase_url` is the Avibase page for the top
 guess (blank when the bundled Clements file is unavailable), and
