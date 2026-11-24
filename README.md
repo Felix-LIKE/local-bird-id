@@ -149,7 +149,7 @@ subfolder called `pipeline/`:
 - **If you have `git`** — paste and run:
 
   ```bash
-  git clone https://github.com/Felix-LIKE/local-bird-id.git
+  git clone https://github.com/Felix1686/local-bird-id.git
   cd local-bird-id
   ```
 
@@ -237,7 +237,7 @@ The project lives on GitHub. Two ways to get it onto your computer.
 Paste this, then move into the new folder:
 
 ```bash
-git clone https://github.com/Felix-LIKE/local-bird-id.git
+git clone https://github.com/Felix1686/local-bird-id.git
 cd local-bird-id
 ```
 
@@ -248,7 +248,7 @@ folder (the one that contains a subfolder called `pipeline/`).
 > **Cloning tips.** If HTTPS clone asks for a username and password, use a
 > GitHub **personal access token** as the password (Settings → Developer
 > settings → Personal access tokens). With an SSH key set up, use
-> `git clone git@github.com:Felix-LIKE/local-bird-id.git` instead.
+> `git clone git@github.com:Felix1686/local-bird-id.git` instead.
 
 Run `pwd` afterwards and make sure it ends in `local-bird-id` — the remaining
 steps assume you are in that folder.

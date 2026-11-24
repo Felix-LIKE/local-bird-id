@@ -17,7 +17,7 @@
 #   ./bootstrap.sh --help         this text
 set -eu
 
-REPO_URL="https://github.com/Felix-LIKE/local-bird-id.git"
+REPO_URL="https://github.com/Felix1686/local-bird-id.git"
 VENV_DIR="pipeline/.venv"
 PIP_DEPS="pybioclip numpy lxml requests pillow"
 TORCH_INDEX="https://download.pytorch.org/whl/cpu"
