@@ -1738,6 +1738,63 @@ class BioclipClassifier(Classifier):
                                f"{result['confidence']*100:.0f}%")
         return result
 
+    def classify_partial_prefilter(self, image, tax, prefilter: dict) -> dict:
+        """Re-identify a GROUP-partial capture: the viewer pinned the subject's
+        group (mammal / insect / plant ...) but not the species, so birdid
+        scores the photo against ONLY that group's species instead of the whole
+        tree. `prefilter` is the full dwc:Taxon ladder
+        (``{'class':..., 'phylum':..., 'kingdom':...}``, missing ranks empty)
+        from the sidecar.
+
+        The pybioclip filter is built for the lowest rank present and, if that
+        exact value is not a rank in the ToL labels (e.g. the COL class
+        'Reptilia' does not exist there — reptiles are the squamate orders),
+        falls back to the next rank up the ladder (phylum, then kingdom). The
+        filtered embedding subset MUST be reset afterwards: pybioclip caches it
+        on the classifier object, so without the reset the very next
+        whole-tree predict would silently be restricted to this group too."""
+        tol = self._load_tol()
+        mask = None
+        used = None
+        for rank_name, rank_enum in (
+            ("class", self._Rank.CLASS),
+            ("phylum", self._Rank.PHYLUM),
+            ("kingdom", self._Rank.KINGDOM),
+        ):
+            value = (prefilter or {}).get(rank_name)
+            if not value:
+                continue
+            try:
+                candidate = tol.create_taxa_filter(rank_enum, [value])
+                if any(candidate):
+                    mask = candidate
+                    used = (rank_name, value)
+                    break
+            except ValueError:
+                # rank value absent from the ToL labels - widen to the rank
+                # above (class -> phylum -> kingdom).
+                continue
+        if mask is None:
+            self._report("classify", "no ToL label matches the partial "
+                                     "group - falling back to the whole tree")
+            return self._classify_tol(str(image), tax)
+        try:
+            tol.apply_filter(mask)
+            self._report("classify", f"group-partial prefilter "
+                                     f"{used[0]} '{used[1]}'")
+            result = self._classify_tol(str(image), tax)
+            result["reasoning"] = (f"BioCLIP-2: partial group prefilter "
+                                   f"({used[0]} '{used[1]}') -> "
+                                   f"{result['species']} "
+                                   f"{result['confidence']*100:.0f}%")
+            return result
+        finally:
+            # pybioclip caches the filtered subset on the classifier - reset so
+            # later whole-tree predicts (no-data, --analyze-all, the next
+            # partial with a different group) use the full tree again.
+            tol._subset_txt_embeddings = None
+            tol._subset_txt_names = None
+
     def warm(self):
         """Load the heavy BioCLIP 2 weights + precompute the coarse-stage
         embeddings up front (not lazily on the first photo), reporting progress
@@ -2240,6 +2297,16 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # they serialise as `bird:` regardless of the file that was parsed. All
     # bird:* fields are always re-written below, so nothing is lost, and the
     # `owned` flag above was already read from the untouched tree.
+    # A GROUP-partial prefilter is consumed by this identification: the viewer
+    # pinned the group with bird:status='partial' + a dwc:Taxon ladder; once
+    # birdid has actually identified the species, that pin has served its
+    # purpose and must not linger as a stale "current" taxonomy (it is not a
+    # confirmed identification - only --confirm writes the real dwc mirror).
+    was_partial = False
+    for el in _find(root, "//bird:status"):
+        if el.text and el.text.strip() == "partial":
+            was_partial = True
+            break
     for el in list(desc):
         if el.tag.startswith(f"{{{BIRD_NS}}}"):
             desc.remove(el)
@@ -2284,6 +2351,14 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
             _set_text(desc, "datetime", BIRD_NS, dt.strftime("%Y-%m-%d %H:%M:%S"))
         reasoning = result.get("reasoning", "")
         _set_text(desc, "reasoning", BIRD_NS, reasoning[:1000])
+
+        # The group-partial pin (bird:status='partial' + dwc:Taxon ladder) is
+        # consumed by this identification: remove the stale prefilter ladder so
+        # it does not linger as the record's "current" taxonomy (the identified
+        # species' real ladder only appears via --confirm's dwc mirror).
+        if was_partial:
+            for el in desc.findall(f"{{{DWC_NS}}}Taxon"):
+                desc.remove(el)
 
         if owned and getattr(cfg, "dc_fields", False):
             # dc:description (human readable) and dc:subject keywords - only on
@@ -2703,11 +2778,14 @@ def scan_folder(root: Path, manifest: dict, on_progress=None) -> list[Capture]:
 
 
 def sidecar_status(sidecar: Path):
-    """Return 'done' / 'low-confidence' / 'non-bird' / 'no-data' / 'error' /
-    None by parsing the sidecar. 'low-confidence' is kept distinct from 'done'
-    so a re-run can revisit (or skip) uncertain captures (see
+    """Return 'done' / 'low-confidence' / 'partial' / 'non-bird' / 'no-data' /
+    'error' / None by parsing the sidecar. 'low-confidence' is kept distinct
+    from 'done' so a re-run can revisit (or skip) uncertain captures (see
     --include-low-confidence); 'no-data' marks a capture whose region had no
-    eBird data (best guess blank)."""
+    eBird data (best guess blank). 'partial' marks a GROUP-partial confirmation
+    (the viewer pinned the subject's group — mammal / insect / ... — but not
+    the species): birdid must RE-RUN that capture, prefixed to the group via
+    the dwc:Taxon ladder, instead of treating it as done."""
     if not sidecar.exists():
         return None
     try:
@@ -2716,6 +2794,8 @@ def sidecar_status(sidecar: Path):
         status = st[0].text.strip() if st and st[0].text else None
         if status == "error":
             return "error"
+        if status == "partial":
+            return "partial"
         if status == "non-bird":
             return "non-bird"
         if status == "low-confidence":
@@ -2729,22 +2809,55 @@ def sidecar_status(sidecar: Path):
     return None
 
 
+def sidecar_prefilter(sidecar: Path):
+    """The prefilter of a group-partial sidecar: the dwc:Taxon ladder the
+    viewer wrote when the user pinned the group (class, with phylum/kingdom
+    above it). Returns the full ladder ``{'class':..., 'phylum':...,
+    'kingdom':...}`` (missing ranks as empty strings) so the classifier can
+    fall back class -> phylum -> kingdom against the ToL label set — e.g. a
+    'Reptilia' class pin is absent from the ToL labels (reptiles are split
+    across the squamate orders there), so it must widen to phylum Chordata.
+    Returns None when the sidecar has no usable ladder (a full species
+    confirm, a fresh sidecar, or a foreign file)."""
+    if not sidecar.exists():
+        return None
+    try:
+        root = _xmp_tree(sidecar)
+        vals = {}
+        for rank in ("class", "phylum", "kingdom"):
+            el = _find(root, f"//dwc:Taxon/dwc:{rank}")
+            vals[rank] = el[0].text.strip() if el and el[0].text else ""
+        if not any(vals.values()):
+            return None
+        return vals
+    except Exception:
+        return None
+
+
 def classify_capture(cap: Capture, force: bool = False) -> str:
-    """done / confirmed / low-confidence / non-bird / no-data / error / pending
+    """done / confirmed / low-confidence / partial / non-bird / no-data / error
+    / pending
     - a capture is done iff its single sidecar is done. A capture whose sidecar
     is frozen — a user confirmation (``bird:confirmed``) OR any non-empty
     ``dwc:identificationVerificationStatus`` — is 'confirmed' and is NEVER
     re-processed, not even under ``force``: the user's verification is final
     and birdid must not clobber it. Un-confirm (--unconfirm) to re-identify.
+    - 'partial' is a GROUP-partial confirmation: the viewer pinned the group
+    but not the species, so the capture is re-run prefixed to that group (via
+    its dwc:Taxon ladder), and the group pin is honored even under ``force``
+    — it is a deliberate restriction, not a verdict to override.
     'no-data' captures are re-analysed on re-run (the region may have been
     downloaded since). With ``force=True`` every OTHER capture is 'pending': an
     existing sidecar is re-identified in place (only its bird-ID fields are
     overwritten, nothing is deleted)."""
     if sidecar_frozen(cap.sidecar()):
         return "confirmed"
+    st = sidecar_status(cap.sidecar())
+    if st == "partial":
+        return "partial"
     if force:
         return "pending"
-    return sidecar_status(cap.sidecar()) or "pending"
+    return st or "pending"
 
 
 def _group_bursts(pending: list, meta_map: dict, gap: float):
@@ -3506,12 +3619,19 @@ def main():
         nb_n = 0
         error_n = 0
         confirmed_n = 0
+        partial_n = 0
         for i, cap in enumerate(captures, 1):
             tui.progress("status", i, len(captures),
                          "checking existing sidecars")
             status = classify_capture(cap, args.force)
             if status == "pending":
                 pending.append(cap)
+            elif status == "partial":
+                # group-partial confirmation: the viewer pinned the subject's
+                # group but not the species, so birdid must re-identify it —
+                # prefixed to that group via the sidecar's dwc:Taxon ladder.
+                pending.append(cap)
+                partial_n += 1
             elif status == "confirmed":
                 # user-confirmed: frozen - never re-processed, even under
                 # --force. Un-confirm (birdid --unconfirm) to re-identify.
@@ -3546,12 +3666,13 @@ def main():
             summary_lines.append(
                 f"scan: {len(captures)} captures | {done_n} done | "
                 f"{confirmed_n} confirmed | {nb_n} non-bird | "
-                f"{error_n} error | {len(pending)} pending")
+                f"{partial_n} partial | {error_n} error | {len(pending)} pending")
             if args.force:
                 summary_lines.append(
                     "forced run: all captures would be re-identified in place "
                     "(sidecars kept, only bird-ID fields overwritten; "
-                    "user-confirmed captures are exempt).")
+                    "user-confirmed captures are exempt; group-partials stay "
+                    "prefiltered to their pinned group).")
             for cap in pending[:20]:
                 summary_lines.append(f"  [pending] {cap.primary()} -> {cap.sidecar()}")
             if len(pending) > 20:
@@ -3561,7 +3682,7 @@ def main():
             summary_lines.append(
                 f"scan: {len(captures)} captures | {done_n} done | "
                 f"{confirmed_n} confirmed | {nb_n} non-bird | "
-                f"{error_n} error | 0 pending - nothing to do.")
+                f"{partial_n} partial | {error_n} error | 0 pending - nothing to do.")
 
         if not summary_lines:
             # --- Phase 1.5: one batched EXIF read for ALL photos, then GPS means ---
@@ -3728,12 +3849,23 @@ def main():
                             f"species outside {region} table: "
                             f"{', '.join(central_outside)} - region prior may be too narrow")
 
-                    # --- no-data handling: an empty ladder (no eBird table at
-                    # all, not even a wider pool tier) used to score 'unknown'
-                    # silently. Ask once per region (TUI) whether to analyze
-                    # WITHOUT the regional prefilter (whole tree of life - with
-                    # the cost/accuracy disclaimer) or skip + flag 'no-data'.
-                    if sum(len(st) for _, st in ladder) == 0:
+                    # --- group-partial re-run: the viewer pinned the subject's
+                    # group (bird:status='partial' + a dwc:Taxon ladder) but not
+                    # the species, so birdid must identify within ONLY that
+                    # group. This bypasses the regional eBird ladder and the
+                    # no-data prompt entirely in favour of a class-restricted
+                    # tree-of-life search (the group IS the prefilter).
+                    prefilter = sidecar_prefilter(sidecar)
+                    if prefilter:
+                        group_label = (prefilter.get("class") or
+                                       prefilter.get("phylum") or
+                                       prefilter.get("kingdom") or "?")
+                        tui.set(stage="classify",
+                                message=f"classifying {primary.name} "
+                                        f"(group '{group_label}')")
+                        result = classifier.classify_partial_prefilter(
+                            primary, taxonomy, prefilter)
+                    elif sum(len(st) for _, st in ladder) == 0:
                         if region not in no_data_choice_cache:
                             no_data_choice_cache[region] = ask_no_data_choice(tui, region)
                         if no_data_choice_cache[region] == "tol":

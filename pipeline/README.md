@@ -331,7 +331,7 @@ One sidecar per capture, `<base>.xmp` (e.g. `IMG_1234.xmp` for
 (short link `https://avibase.ca/E15BC0CB` → the Avibase species page for the
 top guess), `bird:topConfidence`, `bird:confirmed` (user-confirmed species,
 present only after a manual confirmation — the record is then **frozen**),
-`bird:status` (done / low-confidence / non-bird / error), `bird:pipelineVersion`,
+`bird:status` (done / low-confidence / partial / non-bird / error), `bird:pipelineVersion`,
 `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning`,
 `bird:dcOwned` (set to `true` on sidecars birdid created, marking them as
 birdid-owned). **Standard XMP fields are opt-in**: `dc:description` (includes
@@ -418,6 +418,32 @@ as they are, and a later run can re-identify the capture. Use `--photo` to
 target a single capture (base name, e.g. `IMG_1234`) instead of the whole
 folder. Confirmed captures are recorded in the manifest with a `confirmed`
 entry so reports and review lists can reflect them.
+
+## Group-partial confirmation (`bird:status = partial`)
+
+A *partial* confirmation is a middle step between "nothing" and "confirmed":
+the user knows the subject's coarse **group** (mammal / insect / plant / …)
+but not the species. The viewer writes `bird:status=partial` together with the
+group's ladder as a `dwc:Taxon` block (`dwc:class` + `dwc:phylum`/`dwc:kingdom`
+above it) and **deliberately writes neither freeze marker** — no `bird:confirmed`
+and no `dwc:identificationVerificationStatus` — so birdid can still re-run the
+capture.
+
+How birdid handles it:
+
+- `classify_capture` reports it as `partial` and queues the capture for
+  re-identification (like `pending`), and the group pin is honored even under
+  `--force` — it is a deliberate restriction, not a verdict to override.
+- The re-run **prefilters the tree of life to that group** instead of using the
+  regional eBird ladder: the species pool is restricted to the pinned group's
+  class (falling back to phylum, then kingdom — e.g. a `Reptilia` pin widens to
+  phylum `Chordata`, because the TreeOfLife label set splits reptiles across
+  the squamate orders rather than one `Reptilia` class). See
+  `classify_partial_prefilter` for the exact fallback.
+- Once birdid identifies the species, the stale group pin is **consumed**: the
+  `dwc:Taxon` ladder is removed and `bird:status` becomes `done` /
+  `low-confidence`, so the partial marker cannot linger as the record's
+  "current" taxonomy. (Only `--confirm` writes a real, verified dwc mirror.)
 
 ## Report (CSV)
 

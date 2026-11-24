@@ -27,7 +27,7 @@ The tags birdid writes (see `pipeline/README.md` → "Output per photo"):
 | `bird:avibaseId` / `bird:avibaseUrl` | Avibase reference for the top guess |
 | `bird:topConfidence` | score of the best guess |
 | `bird:confirmed` | user-confirmed species (e.g. `Great Tit`) — once set, the record is **frozen**: birdid never overwrites it |
-| `bird:status` | `done` / `low-confidence` / `non-bird` / `error` |
+| `bird:status` | `done` / `low-confidence` / `partial` / `non-bird` / `error` |
 | `bird:pipelineVersion`, `bird:region`, `bird:month`, `bird:datetime`, `bird:reasoning` | provenance of the ID |
 | `bird:dcOwned`, `bird:error` | housekeeping |
 
