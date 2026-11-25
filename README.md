@@ -66,6 +66,15 @@ photo → EXIF (GPS + timestamp) → region + month → eBird candidate list
   analysis - so a big mixed collection is handled fast. `--analyze-all`
   disables the pre-filter and fully analyses every subject (previously skipped
   non-birds are re-analysed on rerun).
+- **Group-partial prefilter (any rank)**: when the viewer pinned the subject's
+  group but not the species — a coarse group (`bird:status='partial'` with a
+  class/phylum/kingdom `dwc:Taxon` ladder) or an **"other" rank** from the
+  downloaded tree-of-life store (e.g. the order `Squamata`, the class
+  `Chondrichthyes`, the family `Felidae`, the genus `Felis`) — a re-run scores
+  the photo against **only that group's species**, falling back up the ladder
+  (genus → family → order → class → phylum → kingdom) when a rank value isn't a
+  ToL label. Confirming a species later keeps the user's pinned ranks
+  (user-confirmed taxonomy is monotonic).
 - **Low-confidence handling** (`--min-confidence`, default 0.50): a capture
   whose top score stays below the threshold (a blurry, distant, or ambiguous
   bird) still gets a sidecar - with its best guess + confidence kept - but with

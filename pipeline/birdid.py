@@ -1762,23 +1762,28 @@ class BioclipClassifier(Classifier):
 
     def classify_partial_prefilter(self, image, tax, prefilter: dict) -> dict:
         """Re-identify a GROUP-partial capture: the viewer pinned the subject's
-        group (mammal / insect / plant ...) but not the species, so birdid
+        group (mammal / insect / plant / an "other" rank like the order
+        Squamata or the class Chondrichthyes) but not the species, so birdid
         scores the photo against ONLY that group's species instead of the whole
         tree. `prefilter` is the full dwc:Taxon ladder
-        (``{'class':..., 'phylum':..., 'kingdom':...}``, missing ranks empty)
-        from the sidecar.
+        (``{'genus':..., 'family':..., 'order':..., 'class':...,
+        'phylum':..., 'kingdom':...}``, missing ranks empty) from the sidecar.
 
         The pybioclip filter is built for the lowest rank present and, if that
         exact value is not a rank in the ToL labels (e.g. the COL class
         'Reptilia' does not exist there — reptiles are the squamate orders),
-        falls back to the next rank up the ladder (phylum, then kingdom). The
-        filtered embedding subset MUST be reset afterwards: pybioclip caches it
-        on the classifier object, so without the reset the very next
-        whole-tree predict would silently be restricted to this group too."""
+        falls back to the next rank up the ladder (genus -> family -> order ->
+        class -> phylum -> kingdom). The filtered embedding subset MUST be
+        reset afterwards: pybioclip caches it on the classifier object, so
+        without the reset the very next whole-tree predict would silently be
+        restricted to this group too."""
         tol = self._load_tol()
         mask = None
         used = None
         for rank_name, rank_enum in (
+            ("genus", self._Rank.GENUS),
+            ("family", self._Rank.FAMILY),
+            ("order", self._Rank.ORDER),
             ("class", self._Rank.CLASS),
             ("phylum", self._Rank.PHYLUM),
             ("kingdom", self._Rank.KINGDOM),
@@ -1794,7 +1799,7 @@ class BioclipClassifier(Classifier):
                     break
             except ValueError:
                 # rank value absent from the ToL labels - widen to the rank
-                # above (class -> phylum -> kingdom).
+                # above (genus -> family -> ... -> kingdom).
                 continue
         if mask is None:
             self._report("classify", "no ToL label matches the partial "
@@ -2552,19 +2557,26 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
     tax = res("Taxon")
     # A species resolvable in the eBird taxonomy is a bird -> Aves. Anything
     # else ("Cat" is a ToL label, not in eBird) is NEVER asserted to be a bird:
-    # keep the user-confirmed group ladder (from the partial pin), or write no
-    # class at all.
+    # keep the user-confirmed group ladder (from the partial pin — a coarse
+    # class-only group OR an "other" rank like the order Squamata), or write no
+    # class at all. User-confirmed taxonomy is monotonic.
     if scientific:
-        ladder = {"kingdom": "Animalia", "phylum": "Chordata", "class": "Aves"}
+        ladder = {"kingdom": "Animalia", "phylum": "Chordata", "class": "Aves",
+                  "order": order, "family": family}
     else:
         gl = group_ladder or {}
         ladder = {"kingdom": gl.get("kingdom", ""),
                   "phylum": gl.get("phylum", ""),
-                  "class": gl.get("class", "")}
+                  "class": gl.get("class", ""),
+                  "order": gl.get("order", "") or order,
+                  "family": gl.get("family", "") or family,
+                  "genus": gl.get("genus", "")}
     for local, val in (("kingdom", ladder["kingdom"]),
                        ("phylum", ladder["phylum"]),
                        ("class", ladder["class"]),
-                       ("order", order), ("family", family)):
+                       ("order", ladder["order"]),
+                       ("family", ladder["family"]),
+                       ("genus", ladder["genus"])):
         if val:
             etree.SubElement(tax, f"{{{DWC_NS}}}{local}").text = val
     if scientific:
@@ -2610,18 +2622,19 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
         _set_dwc_mirror(desc, species=None)
     else:
         # Completing a group-partial (no bird:confirmed yet): the dwc:Taxon
-        # block, if any, is the user-confirmed GROUP ladder (class-only: no
-        # order/family). Capture it BEFORE setting bird:confirmed below, so a
-        # species the eBird taxonomy can't place (e.g. the BioCLIP ToL label
-        # "Cat") is confirmed in its user-confirmed class instead of being
-        # forced into Aves — user-confirmed taxonomy is monotonic (a model run
-        # or a later confirm may ADD to it, never override it).
+        # block, if any, is the user-confirmed GROUP ladder — a coarse
+        # class-only pin OR an "other" rank pin (order/family/genus, e.g. the
+        # order Squamata for a snake). Capture it BEFORE setting
+        # bird:confirmed below, so a species the eBird taxonomy can't place
+        # (e.g. the BioCLIP ToL label "Cat") is confirmed in its user-confirmed
+        # group instead of being forced into Aves — user-confirmed taxonomy is
+        # monotonic (a model run or a later confirm may ADD to it, never
+        # override it).
         group_ladder = {}
         if not desc.findall(f"{{{BIRD_NS}}}confirmed"):
             tax_els = desc.findall(f"{{{DWC_NS}}}Taxon")
-            if tax_els and tax_els[0].find(f"{{{DWC_NS}}}order") is None \
-                    and tax_els[0].find(f"{{{DWC_NS}}}family") is None:
-                for rank in ("kingdom", "phylum", "class"):
+            if tax_els:
+                for rank in ("kingdom", "phylum", "class", "order", "family", "genus"):
                     for el in tax_els[0].findall(f"{{{DWC_NS}}}{rank}"):
                         if el.text and el.text.strip():
                             group_ladder[rank] = el.text.strip()
@@ -2873,12 +2886,14 @@ def sidecar_status(sidecar: Path):
 
 def sidecar_prefilter(sidecar: Path):
     """The prefilter of a group-partial sidecar: the dwc:Taxon ladder the
-    viewer wrote when the user pinned the group (class, with phylum/kingdom
-    above it). Returns the full ladder ``{'class':..., 'phylum':...,
+    viewer wrote when the user pinned the group — a coarse group (class, with
+    phylum/kingdom above it) or an "other" rank (genus/family/order/class,
+    e.g. a snake pinned as the order Squamata). Returns the full ladder
+    ``{'genus':..., 'family':..., 'order':..., 'class':..., 'phylum':...,
     'kingdom':...}`` (missing ranks as empty strings) so the classifier can
-    fall back class -> phylum -> kingdom against the ToL label set — e.g. a
-    'Reptilia' class pin is absent from the ToL labels (reptiles are split
-    across the squamate orders there), so it must widen to phylum Chordata.
+    fall back deepest-first against the ToL label set — e.g. a 'Reptilia'
+    class pin is absent from the ToL labels (reptiles are split across the
+    squamate orders there), so it must widen to phylum Chordata.
     Returns None when the sidecar has no usable ladder (a full species
     confirm, a fresh sidecar, or a foreign file)."""
     if not sidecar.exists():
@@ -2886,7 +2901,7 @@ def sidecar_prefilter(sidecar: Path):
     try:
         root = _xmp_tree(sidecar)
         vals = {}
-        for rank in ("class", "phylum", "kingdom"):
+        for rank in ("genus", "family", "order", "class", "phylum", "kingdom"):
             el = _find(root, f"//dwc:Taxon/dwc:{rank}")
             vals[rank] = el[0].text.strip() if el and el[0].text else ""
         if not any(vals.values()):
@@ -3954,7 +3969,11 @@ def main():
                     # tree-of-life search (the group IS the prefilter).
                     prefilter = sidecar_prefilter(sidecar)
                     if prefilter:
-                        group_label = (prefilter.get("class") or
+                        # The deepest pinned rank names the group in the TUI.
+                        group_label = (prefilter.get("genus") or
+                                       prefilter.get("family") or
+                                       prefilter.get("order") or
+                                       prefilter.get("class") or
                                        prefilter.get("phylum") or
                                        prefilter.get("kingdom") or "?")
                         if getattr(args, "analyze_all", False) and not args.partial_only:
