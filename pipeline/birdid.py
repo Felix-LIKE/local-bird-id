@@ -2564,15 +2564,18 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
     # else ("Cat" is a ToL label, not in eBird) is NEVER asserted to be a bird:
     # keep the user-confirmed group ladder (from the partial pin — a coarse
     # class-only group OR an "other" rank like the order Squamata), or write no
-    # class at all. User-confirmed taxonomy is monotonic.
-    if scientific:
+    # class at all. A group ladder that already carries a kingdom (a coarse
+    # group confirmed with a complete species — Human / Homo sapiens) wins over
+    # the Aves default too: user-confirmed taxonomy is monotonic, and Human is
+    # not a bird. (For a bird species without such a ladder, Aves stands.)
+    gl = group_ladder or {}
+    if scientific and not gl.get("kingdom"):
         ladder = {"kingdom": "Animalia", "phylum": "Chordata", "class": "Aves",
                   "order": order, "family": family, "genus": ""}
     else:
-        gl = group_ladder or {}
-        ladder = {"kingdom": gl.get("kingdom", ""),
-                  "phylum": gl.get("phylum", ""),
-                  "class": gl.get("class", ""),
+        ladder = {"kingdom": gl.get("kingdom", "Animalia" if scientific else ""),
+                  "phylum": gl.get("phylum", "Chordata" if scientific else ""),
+                  "class": gl.get("class", "Aves" if scientific else ""),
                   "order": gl.get("order", "") or order,
                   "family": gl.get("family", "") or family,
                   "genus": gl.get("genus", "")}
@@ -2596,7 +2599,7 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
 
 def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
                    *, photographer: str = "", order: str = "", family: str = "",
-                   verbatim: str = ""):
+                   verbatim: str = "", ladder: dict | None = None):
     """Set (or, with ``species=None``, clear) the user-confirmation flag on a
     sidecar, preserving every other element (foreign fields included).
 
@@ -2634,9 +2637,12 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
         # (e.g. the BioCLIP ToL label "Cat") is confirmed in its user-confirmed
         # group instead of being forced into Aves — user-confirmed taxonomy is
         # monotonic (a model run or a later confirm may ADD to it, never
-        # override it).
+        # override it). An explicit `ladder` (a coarse group with a complete
+        # species — Human / Homo sapiens) wins over the auto-capture.
         group_ladder = {}
-        if not desc.findall(f"{{{BIRD_NS}}}confirmed"):
+        if ladder is not None:
+            group_ladder = ladder
+        elif not desc.findall(f"{{{BIRD_NS}}}confirmed"):
             tax_els = desc.findall(f"{{{DWC_NS}}}Taxon")
             if tax_els:
                 for rank in ("kingdom", "phylum", "class", "order", "family", "genus"):
@@ -2727,7 +2733,8 @@ GROUP_LADDERS = {
                   "ladder": {"kingdom": "Fungi", "phylum": "Basidiomycota", "class": "Agaricomycetes"}},
     "human":     {"label": "Human",     "verbatim": "human",
                   "ladder": {"kingdom": "Animalia", "phylum": "Chordata", "class": "Mammalia",
-                             "order": "Primates", "family": "Hominidae", "genus": "Homo"}},
+                             "order": "Primates", "family": "Hominidae", "genus": "Homo",
+                             "epithet": "sapiens"}},
 }
 
 
@@ -2735,14 +2742,18 @@ def coarse_group_for(name: str):
     """The coarse-group entry a ``--confirm`` name names, if any.
 
     Accepts the compact pipeline category ("mammal", "fungus"), the canonical
-    label ("Mammal", "Fungus") or the BioCLIP prompt phrase ("a photo of a
-    mammal") — case- and whitespace-insensitive. Returns None for a real
-    species name. A group name MUST be confirmed as a partial pin (see
-    GROUP_LADDERS), never as a frozen species confirmation.
+    label ("Mammal", "Fungus"), the BioCLIP prompt phrase ("a photo of a
+    mammal"), and — for Human — the scientific name ("Homo sapiens"), all
+    case- and whitespace-insensitive. Returns None for a real species name. A
+    coarse group name is a GROUP pin: a partial (genus+epithet-less groups)
+    or a full species confirmation (Human / Homo sapiens — the ladder reaches
+    genus + epithet), never a frozen 'confirmed <group>' verdict.
     """
     n = " ".join((name or "").lower().split())
     if not n:
         return None
+    if n == "homo sapiens":
+        return GROUP_LADDERS["human"]   # the scientific name of the Human group
     for key, g in GROUP_LADDERS.items():
         if n in (key, g["label"].lower(),
                  f"a photo of a {key}", f"a photo of {key}"):
@@ -2832,6 +2843,13 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
     # later run still identifies the capture prefixed to that group — the same
     # write the viewer's "Not a bird" group buttons make (CLI parity).
     group = coarse_group_for(species) if not unconfirm else None
+    # A coarse group whose ladder reaches a complete species (genus + epithet —
+    # only Human / Homo sapiens today) is a FULL confirmation, not a partial:
+    # the whole taxonomic tree is pinned, so there is nothing finer to re-run.
+    group_full = bool(group and group["ladder"].get("genus")
+                      and group["ladder"].get("epithet"))
+    group_scientific = (f"{group['ladder']['genus']} {group['ladder']['epithet']}".strip()
+                        if group_full else "")
 
     touched = skipped = 0
     notes: list[str] = []
@@ -2863,16 +2881,30 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
                 del m["confirmed"]
             notes.append(f"  {rel}: user-confirmed flag cleared")
         elif group is not None:
-            # Coarse group -> partial pin (see GROUP_LADDERS). The sidecar's
-            # current bird:confirmed is irrelevant: a partial is not a verdict,
-            # so any stale confirmation is replaced by the pin.
             photographer = read_artist(_photo_for_sidecar(sidecar))
-            _set_partial(sidecar, group["label"], photographer=photographer,
-                         verbatim=group["verbatim"], ladder=group["ladder"])
-            m = manifest.setdefault(str(sidecar), {})
-            if "confirmed" in m:
-                del m["confirmed"]   # a partial is not a confirmation
-            notes.append(f"  {rel}: pinned as group '{group['label']}' (partial)")
+            if group_full:
+                # Human / Homo sapiens — the group IS a complete species (the
+                # ladder reaches genus + epithet), so it is a FULL confirmation,
+                # not a partial: the whole taxonomic tree is pinned and the
+                # record is frozen, exactly like confirming a real species.
+                _set_confirmed(sidecar, group["label"], group_scientific,
+                               photographer=photographer,
+                               verbatim=group["verbatim"], ladder=group["ladder"])
+                m = manifest.setdefault(str(sidecar), {})
+                m["confirmed"] = group["label"]
+                notes.append(f"  {rel}: confirmed as '{group['label']}' "
+                             f"({group_scientific})"
+                             + (f" (was '{cur}')" if cur else ""))
+            else:
+                # Coarse group -> partial pin (see GROUP_LADDERS). The sidecar's
+                # current bird:confirmed is irrelevant: a partial is not a
+                # verdict, so any stale confirmation is replaced by the pin.
+                _set_partial(sidecar, group["label"], photographer=photographer,
+                             verbatim=group["verbatim"], ladder=group["ladder"])
+                m = manifest.setdefault(str(sidecar), {})
+                if "confirmed" in m:
+                    del m["confirmed"]   # a partial is not a confirmation
+                notes.append(f"  {rel}: pinned as group '{group['label']}' (partial)")
         else:
             if cur == species_norm:
                 skipped += 1
