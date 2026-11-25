@@ -2503,7 +2503,8 @@ def _load_taxonomy_hierarchy_uncached(path: Path | None) -> dict[str, tuple[str,
 
 
 def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
-                    order="", family="", verbatim="", group_ladder=None):
+                    order="", family="", verbatim="", group_ladder=None,
+                    partial=False):
     """Write (or, with ``species=None``, clear) the DarwinCore mirror of a
     user confirmation, as the standard ExifTool-readable nested block:
 
@@ -2549,8 +2550,12 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
     ident = res("Identification")
     etree.SubElement(ident, f"{{{DWC_NS}}}dateIdentified").text = (
         datetime.today().strftime("%Y-%m-%d"))
-    etree.SubElement(ident, f"{{{DWC_NS}}}identificationVerificationStatus").text = (
-        DWC_CONFIRM_STATUS)
+    # A GROUP-partial pin deliberately omits the identificationVerificationStatus
+    # freeze marker (it is NOT a final human verdict — birdid must still re-run
+    # the capture, prefixed to the group). A full species confirmation writes it.
+    if not partial:
+        etree.SubElement(ident, f"{{{DWC_NS}}}identificationVerificationStatus").text = (
+            DWC_CONFIRM_STATUS)
     if verbatim:
         etree.SubElement(ident, f"{{{DWC_NS}}}verbatimIdentification").text = verbatim
 
@@ -2562,7 +2567,7 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
     # class at all. User-confirmed taxonomy is monotonic.
     if scientific:
         ladder = {"kingdom": "Animalia", "phylum": "Chordata", "class": "Aves",
-                  "order": order, "family": family}
+                  "order": order, "family": family, "genus": ""}
     else:
         gl = group_ladder or {}
         ladder = {"kingdom": gl.get("kingdom", ""),
@@ -2695,6 +2700,92 @@ def _low_confidence_review(manifest: dict) -> list[tuple[float, str, str]]:
     return sorted(rows, key=lambda t: t[0])
 
 
+# Coarse "not a bird" groups — mirrors NOT_BIRD_GROUPS in the viewer. A
+# ``--confirm`` of one of these is a GROUP-PARTIAL pin, not a species
+# confirmation: the user pinned the group (mammal / fungus / ...) but not the
+# species, so the record gets bird:status='partial' + the group's dwc:Taxon
+# ladder and deliberately NO freeze markers (bird:confirmed +
+# identificationVerificationStatus), keeping it re-runnable for a later
+# identification narrowed to that group. Keys are the compact pipeline
+# categories (BioCLIP "a photo of a mammal" -> "mammal").
+GROUP_LADDERS = {
+    "mammal":    {"label": "Mammal",    "verbatim": "mammal",
+                  "ladder": {"kingdom": "Animalia", "phylum": "Chordata", "class": "Mammalia"}},
+    "reptile":   {"label": "Reptile",   "verbatim": "reptile",
+                  "ladder": {"kingdom": "Animalia", "phylum": "Chordata", "class": "Reptilia"}},
+    "amphibian": {"label": "Amphibian", "verbatim": "amphibian",
+                  "ladder": {"kingdom": "Animalia", "phylum": "Chordata", "class": "Amphibia"}},
+    "insect":    {"label": "Insect",    "verbatim": "insect",
+                  "ladder": {"kingdom": "Animalia", "phylum": "Arthropoda", "class": "Insecta"}},
+    "spider":    {"label": "Spider",    "verbatim": "spider",
+                  "ladder": {"kingdom": "Animalia", "phylum": "Arthropoda", "class": "Arachnida"}},
+    "fish":      {"label": "Fish",      "verbatim": "fish",
+                  "ladder": {"kingdom": "Animalia", "phylum": "Chordata", "class": "Actinopterygii"}},
+    "plant":     {"label": "Plant",     "verbatim": "plant",
+                  "ladder": {"kingdom": "Plantae", "phylum": "Tracheophyta", "class": "Magnoliopsida"}},
+    "fungus":    {"label": "Fungus",    "verbatim": "fungus",
+                  "ladder": {"kingdom": "Fungi", "phylum": "Basidiomycota", "class": "Agaricomycetes"}},
+    "human":     {"label": "Human",     "verbatim": "human",
+                  "ladder": {"kingdom": "Animalia", "phylum": "Chordata", "class": "Mammalia",
+                             "order": "Primates", "family": "Hominidae", "genus": "Homo"}},
+}
+
+
+def coarse_group_for(name: str):
+    """The coarse-group entry a ``--confirm`` name names, if any.
+
+    Accepts the compact pipeline category ("mammal", "fungus"), the canonical
+    label ("Mammal", "Fungus") or the BioCLIP prompt phrase ("a photo of a
+    mammal") — case- and whitespace-insensitive. Returns None for a real
+    species name. A group name MUST be confirmed as a partial pin (see
+    GROUP_LADDERS), never as a frozen species confirmation.
+    """
+    n = " ".join((name or "").lower().split())
+    if not n:
+        return None
+    for key, g in GROUP_LADDERS.items():
+        if n in (key, g["label"].lower(),
+                 f"a photo of a {key}", f"a photo of {key}"):
+            return g
+    return None
+
+
+def _set_partial(sidecar: Path, label: str, *, photographer: str = "",
+                 verbatim: str = "", ladder: dict | None = None):
+    """Write a GROUP-partial pin: the user pinned the group (mammal / fungus /
+    ...) but not the species. bird:status='partial' + the group's dwc:Taxon
+    ladder, deliberately NO freeze markers (bird:confirmed and the dwc
+    identificationVerificationStatus), so a later birdid run still re-identifies
+    the capture prefixed to that group. Mirrors the viewer's group-confirm
+    write (birdid.js groupConfirmPayload + exiftool.rs confirm_args partial).
+    """
+    from lxml import etree
+    root = _xmp_tree(sidecar)
+    descs = _find(root, "//rdf:Description")
+    if not descs:
+        raise RuntimeError(f"could not locate rdf:Description in {sidecar}")
+    desc = descs[0]
+    # A partial is not a final verdict: clear any stale bird:confirmed left by
+    # an earlier full confirmation (the dwc freeze flag is dropped by
+    # _set_dwc_mirror's block refresh).
+    for el in desc.findall(f"{{{BIRD_NS}}}confirmed"):
+        desc.remove(el)
+    _set_list(desc, "species", BIRD_NS, [label], "Seq")
+    _set_list(desc, "confidence", BIRD_NS, ["1.00"], "Seq")
+    _set_text(desc, "summary", BIRD_NS, f"{label} 100%")
+    _set_text(desc, "topSpecies", BIRD_NS, label)
+    _set_text(desc, "topConfidence", BIRD_NS, "1.00")
+    _set_text(desc, "status", BIRD_NS, "partial")
+    _set_dwc_mirror(desc, species=label, scientific="", photographer=photographer,
+                    verbatim=verbatim, group_ladder=ladder, partial=True)
+    _canonicalize_desc(desc)
+    _ensure_xpacket(root)
+    out = io.BytesIO()
+    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
+                                  pretty_print=True)
+    sidecar.write_bytes(out.getvalue())
+
+
 def run_confirm(root: Path, photo: str | None, species: str | None,
                 unconfirm: bool, manifest_path: Path, taxonomy: dict,
                 taxonomy_path: Path | None = None,
@@ -2734,15 +2825,23 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
 
     hier = load_taxonomy_hierarchy(taxonomy_path) if not unconfirm else {}
     verbatim = (species or "").strip() or species_norm
+    # A --confirm of a coarse group name ("mammal", "fungus", "a photo of a
+    # mammal", ...) is a GROUP-PARTIAL pin, not a species confirmation: the
+    # user pinned the group but not the species. Route it to _set_partial
+    # (bird:status='partial' + the group's dwc ladder, no freeze markers) so a
+    # later run still identifies the capture prefixed to that group — the same
+    # write the viewer's "Not a bird" group buttons make (CLI parity).
+    group = coarse_group_for(species) if not unconfirm else None
 
     touched = skipped = 0
     notes: list[str] = []
-    if not unconfirm and scientific == "" and \
+    if group is None and not unconfirm and scientific == "" and \
             species_norm.lower() not in {k.lower() for k in taxonomy}:
         # The model's label is a real name that simply has no English/common
         # name match in the bird taxonomy (e.g. a bioclip-2 "Cat" label vs. the
         # taxonomy's "Domestic Cat") - that is not a spelling error, so the
-        # note says what actually happened instead of "check spelling".
+        # note says what actually happened instead of "check spelling". (A
+        # coarse group name has no vernacular name by design, so it is skipped.)
         notes.append(
             f"  note: '{species_norm}' has no vernacular name associated to it "
             f"(the confirmation is stored as given)")
@@ -2763,6 +2862,17 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
             if m and "confirmed" in m:
                 del m["confirmed"]
             notes.append(f"  {rel}: user-confirmed flag cleared")
+        elif group is not None:
+            # Coarse group -> partial pin (see GROUP_LADDERS). The sidecar's
+            # current bird:confirmed is irrelevant: a partial is not a verdict,
+            # so any stale confirmation is replaced by the pin.
+            photographer = read_artist(_photo_for_sidecar(sidecar))
+            _set_partial(sidecar, group["label"], photographer=photographer,
+                         verbatim=group["verbatim"], ladder=group["ladder"])
+            m = manifest.setdefault(str(sidecar), {})
+            if "confirmed" in m:
+                del m["confirmed"]   # a partial is not a confirmation
+            notes.append(f"  {rel}: pinned as group '{group['label']}' (partial)")
         else:
             if cur == species_norm:
                 skipped += 1
