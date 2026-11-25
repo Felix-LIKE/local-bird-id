@@ -27,6 +27,8 @@
 #   birdid --api [<key>]               # store / show the eBird API key
 #   birdid --initialize                # one-time: taxonomy + BioCLIP 2 backends
 #   birdid --download-backends         # (same backend part as --initialize)
+#   birdid --download-detector         # (optional) dedicated ONNX multi-bird
+#                                      # detector - separate, opt-in download
 #   birdid --device auto|npu|cpu       # compute device for the image encoder:
 #                                      # auto = NPU when present+usable, else CPU
 #   birdid --list-candidates           # inspect the region/month tables
@@ -208,6 +210,8 @@ if [ "$#" -eq 0 ]; then
     say "  birdid --cache update              sync the cache with the eBird tables"
     say "  birdid --api [<key>]               store / show the eBird API key"
     say "  birdid --initialize                one-time: taxonomy + BioCLIP 2 backends"
+    say "  birdid --download-detector         (optional) dedicated ONNX multi-bird"
+    say "                                     detector - separate, opt-in download"
     say "  birdid --list-candidates           inspect the region/month tables"
     say "  birdid --doctor                    check the launcher's own health"
     say ""
@@ -219,7 +223,8 @@ fi
 [ -f "$PIPELINE" ] || die "pipeline not found: $PIPELINE"
 
 # management commands run WITHOUT a photo folder and may need the network
-# (--download / --update / --api / --initialize / --download-backends);
+# (--download / --update / --api / --initialize / --download-backends /
+# --download-detector);
 # --list / --cache / --list-candidates are local-only but harmless to run
 # online. Everything that has a folder is a real identification run and must
 # stay fully offline.
@@ -227,7 +232,7 @@ MGMT=0
 OFFLINE=0
 for a in "$@"; do
     case "$a" in
-        -d|--download|-u|--update|--list|--api|--initialize|--download-backends|--cache|--list-candidates|--doctor|-h|--help)
+        -d|--download|-u|--update|--list|--api|--initialize|--download-backends|--download-detector|--cache|--list-candidates|--doctor|-h|--help)
             MGMT=1 ;;
         --download=*|--update=*|--list=*|--api=*|--initialize=*) MGMT=1 ;;
     esac

@@ -47,6 +47,9 @@ Data management (see pipeline/ebird_data.py):
   birdid.py --api [<key>]              store / show the eBird API key
   birdid.py --initialize               one-time: download taxonomy + BioCLIP 2
                                        backends so everything works offline
+  birdid.py --download-detector        (optional) download the dedicated ONNX
+                                       multi-bird detector (a separate, opt-in
+                                       download - BioCLIP-only users needn't)
 
 Requirements:
   - exiftool, python3 (PIL, lxml, requests)
@@ -2238,7 +2241,7 @@ class Detector:
     is then classified by the normal birdid classifier, so a detector needs to
     localize birds, not identify species. Subclasses plug in different
     backends behind the same interface (the built-in zero-shot BioCLIP crop
-    scan now; a dedicated YOLO-style ONNX model later)."""
+    scan, or the dedicated ONNX detector from `birdid --download-detector`)."""
 
     name = "base"
 
@@ -2261,9 +2264,9 @@ class BioClipCropDetector(Detector):
     a few distractor texts) and keeps the highest-scoring non-overlapping
     boxes. This is the cheap-to-add default: it reuses the BioCLIP 2 backbone
     already loaded for classification, so multi-bird works out of the box. It
-    is weaker on small or heavily-overlapping birds than a dedicated object
-    detector — a YOLO-style ONNX backend behind the same Detector interface is
-    the planned upgrade."""
+    is weaker on small or heavily-overlapping birds than the dedicated ONNX
+    detector (a COCO object localizer behind the same Detector interface,
+    opt-in via `birdid --download-detector`)."""
 
     name = "bioclip-crops"
 
@@ -2411,14 +2414,160 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
     return regions
 
 
+# --------------------------------------------------------------------------
+# Optional ONNX multi-bird detector (a dedicated localizer, opt-in download)
+# --------------------------------------------------------------------------
+# The built-in BioClipCropDetector reuses BioCLIP and needs nothing extra, but
+# it is weak on small / heavily-overlapping birds. A dedicated COCO object
+# detector proposes better bird regions; the classifier still identifies each
+# crop, so the model only needs the 'bird' class. Download it once with
+# `birdid --download-detector` (a SEPARATE download from --initialize, so a
+# BioCLIP-only user never gets an unexpected model). It needs onnxruntime at
+# run time; without the model or onnxruntime, birdid falls back to the
+# built-in detector.
+
+# COCO-trained RT-DETR R18VD (Apache-2.0) exported to ONNX int8. It lives in
+# the huggingface cache like the BioCLIP weights, so offline runs read the
+# cached copy. Override the local path with $BIRDID_ONNX_DETECTOR.
+_DETECTOR_REPO = "onnx-community/rtdetr_r18vd"
+_DETECTOR_FILE = "onnx/model_int8.onnx"
+
+
+def run_download_detector() -> Path:
+    """Download the optional ONNX multi-bird detector into the huggingface
+    cache (needs network once, like --initialize). Returns the local path."""
+    import huggingface_hub
+    # a stale HF_HUB_OFFLINE=1 must not block a deliberate download
+    had_offline = os.environ.pop("HF_HUB_OFFLINE", None)
+    try:
+        try:
+            path = huggingface_hub.hf_hub_download(
+                repo_id=_DETECTOR_REPO, filename=_DETECTOR_FILE)
+        except Exception as e:
+            raise RuntimeError(
+                f"multi-bird detector download failed: {e} (needs network, "
+                f"once)") from e
+    finally:
+        if had_offline is not None:
+            os.environ["HF_HUB_OFFLINE"] = had_offline
+    print(f"birdid: multi-bird detector downloaded -> {path}")
+    print("  (COCO-trained RT-DETR R18VD, int8, Apache-2.0; detects the "
+          "'bird' class only - species ID stays with BioCLIP).")
+    print("  To use it, install the onnx runtime:  pip install onnxruntime")
+    return Path(path)
+
+
+def _detector_onnx_path() -> Path | None:
+    """Local path of the optional ONNX detector, or None when unavailable.
+    $BIRDID_ONNX_DETECTOR wins if set; otherwise the cached copy of the
+    default repo file. None when the file is absent (not yet downloaded, or
+    offline with no cache)."""
+    env = os.environ.get("BIRDID_ONNX_DETECTOR")
+    if env:
+        p = Path(env).expanduser()
+        return p if p.is_file() else None
+    try:
+        import huggingface_hub
+        return Path(huggingface_hub.hf_hub_download(
+            repo_id=_DETECTOR_REPO, filename=_DETECTOR_FILE))
+    except Exception:
+        return None
+
+
+class OnnxDetector(Detector):
+    """Region proposal via a dedicated ONNX object detector (RT-DETR R18VD,
+    COCO-trained, int8) through onnxruntime.
+
+    Only proposes BIRD regions (COCO class 14) - the classifier still
+    identifies the species per crop. Needs the model file
+    (``birdid --download-detector``) and onnxruntime (``pip install
+    onnxruntime``); make_detector falls back to the built-in detector if
+    either is missing or the session fails, so detection never breaks a run.
+
+    Pre/post-processing mirrors the model's RTDetrImageProcessor exactly:
+    input is RGB resized to 640x640 (bilinear) and scaled to [0,1]
+    (``do_normalize`` is false for this export); the ``pred_boxes`` output is
+    normalized cxcywh, which we convert to xyxy, take class 14 (bird), apply
+    sigmoid, threshold and NMS. Because the resize is an aspect stretch,
+    normalized boxes map straight onto the original photo."""
+
+    name = "onnx-rtdetr"
+    _INPUT = 640
+    _BIRD_CLASS = 14
+
+    def __init__(self, args, classifier=None, onnx_path: Path | None = None):
+        super().__init__(args, classifier)
+        import onnxruntime  # type: ignore  (optional; make_detector falls back)
+        self._session = onnxruntime.InferenceSession(
+            str(onnx_path), providers=["CPUExecutionProvider"])
+        self._min_score = float(getattr(args, "multi_min_confidence", 0.55))
+
+    def detect(self, image: Path) -> list[dict]:
+        inp = self._preprocess(image)
+        logits, boxes = self._session.run(None, {"pixel_values": inp})
+        return self._postprocess(np.asarray(logits), np.asarray(boxes))
+
+    def _preprocess(self, image: Path) -> np.ndarray:
+        from PIL import Image as PILImage
+        with PILImage.open(image) as im:
+            im = im.convert("RGB").resize((self._INPUT, self._INPUT),
+                                          PILImage.BILINEAR)
+        arr = np.asarray(im, dtype=np.float32) / 255.0
+        return arr.transpose(2, 0, 1)[None, ...].astype(np.float32)
+
+    def _postprocess(self, logits: np.ndarray, boxes: np.ndarray) -> list[dict]:
+        # per-query probability of the bird class (up to 300 queries)
+        scores = 1.0 / (1.0 + np.exp(-logits[0, :, self._BIRD_CLASS]))
+        cx, cy, w, h = (boxes[0, :, i] for i in range(4))
+        x1 = np.clip(cx - w / 2.0, 0.0, 1.0)
+        y1 = np.clip(cy - h / 2.0, 0.0, 1.0)
+        x2 = np.clip(cx + w / 2.0, 0.0, 1.0)
+        y2 = np.clip(cy + h / 2.0, 0.0, 1.0)
+        w, h = x2 - x1, y2 - y1
+        keep = (scores >= self._min_score) & (w > 0) & (h > 0)
+        if not keep.any():
+            return []
+        order = np.argsort(-scores[keep])
+        cand = [
+            {"x": float(x1[i]), "y": float(y1[i]),
+             "w": float(w[i]), "h": float(h[i]), "score": float(scores[i])}
+            for i in np.nonzero(keep)[0][order]
+        ]
+        return _nms(cand, iou_threshold=0.5)[:8]
+
+
 def make_detector(args, classifier=None) -> Detector | None:
-    """The region-proposal backend for --multi / flagged captures. The built-in
-    zero-shot BioCLIP crop detector needs no download and is always available
-    once the classifier exists. (A dedicated YOLO-style ONNX backend will be
-    added behind the same interface; until then the built-in is used.)"""
+    """The region-proposal backend for --multi / flagged captures.
+
+    Priority:
+      1. --no-detector-model     -> the built-in zero-shot BioCLIP detector.
+      2. the ONNX detector (from ``birdid --download-detector``): used when the
+         model file is available AND onnxruntime loads it; any failure (missing
+         file / onnxruntime, session error) falls back to the built-in with a
+         one-line note.
+      3. otherwise the built-in (needs no download, always available).
+
+    The chosen backend's one-line description is set on ``detector.note`` for
+    main() to print at startup."""
     if classifier is None:
         return None
-    return BioClipCropDetector(args, classifier)
+    detector = BioClipCropDetector(args, classifier)
+    if getattr(args, "no_detector_model", False):
+        detector.note = "built-in zero-shot detector (--no-detector-model)"
+        return detector
+    onnx_path = _detector_onnx_path()
+    if onnx_path is None:
+        detector.note = ("built-in zero-shot detector (run 'birdid "
+                         "--download-detector' for the dedicated ONNX one)")
+        return detector
+    try:
+        detector = OnnxDetector(args, classifier, onnx_path=onnx_path)
+        detector.note = f"dedicated ONNX detector ({onnx_path.name})"
+        return detector
+    except Exception as e:      # noqa: BLE001 - detection must never break a run
+        detector.note = (f"built-in zero-shot detector (ONNX detector "
+                         f"unavailable: {e}; run 'pip install onnxruntime')")
+        return detector
 
 
 # --------------------------------------------------------------------------
@@ -4030,8 +4179,10 @@ def main():
                          "capture flagged 'contains multiple birds' "
                          "(bird:multiBird=true, set from the viewer). Each "
                          "flagged photo is scanned for bird regions (the "
-                         "built-in zero-shot BioCLIP crop detector - no extra "
-                         "download), every region is cropped and classified "
+                         "built-in zero-shot BioCLIP crop detector by "
+                         "default, or the dedicated ONNX detector from "
+                         "'birdid --download-detector' when downloaded), "
+                         "every region is cropped and classified "
                          "with the same regional ladder as the whole image, "
                          "and the sidecar gets per-region candidate lists "
                          "(bird:regions) plus the standard mwg-rs:Regions "
@@ -4039,8 +4190,11 @@ def main():
                          "still written for compatibility. The flag is kept "
                          "until you un-flag it in the viewer, so re-running "
                          "--multi re-identifies; frozen (confirmed) captures "
-                         "are never touched. A dedicated YOLO-style ONNX "
-                         "detector will slot into the same interface later.")
+                         "are never touched.")
+    ap.add_argument("--no-detector-model", action="store_true",
+                    help="force the built-in zero-shot BioCLIP crop detector "
+                         "even when the dedicated ONNX detector "
+                         "(--download-detector) is downloaded")
     ap.add_argument("--multi-min-confidence", type=float, default=0.55,
                     help="region 'is a bird' score threshold: a proposed "
                          "crop is only kept as a bird region when the "
@@ -4196,6 +4350,15 @@ def main():
                     help="predownload the BioCLIP 2 + TreeOfLife backends so a "
                          "later run works fully offline (same backend part as "
                          "--initialize)")
+    ap.add_argument("--download-detector", action="store_true",
+                    help="download the OPTIONAL dedicated ONNX multi-bird "
+                         "detector (RT-DETR R18VD, COCO 'bird' class only, "
+                         "~21 MB, Apache-2.0) into the model cache. A SEPARATE "
+                         "download from --initialize, so BioCLIP-only users "
+                         "get no surprise model. Needs network once; to USE "
+                         "it also 'pip install onnxruntime'. Without it, "
+                         "--multi uses the built-in zero-shot BioCLIP "
+                         "detector.")
     ap.add_argument("--device", choices=["auto", "npu", "cpu"], default="auto",
                     help="compute device for the BioCLIP 2 image encoder: "
                          "'auto' (default) uses the AMD NPU when the hardware "
@@ -4238,12 +4401,14 @@ def main():
     data_dir = Path(args.data_dir)
 
     # --- data management commands (no photo folder needed) ---
-    mgmt = (args.initialize or args.download_backends or args.api is not None
-            or args.list is not None or args.download or args.update
-            or args.cache is not None)
+    mgmt = (args.initialize or args.download_backends or args.download_detector
+            or args.api is not None or args.list is not None or args.download
+            or args.update or args.cache is not None)
     if mgmt:
         try:
-            if args.initialize or args.download_backends:
+            if args.download_detector:
+                run_download_detector()
+            elif args.initialize or args.download_backends:
                 from ebird_data import initialize
                 initialize(data_dir, data_dir / "regions")
                 Path(args.checklists_dir).mkdir(parents=True, exist_ok=True)
@@ -4564,12 +4729,15 @@ def main():
 
             # Multi-bird region proposal (only touched when a capture is
             # flagged / --multi). The built-in zero-shot BioCLIP crop detector
-            # needs no download; a dedicated ONNX backend slots in behind the
-            # same Detector interface in make_detector.
+            # needs no download; the dedicated ONNX detector (birdid
+            # --download-detector) slots in behind the same Detector interface
+            # in make_detector when downloaded + onnxruntime is present.
             detector = make_detector(args, classifier)
-            if getattr(args, "multi", False) and detector is not None:
-                tui.plain_line(f"multi-bird detector: {detector.describe()} "
-                               "(flagged captures only)")
+            if detector is not None:
+                note = getattr(detector, "note", "")
+                if getattr(args, "multi", False) or "ONNX" in note:
+                    tui.plain_line(f"multi-bird detector: {detector.describe()} "
+                                   f"- {note} (flagged captures only)")
 
             report_rows = []
             stop = tui.stop_flag

@@ -388,6 +388,40 @@ run to the NPU.
 
 ---
 
+### Multi-bird detection & the optional dedicated detector
+
+Multi-bird analysis (`--multi`, or flagged captures from the viewer) works
+**out of the box with just BioCLIP** — the built-in **zero-shot** detector
+re-scans each photo with the BioCLIP backbone already loaded for classification
+("is this region a photo of a bird?"), so there is **no extra download needed**
+to get started.
+
+For **better** region proposals — especially on small or heavily-overlapping
+birds — a **dedicated ONNX object detector** (RT-DETR R18VD, COCO-trained,
+detects the `bird` class only; species ID always stays with BioCLIP) can be
+downloaded separately:
+
+```bash
+birdid --download-detector     # ~21 MB, once, needs network (Apache-2.0)
+pip install onnxruntime        # the runtime needed to RUN it (not to download)
+```
+
+This is a **separate, opt-in download** from `--initialize`, so a BioCLIP-only
+user is never surprised by a detector download. `birdid` then picks the detector
+automatically:
+
+- **ONNX detector** — used when the model is downloaded **and** `onnxruntime`
+  is installed.
+- **Zero-shot BioCLIP detector** — otherwise (the safe default, always works).
+- `--no-detector-model` forces the zero-shot one even when the ONNX model is
+  present; `$BIRDID_ONNX_DETECTOR` overrides the model path.
+
+Any failure (missing model, missing runtime, session error) falls back to the
+built-in detector with a one-line note at startup — multi-bird analysis never
+breaks because of the optional model.
+
+---
+
 ### Updating to a newer version
 
 The program improves over time (new flags, fixes, species data). How you update
