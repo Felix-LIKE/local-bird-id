@@ -14,7 +14,8 @@ tagged:
   3. build a candidate shortlist from the offline eBird region x month tables,
      optionally boosted by an eBird checklist export (*_observations.csv) that
      sits in the photo folder
-  4. classify the photo with BioCLIP 2 (pybioclip, CPU) and get a ranked
+  4. classify the photo with BioCLIP 2 (pybioclip; CPU, or the AMD NPU via
+     ONNX/VitisAI when --device auto detects one) and get a ranked
      species + confidence
   5. write ONE XMP sidecar per capture (readable by any photo-management
      program):  <base>.xmp
@@ -74,6 +75,7 @@ See --help for all options. Examples:
 
 import argparse
 import csv
+import glob
 import io
 import json
 import os
@@ -1148,6 +1150,57 @@ def write_folder_reports(root: Path, manifest: dict, report_rows: list[dict]):
 # Classifier backends
 # --------------------------------------------------------------------------
 
+# Compute-device selection: prefer the AMD NPU when it is present and usable,
+# otherwise run the BioCLIP 2 image encoder on the CPU. Nothing here imports
+# onnxruntime at module load — the NPU path is only reached when a VitisAI EP
+# (Ryzen AI Software) is actually installed, so a stock install runs on CPU
+# exactly as before.
+
+def _npu_hardware_present() -> bool:
+    """True when the OS exposes an AMD NPU device (/dev/accel/accel* — the
+    amdxdna driver creates these). Pure probe, no heavy imports."""
+    try:
+        return bool(glob.glob("/dev/accel/accel*"))
+    except Exception:
+        return False
+
+
+def _vitisai_available() -> bool:
+    """True when an onnxruntime with the AMD VitisAI execution provider (the
+    NPU runtime, shipped by Ryzen AI Software) is importable."""
+    try:
+        import onnxruntime  # type: ignore
+        return "VitisAIExecutionProvider" in onnxruntime.get_available_providers()
+    except Exception:
+        return False
+
+
+def detect_device(requested: str = "auto") -> tuple[str, str]:
+    """Resolve the compute device for the BioCLIP 2 image encoder.
+
+    Returns (device, note); device is 'npu' or 'cpu' and note is a short
+    human-readable explanation of the choice.
+      auto  -> 'npu' iff the NPU is present AND the VitisAI EP is usable;
+              otherwise 'cpu'.
+      npu   -> 'npu' (with the EP present); falls back to 'cpu' when the EP is
+              missing, with a note explaining why.
+      cpu   -> always 'cpu'.
+    """
+    hw = _npu_hardware_present()
+    va = _vitisai_available()
+    if requested == "cpu":
+        return "cpu", "device: cpu (forced with --device cpu)"
+    if requested == "npu" and not hw:
+        return "cpu", "device: cpu (--device npu requested but no AMD NPU found)"
+    if hw and va:
+        return "npu", "device: npu (AMD VitisAI EP)"
+    if hw:
+        return "cpu", ("device: cpu (AMD NPU present but the VitisAI EP is not "
+                       "installed - see 'birdid --help' / README for the Ryzen "
+                       "AI Software packages)")
+    return "cpu", "device: cpu (no AMD NPU detected)"
+
+
 class Classifier:
     """Base interface: classify one photo against a candidate species list.
 
@@ -1616,8 +1669,54 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
+# Default location for the ONNX BioCLIP 2 image encoder (the fushanbobfan
+# ViT-L/14 int8 export; see README). Override with $BIRDID_ONNX_IMAGE_ENCODER.
+_DEFAULT_ONNX_ENCODER = Path.home() / ".cache" / "birdid" / "onnx" / \
+    "bioclip2_vitl14_image_int8.onnx"
+
+
+class NpuImageEncoder:
+    """BioCLIP 2 image encoder via ONNX Runtime on the AMD NPU (VitisAI EP).
+
+    Only the ViT forward moves to the NPU. Preprocessing is pybioclip's OWN
+    transform (the shared backbone's ``.preprocess`` — ToTensor, Resize 224,
+    the ImageNet mean/std) so the embedding lives in the same space as the
+    on-disk per-species text-embedding cache and rankings stay consistent with
+    the CPU path. The output is L2-normalized float32, exactly like
+    ``create_image_features_for_image(..., normalize=True)``.
+
+    The int8 quantized export (cosine ~0.99 vs the fp32 torch encoder) is what
+    the VitisAI EP runs best, so NPU results are near-identical to CPU, not
+    bit-identical.
+
+    Input contract of the export: (N,3,224,224) float32 -> (N,768) embedding.
+    """
+
+    def __init__(self, onnx_path: Path, backbone):
+        import onnxruntime  # type: ignore
+        self._session = onnxruntime.InferenceSession(
+            str(onnx_path),
+            providers=["VitisAIExecutionProvider", "CPUExecutionProvider"])
+        self._in_name = self._session.get_inputs()[0].name
+        self._backbone = backbone   # provides .preprocess (pybioclip transform)
+
+    def encode_image(self, image: str | Path) -> np.ndarray:
+        """One L2-normalized image embedding (float32 [DIM]) on the NPU."""
+        import PIL.Image
+        img = PIL.Image.open(image).convert("RGB")
+        # pybioclip's exact transform -> [1,3,224,224] float32 on CPU.
+        inp = self._backbone.preprocess(img).unsqueeze(0).cpu().numpy()
+        out = self._session.run(None, {self._in_name: inp})[0]
+        feat = np.asarray(out).reshape(-1).astype(np.float32)
+        n = float(np.linalg.norm(feat))
+        return feat / n if n > 0.0 else feat
+
+
 class BioclipClassifier(Classifier):
-    """BioCLIP 2 (pybioclip) - text-conditioned species classifier on CPU.
+    """BioCLIP 2 (pybioclip) - text-conditioned species classifier. The image
+    encoder runs on the CPU by default, or on the AMD NPU via ONNX/VitisAI
+    when --device auto detects one (see detect_device); the text side is
+    always the shared on-disk species-embedding cache.
 
     Two-stage design (matches the project goal for birds + macro subjects):
       stage 1 (coarse, cheap): softmax over broad categories (bird / reptile /
@@ -1657,15 +1756,56 @@ class BioclipClassifier(Classifier):
         self._cache = SpeciesEmbeddingCache(Path(args.cache_dir))
         self._tol = None
         self._Rank = None
+        # Compute device: NPU when requested/present+usable, else CPU. Stored
+        # so main() can print the one-line verdict. The ONNX encoder is built
+        # lazily (only when device == 'npu' AND the .onnx exists); a stock
+        # install has neither, so _encode_image stays on the CPU path.
+        self.device, self.device_note = detect_device(getattr(args, "device", "auto"))
+        self._npu_enc = None
+        self._npu_tried = False
 
     def _load_coarse(self):
         if self._coarse is None:
             self._coarse = _load_backbone()
         return self._coarse
 
+    def _npu_encoder(self):
+        """Lazily build the ONNX image encoder (NPU) when it is usable. Returns
+        None when the device isn't the NPU, the .onnx is missing, or the EP
+        fails - in every case the caller falls back to the pybioclip CPU
+        encoder, so a misconfigured NPU never breaks a run."""
+        if self.device != "npu" or self._npu_tried:
+            return self._npu_enc
+        self._npu_tried = True
+        onnx_path = Path(os.environ.get("BIRDID_ONNX_IMAGE_ENCODER",
+                                        str(_DEFAULT_ONNX_ENCODER)))
+        if not onnx_path.is_file():
+            self._report("device", f"NPU selected but image encoder "
+                                   f"{onnx_path} not found - using the "
+                                   "pybioclip CPU encoder (download it with "
+                                   "the README's 'birdid --download-backends' "
+                                   "or set $BIRDID_ONNX_IMAGE_ENCODER)")
+            return None
+        try:
+            self._npu_enc = NpuImageEncoder(onnx_path, self._load_coarse())
+            self._report("device", f"NPU image encoder active "
+                                   f"({onnx_path.name})")
+        except Exception as e:      # noqa: BLE001 - EP failures must degrade
+            self._report("device", f"NPU image encoder failed ({e}) - using "
+                                   "the pybioclip CPU encoder")
+            self._npu_enc = None
+        return self._npu_enc
+
     def _encode_image(self, image: str) -> np.ndarray:
-        """One normalized image embedding (CPU, float32 [DIM]) - the image side
-        of the softmax, encoded exactly once per photo."""
+        """One normalized image embedding (float32 [DIM]) - the image side
+        of the softmax, encoded exactly once per photo.
+
+        Uses the ONNX NPU encoder when the device resolved to the NPU and the
+        encoder is usable; otherwise the pybioclip CPU encoder (identical
+        semantics, near-identical results)."""
+        enc = self._npu_encoder()
+        if enc is not None:
+            return enc.encode_image(image)
         feat = self._load_coarse().create_image_features_for_image(
             image, normalize=True)
         return feat.cpu().numpy().astype(np.float32)
@@ -4056,6 +4196,15 @@ def main():
                     help="predownload the BioCLIP 2 + TreeOfLife backends so a "
                          "later run works fully offline (same backend part as "
                          "--initialize)")
+    ap.add_argument("--device", choices=["auto", "npu", "cpu"], default="auto",
+                    help="compute device for the BioCLIP 2 image encoder: "
+                         "'auto' (default) uses the AMD NPU when the hardware "
+                         "is present AND the VitisAI EP (Ryzen AI Software) is "
+                         "installed, else the CPU; 'npu'/'cpu' force a device "
+                         "(npu falls back to cpu if the EP is missing). The "
+                         "NPU path also needs the ONNX image encoder at "
+                         "$BIRDID_ONNX_IMAGE_ENCODER (default "
+                         "~/.cache/birdid/onnx/bioclip2_vitl14_image_int8.onnx)")
     ap.add_argument("--api-delay", type=float, default=1.5,
                     help="seconds between eBird API calls (rate-limit guard, default 1.5)")
     ap.add_argument("--sample-dates", type=int, default=2,
@@ -4408,6 +4557,8 @@ def main():
                 tui.progress(stage, done, total, msg)
             classifier.progress = on_progress
             classifier.progress_bar = on_progress_bar
+            tui.plain_line(getattr(classifier, "device_note",
+                                   "device: cpu"))
             classifier.warm()
             tui.plain_line(f"classifier: {classifier.describe()}")
 

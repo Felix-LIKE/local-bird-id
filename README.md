@@ -345,6 +345,49 @@ Done — see **Quick usage** below.
 
 ---
 
+### NPU acceleration (optional, AMD Ryzen AI)
+
+`birdid` can run the BioCLIP 2 image encoder on an AMD **NPU** when the machine
+has one — the driver, XRT and the AMD userspace plugin are already handled by
+your distribution (`amdxdna` kernel module + `/dev/accel/accel*`). Everything
+here is **optional**: without any of it, `birdid` runs on the CPU exactly as
+before, and the NPU path is only used when every piece is present.
+
+**How the device is chosen.** The default is `--device auto`:
+
+- **NPU** — only when BOTH the hardware is present (`/dev/accel/accel*`) AND the
+  AMD **VitisAI** ONNX Runtime execution provider is importable.
+- **CPU** — otherwise (with a one-line note at startup explaining why).
+
+`--device npu` forces the NPU (and falls back to CPU with a warning if the
+pieces are missing); `--device cpu` forces the CPU.
+
+**What you need for the NPU path:**
+
+| Piece | What it is | How to get it |
+|---|---|---|
+| `amdxdna` driver + firmware | kernel NPU support | Arch: in-tree (`modinfo amdxdna`), `/dev/accel/accel0` |
+| `xrt` + `xrt-plugin-amdxdna` | XRT runtime + XDNA userspace plugin | Arch: `pacman -S xrt xrt-plugin-amdxdna` (or your distro's equivalents) |
+| **Ryzen AI Software** | `onnxruntime` with `VitisAIExecutionProvider` + model compiler | AMD's installer (`install_ryzen_ai.sh`, targets Python 3.12 — install e.g. `uv python install 3.12`) |
+| **ONNX image encoder** | the BioCLIP 2 ViT image tower exported to ONNX (int8) | the ONNX file + its SHA-256 in the README of `fushanbobfan/bioclip2-vitl14-image-onnx` (HF); save as `~/.cache/birdid/onnx/bioclip2_vitl14_image_int8.onnx` or set `$BIRDID_ONNX_IMAGE_ENCODER` |
+
+The ONNX file is a **separate download** from the model weights — it is the
+same BioCLIP 2 image encoder (ViT-L/14, int8, ~0.99 cosine similarity to the
+PyTorch encoder), exported so the VitisAI EP can run it. Only the image
+forward moves to the NPU; the species-embedding cache (the text side) is
+unchanged.
+
+**What it does NOT do:** NPU inference is **not** free speed. On the same
+XDNA2 hardware class a real transformer workload measured essentially CPU/NPU
+**parity** (~1.0–1.03×) at batch 1, which is exactly how `birdid` encodes
+photos (one at a time) — so the NPU path is primarily for offloading the NPU's
+compute rather than a guaranteed speedup. It is also new: run
+`birdid /path/to/photos --dry-run` first and compare a couple of photos'
+rankings between `--device cpu` and `--device npu` before trusting a large
+run to the NPU.
+
+---
+
 ### Updating to a newer version
 
 The program improves over time (new flags, fixes, species data). How you update

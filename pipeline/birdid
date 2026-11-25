@@ -27,6 +27,8 @@
 #   birdid --api [<key>]               # store / show the eBird API key
 #   birdid --initialize                # one-time: taxonomy + BioCLIP 2 backends
 #   birdid --download-backends         # (same backend part as --initialize)
+#   birdid --device auto|npu|cpu       # compute device for the image encoder:
+#                                      # auto = NPU when present+usable, else CPU
 #   birdid --list-candidates           # inspect the region/month tables
 #   birdid --doctor                    # launcher self-diagnostics (run whenever
 #                                      # a run ends in a confusing bash error)
