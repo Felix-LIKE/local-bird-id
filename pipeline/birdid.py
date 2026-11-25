@@ -202,6 +202,15 @@ BIRD_NS = "http://ns.birdpipeline/1.0/"
 # zero config in the photo toolchain birdid already speaks to).
 DWC_NS = "http://rs.tdwg.org/dwc/index.htm"
 
+# The Metadata Working Group "Regions" namespace — the standard XMP mechanism
+# for regions with bounding boxes (Windows Photo Gallery, GIMP, Darktable, ...).
+# The URI is the MWG schema (exiftool's XMP.pm registers 'mwg-rs' ->
+# http://www.metadataworkinggroup.com/schemas/regions/). A multi-bird capture
+# mirrors its bird:regions boxes here as mwg-rs:RegionInfo/RegionList, so
+# generic XMP tools read the boxes even though the per-bird candidate lists
+# live in the bird: namespace.
+MWG_RS_NS = "http://www.metadataworkinggroup.com/schemas/regions/"
+
 # The controlled vocabulary value birdid writes for the confirmation status.
 # Not in the canonical HISPID/ABCD integer list, but the convention for exactly
 # this case: a human verified the identification. Its presence ALSO freezes the
@@ -2078,6 +2087,188 @@ def make_classifier(args) -> Classifier:
 
 
 # --------------------------------------------------------------------------
+# Multi-bird detection: region proposal for a "contains multiple birds" capture
+# --------------------------------------------------------------------------
+
+class Detector:
+    """Finds candidate bird regions in one photo.
+
+    ``detect`` returns normalized (0..1) boxes ``{x, y, w, h, score}`` (x/y =
+    top-left corner). It is a REGION PROPOSAL stage only — each returned crop
+    is then classified by the normal birdid classifier, so a detector needs to
+    localize birds, not identify species. Subclasses plug in different
+    backends behind the same interface (the built-in zero-shot BioCLIP crop
+    scan now; a dedicated YOLO-style ONNX model later)."""
+
+    name = "base"
+
+    def __init__(self, args, classifier=None):
+        self.args = args
+        self.classifier = classifier
+
+    def describe(self) -> str:
+        return self.name
+
+    def detect(self, image: Path) -> list[dict]:
+        raise NotImplementedError
+
+
+class BioClipCropDetector(Detector):
+    """Zero-shot region proposal with the shared BioCLIP backbone — no extra
+    model download.
+
+    Scores a fixed set of plausible crop compositions ("a photo of a bird" vs
+    a few distractor texts) and keeps the highest-scoring non-overlapping
+    boxes. This is the cheap-to-add default: it reuses the BioCLIP 2 backbone
+    already loaded for classification, so multi-bird works out of the box. It
+    is weaker on small or heavily-overlapping birds than a dedicated object
+    detector — a YOLO-style ONNX backend behind the same Detector interface is
+    the planned upgrade."""
+
+    name = "bioclip-crops"
+
+    # A spread of candidate compositions (normalized 0..1, x/y top-left): the
+    # whole frame, halves, quarters, a centered crop. A bird mid-frame is
+    # caught by several overlapping windows, so NMS collapses them.
+    _CANDIDATES = [
+        (0.00, 0.00, 1.00, 1.00),
+        (0.00, 0.00, 1.00, 0.60), (0.00, 0.40, 1.00, 0.60),
+        (0.00, 0.00, 0.60, 1.00), (0.40, 0.00, 0.60, 1.00),
+        (0.10, 0.10, 0.80, 0.80), (0.20, 0.00, 0.60, 0.60),
+        (0.20, 0.40, 0.60, 0.60), (0.00, 0.20, 0.50, 0.60),
+        (0.50, 0.20, 0.50, 0.60),
+    ]
+    _PROBES = ["a photo of a bird",
+               "a photo of a landscape", "a photo of a building",
+               "a photo of a plant", "a photo of a mammal"]
+
+    def __init__(self, args, classifier=None):
+        super().__init__(args, classifier)
+        self._min_score = float(getattr(args, "multi_min_confidence", 0.55))
+
+    def _score_crop(self, image: Path, x: float, y: float, w: float, h: float):
+        crop = _crop_to_temp(image, x, y, w, h, margin=0.06)
+        feat = self.classifier._encode_image(str(crop))
+        probs = self.classifier._probs_for(feat, list(self._PROBES))
+        return float(probs[0])
+
+    def detect(self, image: Path) -> list[dict]:
+        scored = []
+        for (x, y, w, h) in self._CANDIDATES:
+            scored.append({
+                "x": x, "y": y, "w": w, "h": h,
+                "score": self._score_crop(image, x, y, w, h),
+            })
+        scored.sort(key=lambda r: r["score"], reverse=True)
+        keep = [r for r in scored if r["score"] >= self._min_score]
+        return _nms(keep, iou_threshold=0.5)[:8]
+
+
+def _nms(boxes: list[dict], iou_threshold: float) -> list[dict]:
+    """Greedy non-maximum suppression over normalized boxes (keeps the highest
+    score, drops any box with IoU above the threshold). Input already
+    score-descending."""
+    out: list[dict] = []
+    for b in boxes:
+        if all(_iou(b, k) <= iou_threshold for k in out):
+            out.append(b)
+    return out
+
+
+def _iou(a: dict, b: dict) -> float:
+    ax0, ay0 = a["x"], a["y"]
+    ax1, ay1 = a["x"] + a["w"], a["y"] + a["h"]
+    bx0, by0 = b["x"], b["y"]
+    bx1, by1 = b["x"] + b["w"], b["y"] + b["h"]
+    ix = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    iy = max(0.0, min(ay1, by1) - max(ay0, by0))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    union = a["w"] * a["h"] + b["w"] * b["h"] - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _crop_to_temp(image: Path, x: float, y: float, w: float, h: float,
+                  margin: float = 0.06) -> Path:
+    """Crop the photo to a normalized box (plus a fractional margin, clamped
+    to the frame) and write a temp JPEG for the classifier. Returns the temp
+    path (caller may delete it)."""
+    from PIL import Image as PILImage
+    with PILImage.open(image) as im:
+        W, H = im.size
+        px, py = max(0.0, x - margin), max(0.0, y - margin)
+        pw, ph = min(1.0, x + w + margin) - px, min(1.0, y + h + margin) - py
+        left = int(px * W); top = int(py * H)
+        right = int(min(1.0, px + pw) * W); bottom = int(min(1.0, py + ph) * H)
+        crop = im.crop((left, top, max(left + 1, right), max(top + 1, bottom)))
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="birdid-crop-", suffix=".jpg")
+    os.close(fd)
+    crop.convert("RGB").save(path, "JPEG", quality=92)
+    return Path(path)
+
+
+def _detect_and_classify(detector: Detector, classifier: Classifier, primary: Path,
+                         ladder, taxonomy, region, month, dt, args,
+                         max_regions: int = 8) -> list[dict]:
+    """Run the detector over one capture, classify each region crop with the
+    same regional ladder as the whole image, and assemble the per-bird region
+    records (normalized box + ranked candidate list + status). Crop files are
+    temporary and removed after each classification."""
+    # Coarse categories that are NOT birds - a crop that slipped through the
+    # detector's bird probe but classifies as e.g. 'plant' is dropped, so a
+    # false-positive region never becomes a bogus bird record.
+    non_bird = {
+        c.replace("a photo of a ", "").replace("a photo of an ", "")
+        .replace("a photo of ", "").strip().lower()
+        for c in COARSE_LABELS if c != "a photo of a bird"
+    }
+    boxes = detector.detect(primary)
+    regions: list[dict] = []
+    for box in boxes[:max_regions]:
+        crop = _crop_to_temp(primary, box["x"], box["y"], box["w"], box["h"])
+        try:
+            r = classifier.classify(crop, ladder, taxonomy, region, month, dt)
+        finally:
+            try:
+                crop.unlink()
+            except OSError:
+                pass
+        if not isinstance(r, dict) or not r.get("species"):
+            continue
+        if str(r["species"]).strip().lower() in non_bird:
+            continue
+        species, scientific = normalize_species(str(r["species"]), taxonomy)
+        ranked = [species] + [a for a in r.get("alternatives", []) if a and a != species]
+        conf = float(r.get("confidence", 0.0))
+        confs = [conf] + [
+            max(0.05, round(conf - 0.1 * (i + 1), 2)) for i in range(len(ranked) - 1)
+        ]
+        regions.append({
+            "x": box["x"], "y": box["y"], "w": box["w"], "h": box["h"],
+            "topSpecies": species,
+            "topConfidence": confs[0],
+            "status": r.get("status") or (
+                "done" if confs[0] >= float(getattr(args, "min_confidence", 0.5))
+                else "low-confidence"),
+            "ranked": list(zip(ranked, confs)),
+            "reasoning": r.get("reasoning", ""),
+        })
+    return regions
+
+
+def make_detector(args, classifier=None) -> Detector | None:
+    """The region-proposal backend for --multi / flagged captures. The built-in
+    zero-shot BioCLIP crop detector needs no download and is always available
+    once the classifier exists. (A dedicated YOLO-style ONNX backend will be
+    added behind the same interface; until then the built-in is used.)"""
+    if classifier is None:
+        return None
+    return BioClipCropDetector(args, classifier)
+
+
+# --------------------------------------------------------------------------
 # XMP sidecars (merge-aware; safe for any photo-management program)
 # --------------------------------------------------------------------------
 
@@ -2100,6 +2291,7 @@ def _xmp_tree(sidecar: Path):
     # See write_sidecar's normalisation step for the full story.
     etree.register_namespace("bird", BIRD_NS)
     etree.register_namespace("dwc", DWC_NS)
+    etree.register_namespace("mwg-rs", MWG_RS_NS)
     parser = etree.XMLParser(remove_blank_text=False, recover=True)
     if sidecar.exists():
         try:
@@ -2138,6 +2330,7 @@ def _nsmap():
         "dc": "http://purl.org/dc/elements/1.1/",
         "bird": BIRD_NS,
         "dwc": DWC_NS,
+        "mwg-rs": MWG_RS_NS,
     }
 
 
@@ -2167,6 +2360,88 @@ def _set_list(parent, tag, ns_uri, values, container):
         li.text = str(v)
 
 
+def _region_summary(r: dict) -> str:
+    """The human-readable one-line summary for one region (mirrors the primary
+    bird:summary shape: "Coal Tit 43% | Great Tit 33%")."""
+    ranked = r.get("ranked") or []
+    if not ranked:
+        return r.get("topSpecies", "")
+    return " | ".join(f"{s} {c*100:.0f}%" for s, c in ranked)
+
+
+def _set_regions(desc, regions: list[dict]):
+    """Write the per-bird region records of a multi-bird capture.
+
+    ``regions`` is a list of ``{x, y, w, h, topSpecies, topConfidence, status,
+    ranked: [(species, conf), ...], reasoning}`` — each a normalized (0..1)
+    bounding box plus that bird's own ranked candidate list. Two mirrors are
+    written:
+
+      * ``bird:regions`` — a Seq of structs (each an rdf:Description) with the
+        box + per-bird species/confidence/topSpecies/status, plus
+        ``bird:birdCount`` and the ``bird:multiBird`` badge. This is the
+        viewer's per-bird data (its own ranked possibilities list).
+      * ``mwg-rs:Regions`` — the standard Metadata Working Group mirror:
+        RegionList > Region > Area(x,y,w,h normalized) + Name + Type "Bird" +
+        Description, so generic XMP tools can read the bounding boxes.
+
+    Idempotent: any existing bird:regions / bird:birdCount / mwg-rs:Regions are
+    dropped and rebuilt, so a re-run never accumulates stale regions."""
+    from lxml import etree
+    rdf = _nsmap()["rdf"]
+    mwg = MWG_RS_NS
+
+    # Drop stale per-bird markers + the mwg-rs mirror (bird:multiBird is
+    # re-set below).
+    for tag in ("regions", "birdCount"):
+        for old in desc.findall(f"{{{BIRD_NS}}}{tag}"):
+            desc.remove(old)
+    for old in desc.findall(f"{{{mwg}}}Regions"):
+        desc.remove(old)
+
+    _set_text(desc, "multiBird", BIRD_NS, "true")
+    _set_text(desc, "birdCount", BIRD_NS, str(len(regions)))
+
+    # bird:regions — Seq of structs (per-bird ranked candidate lists + box).
+    el = etree.SubElement(desc, f"{{{BIRD_NS}}}regions")
+    seq = etree.SubElement(el, f"{{{rdf}}}Seq")
+    for r in regions:
+        li = etree.SubElement(seq, f"{{{rdf}}}li")
+        sd = etree.SubElement(li, f"{{{rdf}}}Description")
+        _set_text(sd, "x", BIRD_NS, f"{float(r['x']):.4f}")
+        _set_text(sd, "y", BIRD_NS, f"{float(r['y']):.4f}")
+        _set_text(sd, "w", BIRD_NS, f"{float(r['w']):.4f}")
+        _set_text(sd, "h", BIRD_NS, f"{float(r['h']):.4f}")
+        _set_text(sd, "topSpecies", BIRD_NS, r.get("topSpecies", ""))
+        _set_text(sd, "topConfidence", BIRD_NS, f"{float(r.get('topConfidence', 0)):.2f}")
+        _set_text(sd, "status", BIRD_NS, r.get("status", "done"))
+        ranked = r.get("ranked") or []
+        _set_list(sd, "species", BIRD_NS, [s for s, _ in ranked], "Seq")
+        _set_list(sd, "confidence", BIRD_NS,
+                  [f"{float(c):.2f}" for _, c in ranked], "Seq")
+        if r.get("reasoning"):
+            _set_text(sd, "reasoning", BIRD_NS, str(r["reasoning"])[:500])
+
+    # mwg-rs:Regions mirror — the standard Metadata Working Group region/box
+    # representation (Windows/GIMP/Darktable read it): Regions > RegionList >
+    # Bag of Region, each Region a Resource with Area(X/Y/W/H) + Name + Type.
+    # Written exactly per the MWG spec so generic XMP tools read the boxes.
+    mreg = etree.SubElement(desc, f"{{{mwg}}}Regions")
+    rl = etree.SubElement(mreg, f"{{{mwg}}}RegionList")
+    bag = etree.SubElement(rl, f"{{{rdf}}}Bag")
+    for r in regions:
+        li = etree.SubElement(bag, f"{{{rdf}}}li", attrib={
+            f"{{{_nsmap()['rdf']}}}parseType": "Resource"})
+        area = etree.SubElement(li, f"{{{mwg}}}Area", attrib={
+            f"{{{_nsmap()['rdf']}}}parseType": "Resource"})
+        for sk, lk in (("x", "X"), ("y", "Y"), ("w", "W"), ("h", "H")):
+            etree.SubElement(area, f"{{{mwg}}}{lk}").text = f"{float(r[sk]):.4f}"
+        etree.SubElement(li, f"{{{mwg}}}Name").text = r.get("topSpecies", "")
+        etree.SubElement(li, f"{{{mwg}}}Type").text = "Bird"
+        etree.SubElement(li, f"{{{mwg}}}Description").text = _region_summary(r)
+
+
+
 def _dc_keywords_owned(root):
     """True if an existing dc:subject was written by birdid (i.e. it contains
     our `Birds/` / `Non-bird/` keyword prefixes). Backward compatibility for
@@ -2188,6 +2463,8 @@ _XMP_DESC_ORDER = [
     ("bird", "avibaseId"), ("bird", "avibaseUrl"), ("bird", "topConfidence"),
     ("bird", "confirmed"), ("bird", "status"), ("bird", "pipelineVersion"), ("bird", "region"),
     ("bird", "month"), ("bird", "datetime"), ("bird", "reasoning"),
+    ("bird", "multiBird"), ("bird", "birdCount"), ("bird", "regions"),
+    ("mwg-rs", "Regions"),
     ("bird", "dcOwned"), ("bird", "error"), ("dc", "description"), ("dc", "subject"),
 ]
 
@@ -2282,8 +2559,14 @@ def sidecar_frozen(sidecar: Path) -> bool:
 
 def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
                   dt: datetime, status: str, cfg, error: str = None, scientific: str = "",
-                  avibase_url: str = "", avibase_id: str = ""):
-    """Create/merge an XMP sidecar at `sidecar`. Originals are never touched."""
+                  avibase_url: str = "", avibase_id: str = "", regions: list | None = None):
+    """Create/merge an XMP sidecar at `sidecar`. Originals are never touched.
+
+    ``regions`` (optional) is the per-bird list of a MULTI-BIRD capture: each
+    entry a normalized box + that bird's own ranked candidate list, written as
+    bird:regions (+ bird:birdCount/bird:multiBird) and mirrored to the standard
+    mwg-rs:Regions boxes (see ``_set_regions``). The primary bird:species /
+    topSpecies fields stay the whole-image result for compatibility."""
     from lxml import etree
     preexisted = sidecar.exists()
     root = _xmp_tree(sidecar)
@@ -2303,6 +2586,13 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # likewise treated as a human verdict.
     if _root_frozen(root):
         return
+
+    # The user flagged this capture for MULTI-BIRD analysis (bird:multiBird).
+    # The flag is a re-runnable request, not a verdict: it must SURVIVE a
+    # normal (single-bird) re-run so the capture stays queued for --multi, and
+    # a multi run sets it again (see _set_regions). Capture it before the
+    # bird:* strip below and re-assert it when this run isn't multi.
+    was_multi = bool(_find(root, "//bird:multiBird[text()='true']"))
 
     # A sidecar birdid created (or already manages) is "owned": with the
     # opt-in --dc-fields flag birdid may also maintain the human-readable
@@ -2337,9 +2627,26 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # defaulting it into Aves. The only way to drop a confirmed ladder is
     # --unconfirm. (Only --confirm writes the full per-species dwc mirror; the
     # partial ladder is a class-only ladder.)
+    # A normal (single-bird) re-run of a capture the user flagged for
+    # multi-bird must keep the flag (bird:multiBird) so it stays queued for a
+    # --multi run — and must KEEP the existing per-region records too (a
+    # --force re-ID must not drop the user's per-bird data while the standard
+    # mwg-rs box mirror — a foreign namespace write_sidecar never strips —
+    # lingers, which would orphan the boxes). A MULTI run (regions set)
+    # rebuilds them via _set_regions below, so it strips to stay idempotent.
+    multi_keep = {f"{{{BIRD_NS}}}regions", f"{{{BIRD_NS}}}birdCount",
+                  f"{{{BIRD_NS}}}multiBird"}
     for el in list(desc):
         if el.tag.startswith(f"{{{BIRD_NS}}}"):
+            if was_multi and not regions and el.tag in multi_keep:
+                continue
             desc.remove(el)
+
+    # re-assert the flag when it was NOT preserved above (i.e. a multi run
+    # that produced no regions still keeps the request queued)
+    if was_multi and not regions and not any(
+            el.tag == f"{{{BIRD_NS}}}multiBird" for el in desc):
+        _set_text(desc, "multiBird", BIRD_NS, "true")
 
     if owned:
         _set_text(desc, "dcOwned", BIRD_NS, "true")
@@ -2413,6 +2720,11 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
                     seen.add(s)
                     li = etree.SubElement(bag, f"{{{_nsmap()['rdf']}}}li")
                     li.text = f"{kw_prefix}/{s}"
+
+        # A multi-bird capture: per-bird region records (ranked candidate lists
+        # + normalized boxes) + the standard mwg-rs box mirror.
+        if regions:
+            _set_regions(desc, regions)
 
     # canonical element order, regardless of whether this sidecar was merged
     # into an existing file (a re-run must not drift the layout)
@@ -3026,6 +3338,23 @@ def sidecar_status(sidecar: Path):
     return None
 
 
+def sidecar_multi(sidecar: Path) -> bool:
+    """True when the capture is flagged 'contains multiple birds'
+    (bird:multiBird=true). This is a RE-RUNNABLE REQUEST set from the viewer
+    (or --multi): it marks the capture for multi-bird analysis without freezing
+    it, so a --multi run can keep reprocessing it until the user un-flags it.
+    It never makes a capture pending on a normal run - the queueing decision is
+    made in main() under --multi only."""
+    if not sidecar.exists():
+        return False
+    try:
+        root = _xmp_tree(sidecar)
+        st = _find(root, "//bird:multiBird")
+        return bool(st and st[0].text and st[0].text.strip().lower() == "true")
+    except Exception:
+        return False
+
+
 def sidecar_prefilter(sidecar: Path):
     """The prefilter of a group-partial sidecar: the dwc:Taxon ladder the
     viewer wrote when the user pinned the group — a coarse group (class, with
@@ -3497,6 +3826,29 @@ def main():
                          "stop being partial (the pin is consumed), so "
                          "re-running is naturally idempotent. No --force "
                          "needed: partials are re-processed on their own.")
+    ap.add_argument("--multi", action="store_true",
+                    help="multi-bird analysis (OPT-IN): re-process every "
+                         "capture flagged 'contains multiple birds' "
+                         "(bird:multiBird=true, set from the viewer). Each "
+                         "flagged photo is scanned for bird regions (the "
+                         "built-in zero-shot BioCLIP crop detector - no extra "
+                         "download), every region is cropped and classified "
+                         "with the same regional ladder as the whole image, "
+                         "and the sidecar gets per-region candidate lists "
+                         "(bird:regions) plus the standard mwg-rs:Regions "
+                         "bounding boxes. The whole-image bird:* fields are "
+                         "still written for compatibility. The flag is kept "
+                         "until you un-flag it in the viewer, so re-running "
+                         "--multi re-identifies; frozen (confirmed) captures "
+                         "are never touched. A dedicated YOLO-style ONNX "
+                         "detector will slot into the same interface later.")
+    ap.add_argument("--multi-min-confidence", type=float, default=0.55,
+                    help="region 'is a bird' score threshold: a proposed "
+                         "crop is only kept as a bird region when the "
+                         "built-in detector scores it at least this high "
+                         "against 'a photo of a bird' (default 0.55). Lower "
+                         "it to catch more/smaller birds at the cost of more "
+                         "false positives.")
     ap.add_argument("--force", action="store_true",
                     help="force a fresh identification run for a folder that "
                          "already has sidecars: every capture is re-processed "
@@ -3856,6 +4208,16 @@ def main():
             tui.progress("status", i, len(captures),
                          "checking existing sidecars")
             status = classify_capture(cap, args.force)
+            # A capture the viewer flagged 'contains multiple birds' is a
+            # re-runnable request: under --multi it is ALWAYS queued for
+            # multi-bird analysis, even if its whole-image sidecar is already
+            # done. The flag never makes a capture pending on a normal run
+            # (single-bird behaviour is unchanged), and a frozen/confirmed
+            # capture stays exempt (classify_capture already returned
+            # 'confirmed' above and the multi queue skips it below).
+            if (getattr(args, "multi", False) and sidecar_multi(cap.sidecar())
+                    and status != "confirmed"):
+                status = "pending"
             if status == "partial":
                 # group-partial confirmation: the viewer pinned the subject's
                 # group but not the species, so birdid must re-identify it —
@@ -3989,6 +4351,15 @@ def main():
             classifier.progress_bar = on_progress_bar
             classifier.warm()
             tui.plain_line(f"classifier: {classifier.describe()}")
+
+            # Multi-bird region proposal (only touched when a capture is
+            # flagged / --multi). The built-in zero-shot BioCLIP crop detector
+            # needs no download; a dedicated ONNX backend slots in behind the
+            # same Detector interface in make_detector.
+            detector = make_detector(args, classifier)
+            if getattr(args, "multi", False) and detector is not None:
+                tui.plain_line(f"multi-bird detector: {detector.describe()} "
+                               "(flagged captures only)")
 
             report_rows = []
             stop = tui.stop_flag
@@ -4221,10 +4592,33 @@ def main():
                     # already holds a higher confidence, keep that record and
                     # skip the write instead of downgrading the sidecar.
                     # --force explicitly overrides this: a forced re-ID always
-                    # writes the new result, whatever it scores.
+                    # writes the new result, whatever it scores. A MULTI-BIRD
+                    # re-analysis also always writes: the whole-image score is
+                    # often lower on a crowded frame (which is WHY the user
+                    # flagged it), and the per-region records are the point of
+                    # the run - skipping the write would drop them.
+                    is_multi = (getattr(args, "multi", False)
+                                and sidecar_multi(sidecar))
+                    regions = None
+                    if is_multi and detector is not None:
+                        tui.set(stage="detect",
+                                message=f"multi-bird scan: {primary.name}")
+                        regions = _detect_and_classify(
+                            detector, classifier, primary, ladder, taxonomy,
+                            region, month, dt, args)
+                        if regions:
+                            tui.plain_line(
+                                f"  {cap.base}: {len(regions)} bird regions -> "
+                                + ", ".join(f"{r['topSpecies']} {r['topConfidence']*100:.0f}%"
+                                            for r in regions))
+                        else:
+                            tui.plain_line(
+                                f"  {cap.base}: no bird region passed the "
+                                f"detector threshold (flag kept; adjust "
+                                f"--multi-min-confidence or check the photo)")
                     old_status = sidecar_status(sidecar)
                     old_best = _sidecar_best(sidecar)
-                    if (not args.force
+                    if (not args.force and not is_multi
                             and old_status in ("done", "low-confidence")
                             and old_best is not None
                             and old_best[1] > confidence + 1e-9):
@@ -4240,7 +4634,7 @@ def main():
                         tui.set(stage="sidecar", message=f"writing {sidecar.name}")
                         write_sidecar(sidecar, result, region, month, dt, status, args,
                                       scientific=scientific, avibase_url=avibase_url,
-                                      avibase_id=avibase_id)
+                                      avibase_id=avibase_id, regions=regions)
                         sidecars_written += 1
                         manifest[str(sidecar)] = {
                             "files": [str(f) for f in cap_files],
