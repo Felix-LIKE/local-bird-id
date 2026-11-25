@@ -26,11 +26,15 @@
 #                                     # update = sync with the current eBird tables
 #   birdid --api [<key>]               # store / show the eBird API key
 #   birdid --initialize                # one-time: taxonomy + BioCLIP 2 backends
-#   birdid --download-backends         # (same backend part as --initialize)
+#   birdid --download-backends         # (same backend part as --initialize, plus
+#                                      # the int8 ONNX image encoder for the
+#                                      # fast CPU path)
 #   birdid --download-detector         # (optional) dedicated ONNX multi-bird
 #                                      # detector - separate, opt-in download
 #   birdid --device auto|npu|cpu       # compute device for the image encoder:
 #                                      # auto = NPU when present+usable, else CPU
+#   birdid --no-onnx-encoder           # force the pybioclip CPU encoder (no int8
+#                                      # ONNX fast path) even when it is available
 #   birdid --list-candidates           # inspect the region/month tables
 #   birdid --doctor                    # launcher self-diagnostics (run whenever
 #                                      # a run ends in a confusing bash error)
@@ -212,6 +216,8 @@ if [ "$#" -eq 0 ]; then
     say "  birdid --initialize                one-time: taxonomy + BioCLIP 2 backends"
     say "  birdid --download-detector         (optional) dedicated ONNX multi-bird"
     say "                                     detector - separate, opt-in download"
+    say "  birdid --no-onnx-encoder           force the pybioclip CPU encoder"
+    say "                                     (no int8 ONNX fast path)"
     say "  birdid --list-candidates           inspect the region/month tables"
     say "  birdid --doctor                    check the launcher's own health"
     say ""

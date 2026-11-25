@@ -345,6 +345,41 @@ Done — see **Quick usage** below.
 
 ---
 
+### Faster CPU encoding (int8 ONNX image encoder)
+
+By default the BioCLIP 2 image encoder runs through PyTorch (`torch.compile`).
+If you install `onnxruntime`, `birdid` transparently switches the **image
+encoder** to an **int8 ONNX** export of the same model — measured **~4× faster
+on CPU** on this hardware (455 ms → 114 ms per photo encode) with essentially
+unchanged results (embedding cosine ~0.99, top species identical in all
+high-confidence tests). This is the single biggest per-photo speedup available:
+it applies to *every* photo, not just multi-bird shots.
+
+```bash
+pip install onnxruntime        # the runtime that RUNS it
+birdid --download-backends     # fetches the int8 ONNX encoder (~307 MB) into
+                               # the model cache, same as --initialize
+```
+
+The encoder is part of the BioCLIP backends (same weights, ONNX format — MIT),
+so `--download-backends` / `--initialize` fetch it; there is no separate
+download flag. `birdid` then picks the encoder automatically:
+
+- **int8 ONNX (CPU)** — when the model is cached **and** `onnxruntime` is
+  installed (measured ~4× faster than PyTorch on CPU).
+- **PyTorch CPU (`torch.compile`)** — otherwise (the safe default, always works).
+- `--no-onnx-encoder` forces the PyTorch path even when the ONNX encoder is
+  present (e.g. to rule out int8 quantization drift when comparing results);
+  `$BIRDID_ONNX_IMAGE_ENCODER` overrides the model path.
+
+This is a **quantized** encoder: the ~0.99 cosine similarity means confidence
+percentages shift by a few points, and in rare low-confidence cases a
+lookalike-pair prediction can change. High-confidence results are unaffected.
+The provenance is documented in the model card (`export.json`): the fp32 export
+matches PyTorch to 8.2e-06 and the on-disk SHA-256 is verified.
+
+---
+
 ### NPU acceleration (optional, AMD Ryzen AI)
 
 `birdid` can run the BioCLIP 2 image encoder on an AMD **NPU** when the machine
@@ -357,10 +392,13 @@ before, and the NPU path is only used when every piece is present.
 
 - **NPU** — only when BOTH the hardware is present (`/dev/accel/accel*`) AND the
   AMD **VitisAI** ONNX Runtime execution provider is importable.
-- **CPU** — otherwise (with a one-line note at startup explaining why).
+- **CPU** — otherwise (with a one-line note at startup explaining why). On the
+  CPU, the encoder still prefers the **int8 ONNX** fast path when it is
+  available, and only falls back to PyTorch when it is not.
 
 `--device npu` forces the NPU (and falls back to CPU with a warning if the
-pieces are missing); `--device cpu` forces the CPU.
+pieces are missing); `--device cpu` forces the CPU (still with the int8 ONNX
+fast path unless `--no-onnx-encoder`).
 
 **What you need for the NPU path:**
 
@@ -369,13 +407,13 @@ pieces are missing); `--device cpu` forces the CPU.
 | `amdxdna` driver + firmware | kernel NPU support | Arch: in-tree (`modinfo amdxdna`), `/dev/accel/accel0` |
 | `xrt` + `xrt-plugin-amdxdna` | XRT runtime + XDNA userspace plugin | Arch: `pacman -S xrt xrt-plugin-amdxdna` (or your distro's equivalents) |
 | **Ryzen AI Software** | `onnxruntime` with `VitisAIExecutionProvider` + model compiler | AMD's installer (`install_ryzen_ai.sh`, targets Python 3.12 — install e.g. `uv python install 3.12`) |
-| **ONNX image encoder** | the BioCLIP 2 ViT image tower exported to ONNX (int8) | the ONNX file + its SHA-256 in the README of `fushanbobfan/bioclip2-vitl14-image-onnx` (HF); save as `~/.cache/birdid/onnx/bioclip2_vitl14_image_int8.onnx` or set `$BIRDID_ONNX_IMAGE_ENCODER` |
+| **ONNX image encoder** | the BioCLIP 2 ViT image tower exported to ONNX (int8) | the ONNX file + its SHA-256 in the README of `fushanbobfan/bioclip2-vitl14-image-onnx` (HF); fetched by `birdid --download-backends` into the model cache, or set `$BIRDID_ONNX_IMAGE_ENCODER` |
 
-The ONNX file is a **separate download** from the model weights — it is the
-same BioCLIP 2 image encoder (ViT-L/14, int8, ~0.99 cosine similarity to the
-PyTorch encoder), exported so the VitisAI EP can run it. Only the image
-forward moves to the NPU; the species-embedding cache (the text side) is
-unchanged.
+The ONNX file is the **same BioCLIP 2 image encoder** (ViT-L/14, int8, ~0.99
+cosine similarity to the PyTorch encoder), exported so the VitisAI EP can run
+it — and it doubles as the **fast CPU path** (see above). It is fetched by
+`birdid --download-backends` / `--initialize`. Only the image forward moves to
+the NPU; the species-embedding cache (the text side) is unchanged.
 
 **What it does NOT do:** NPU inference is **not** free speed. On the same
 XDNA2 hardware class a real transformer workload measured essentially CPU/NPU

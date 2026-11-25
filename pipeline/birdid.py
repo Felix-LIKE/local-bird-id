@@ -46,10 +46,13 @@ Data management (see pipeline/ebird_data.py):
                                        with the current eBird tables
   birdid.py --api [<key>]              store / show the eBird API key
   birdid.py --initialize               one-time: download taxonomy + BioCLIP 2
-                                       backends so everything works offline
+                                       backends + the int8 ONNX image encoder
+                                       so everything works offline
   birdid.py --download-detector        (optional) download the dedicated ONNX
                                        multi-bird detector (a separate, opt-in
                                        download - BioCLIP-only users needn't)
+  birdid.py --no-onnx-encoder          force the pybioclip CPU encoder (no
+                                       int8 ONNX fast path) even when available
 
 Requirements:
   - exiftool, python3 (PIL, lxml, requests)
@@ -1672,20 +1675,78 @@ def _cosine(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.dot(a, b) / (na * nb))
 
 
-# Default location for the ONNX BioCLIP 2 image encoder (the fushanbobfan
-# ViT-L/14 int8 export; see README). Override with $BIRDID_ONNX_IMAGE_ENCODER.
+# ONNX BioCLIP 2 image encoder (the fushanbobfan ViT-L/14 int8 export; MIT,
+# same base model as imageomics/bioclip-2, fp32 export verified to match
+# PyTorch to 8.2e-06). Downloaded by `--download-backends` / `--initialize`
+# into the huggingface cache like the BioCLIP weights; resolve the local path
+# with _encoder_onnx_path(). Override with $BIRDID_ONNX_IMAGE_ENCODER.
+_ENCODER_REPO = "fushanbobfan/bioclip2-vitl14-image-onnx"
+_ENCODER_FILE = "bioclip2_vitl14_image_int8.onnx"
 _DEFAULT_ONNX_ENCODER = Path.home() / ".cache" / "birdid" / "onnx" / \
     "bioclip2_vitl14_image_int8.onnx"
 
 
-class NpuImageEncoder:
-    """BioCLIP 2 image encoder via ONNX Runtime on the AMD NPU (VitisAI EP).
+def run_download_encoder() -> Path:
+    """Download the optional int8 ONNX BioCLIP 2 image encoder into the
+    huggingface cache (needs network once, like --initialize). Returns the
+    local path. This is the same BioCLIP 2 weights in ONNX form (MIT), so it
+    rides along with `--download-backends` rather than being a separate
+    model download."""
+    import huggingface_hub
+    # a stale HF_HUB_OFFLINE=1 must not block a deliberate download
+    had_offline = os.environ.pop("HF_HUB_OFFLINE", None)
+    try:
+        try:
+            path = huggingface_hub.hf_hub_download(
+                repo_id=_ENCODER_REPO, filename=_ENCODER_FILE)
+        except Exception as e:
+            raise RuntimeError(
+                f"ONNX image encoder download failed: {e} (needs network, "
+                f"once)") from e
+    finally:
+        if had_offline is not None:
+            os.environ["HF_HUB_OFFLINE"] = had_offline
+    print(f"birdid: ONNX image encoder downloaded -> {path}")
+    print("  (BioCLIP 2 ViT-L/14 image tower, int8, MIT; ~0.99 cosine to the")
+    print("   PyTorch encoder - used automatically on the CPU when onnxruntime")
+    print("   is installed, and for the NPU path).")
+    print("  To use it on the CPU, install the onnx runtime:  pip install onnxruntime")
+    return Path(path)
 
-    Only the ViT forward moves to the NPU. Preprocessing is pybioclip's OWN
-    transform (the shared backbone's ``.preprocess`` — ToTensor, Resize 224,
-    the ImageNet mean/std) so the embedding lives in the same space as the
-    on-disk per-species text-embedding cache and rankings stay consistent with
-    the CPU path. The output is L2-normalized float32, exactly like
+
+def _encoder_onnx_path() -> Path | None:
+    """Local path of the ONNX image encoder, or None when unavailable.
+    $BIRDID_ONNX_IMAGE_ENCODER wins if set; otherwise the cached copy of the
+    default repo file; otherwise a file manually placed at the legacy default
+    location. None when the file is absent (not yet downloaded, or offline
+    with no cache)."""
+    env = os.environ.get("BIRDID_ONNX_IMAGE_ENCODER")
+    if env:
+        p = Path(env).expanduser()
+        return p if p.is_file() else None
+    try:
+        import huggingface_hub
+        return Path(huggingface_hub.hf_hub_download(
+            repo_id=_ENCODER_REPO, filename=_ENCODER_FILE))
+    except Exception:
+        pass
+    legacy = _DEFAULT_ONNX_ENCODER
+    return legacy if legacy.is_file() else None
+
+
+class NpuImageEncoder:
+    """BioCLIP 2 image encoder via ONNX Runtime.
+
+    On the NPU (``providers=["VitisAIExecutionProvider", "CPUExecutionProvider"]``)
+    only the ViT forward moves to the NPU. The same class with
+    ``providers=["CPUExecutionProvider"]`` is the fast CPU path (int8
+    MatMulInteger kernels are ~4x faster than the torch.compile CPU encoder).
+
+    Preprocessing is pybioclip's OWN transform (the shared backbone's
+    ``.preprocess`` — ToTensor, Resize 224, the ImageNet mean/std) so the
+    embedding lives in the same space as the on-disk per-species text-embedding
+    cache and rankings stay consistent with the CPU path. The output is
+    L2-normalized float32, exactly like
     ``create_image_features_for_image(..., normalize=True)``.
 
     The int8 quantized export (cosine ~0.99 vs the fp32 torch encoder) is what
@@ -1695,11 +1756,13 @@ class NpuImageEncoder:
     Input contract of the export: (N,3,224,224) float32 -> (N,768) embedding.
     """
 
-    def __init__(self, onnx_path: Path, backbone):
+    def __init__(self, onnx_path: Path, backbone,
+                 providers: list[str] | None = None):
         import onnxruntime  # type: ignore
-        self._session = onnxruntime.InferenceSession(
-            str(onnx_path),
-            providers=["VitisAIExecutionProvider", "CPUExecutionProvider"])
+        if providers is None:
+            providers = ["VitisAIExecutionProvider", "CPUExecutionProvider"]
+        self._session = onnxruntime.InferenceSession(str(onnx_path),
+                                                     providers=providers)
         self._in_name = self._session.get_inputs()[0].name
         self._backbone = backbone   # provides .preprocess (pybioclip transform)
 
@@ -1766,6 +1829,8 @@ class BioclipClassifier(Classifier):
         self.device, self.device_note = detect_device(getattr(args, "device", "auto"))
         self._npu_enc = None
         self._npu_tried = False
+        self._onnx_cpu = None
+        self._onnx_cpu_tried = False
 
     def _load_coarse(self):
         if self._coarse is None:
@@ -1775,18 +1840,17 @@ class BioclipClassifier(Classifier):
     def _npu_encoder(self):
         """Lazily build the ONNX image encoder (NPU) when it is usable. Returns
         None when the device isn't the NPU, the .onnx is missing, or the EP
-        fails - in every case the caller falls back to the pybioclip CPU
-        encoder, so a misconfigured NPU never breaks a run."""
+        fails - in every case the caller falls back to the CPU encoder, so a
+        misconfigured NPU never breaks a run."""
         if self.device != "npu" or self._npu_tried:
             return self._npu_enc
         self._npu_tried = True
-        onnx_path = Path(os.environ.get("BIRDID_ONNX_IMAGE_ENCODER",
-                                        str(_DEFAULT_ONNX_ENCODER)))
-        if not onnx_path.is_file():
+        onnx_path = _encoder_onnx_path()
+        if onnx_path is None:
             self._report("device", f"NPU selected but image encoder "
-                                   f"{onnx_path} not found - using the "
-                                   "pybioclip CPU encoder (download it with "
-                                   "the README's 'birdid --download-backends' "
+                                   f"{_ENCODER_FILE} not found - using the "
+                                   "CPU encoder (download it with the "
+                                   "README's 'birdid --download-backends' "
                                    "or set $BIRDID_ONNX_IMAGE_ENCODER)")
             return None
         try:
@@ -1795,18 +1859,49 @@ class BioclipClassifier(Classifier):
                                    f"({onnx_path.name})")
         except Exception as e:      # noqa: BLE001 - EP failures must degrade
             self._report("device", f"NPU image encoder failed ({e}) - using "
-                                   "the pybioclip CPU encoder")
+                                   "the CPU encoder")
             self._npu_enc = None
         return self._npu_enc
+
+    def _cpu_onnx_encoder(self):
+        """Lazily build the int8 ONNX image encoder on the CPU when usable.
+        Returns None when onnxruntime is missing, the .onnx is missing, or
+        the session fails - in every case the caller falls back to the
+        pybioclip CPU encoder, so the fast path never breaks a run."""
+        if self._onnx_cpu_tried:
+            return self._onnx_cpu
+        self._onnx_cpu_tried = True
+        if getattr(self.args, "no_onnx_encoder", False):
+            self._report("device", "ONNX CPU image encoder disabled "
+                                   "(--no-onnx-encoder) - using pybioclip")
+            return None
+        onnx_path = _encoder_onnx_path()
+        if onnx_path is None:
+            return None
+        try:
+            self._onnx_cpu = NpuImageEncoder(
+                onnx_path, self._load_coarse(),
+                providers=["CPUExecutionProvider"])
+            self._report("device", f"ONNX CPU image encoder active "
+                                   f"({onnx_path.name})")
+        except Exception as e:      # noqa: BLE001 - fast path must degrade
+            self._report("device", f"ONNX CPU image encoder failed ({e}) - "
+                                   "using the pybioclip CPU encoder")
+            self._onnx_cpu = None
+        return self._onnx_cpu
 
     def _encode_image(self, image: str) -> np.ndarray:
         """One normalized image embedding (float32 [DIM]) - the image side
         of the softmax, encoded exactly once per photo.
 
         Uses the ONNX NPU encoder when the device resolved to the NPU and the
-        encoder is usable; otherwise the pybioclip CPU encoder (identical
-        semantics, near-identical results)."""
+        encoder is usable; else the int8 ONNX encoder on the CPU when it is
+        available (onnxruntime + model file); else the pybioclip CPU encoder
+        (identical semantics, near-identical results)."""
         enc = self._npu_encoder()
+        if enc is not None:
+            return enc.encode_image(image)
+        enc = self._cpu_onnx_encoder()
         if enc is not None:
             return enc.encode_image(image)
         feat = self._load_coarse().create_image_features_for_image(
@@ -4347,9 +4442,14 @@ def main():
                     help="one-time setup: download the eBird taxonomy + BioCLIP 2/"
                          "TreeOfLife backends so everything works offline")
     ap.add_argument("--download-backends", action="store_true",
-                    help="predownload the BioCLIP 2 + TreeOfLife backends so a "
-                         "later run works fully offline (same backend part as "
-                         "--initialize)")
+                    help="predownload the BioCLIP 2 + TreeOfLife backends AND "
+                         "the int8 ONNX image encoder so a later run works "
+                         "fully offline (same backend part as --initialize)")
+    ap.add_argument("--no-onnx-encoder", action="store_true",
+                    help="force the pybioclip CPU (torch) image encoder even "
+                         "when the faster int8 ONNX encoder + onnxruntime are "
+                         "available - use to rule out int8 quantization drift "
+                         "when comparing results")
     ap.add_argument("--download-detector", action="store_true",
                     help="download the OPTIONAL dedicated ONNX multi-bird "
                          "detector (RT-DETR R18VD, COCO 'bird' class only, "
@@ -4364,10 +4464,11 @@ def main():
                          "'auto' (default) uses the AMD NPU when the hardware "
                          "is present AND the VitisAI EP (Ryzen AI Software) is "
                          "installed, else the CPU; 'npu'/'cpu' force a device "
-                         "(npu falls back to cpu if the EP is missing). The "
-                         "NPU path also needs the ONNX image encoder at "
-                         "$BIRDID_ONNX_IMAGE_ENCODER (default "
-                         "~/.cache/birdid/onnx/bioclip2_vitl14_image_int8.onnx)")
+                         "(npu falls back to cpu if the EP is missing). On the "
+                         "CPU, the int8 ONNX image encoder is used when it is "
+                         "available (run 'birdid --download-backends' + 'pip "
+                         "install onnxruntime'), else pybioclip. Override the "
+                         "encoder path with $BIRDID_ONNX_IMAGE_ENCODER")
     ap.add_argument("--api-delay", type=float, default=1.5,
                     help="seconds between eBird API calls (rate-limit guard, default 1.5)")
     ap.add_argument("--sample-dates", type=int, default=2,
@@ -4411,6 +4512,7 @@ def main():
             elif args.initialize or args.download_backends:
                 from ebird_data import initialize
                 initialize(data_dir, data_dir / "regions")
+                run_download_encoder()
                 Path(args.checklists_dir).mkdir(parents=True, exist_ok=True)
                 print(f"birdid: central checklists dir: {args.checklists_dir} "
                       "(drop eBird exports like S123456789_observations.csv there)")
