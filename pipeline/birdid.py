@@ -2212,10 +2212,23 @@ def _crop_to_temp(image: Path, x: float, y: float, w: float, h: float,
 def _detect_and_classify(detector: Detector, classifier: Classifier, primary: Path,
                          ladder, taxonomy, region, month, dt, args,
                          max_regions: int = 8) -> list[dict]:
-    """Run the detector over one capture, classify each region crop with the
-    same regional ladder as the whole image, and assemble the per-bird region
-    records (normalized box + ranked candidate list + status). Crop files are
-    temporary and removed after each classification."""
+    """Run the detector over one capture, then classify each region crop (see
+    `_classify_boxes` for the per-box work)."""
+    boxes = detector.detect(primary)
+    return _classify_boxes(classifier, primary, boxes, ladder, taxonomy, region,
+                           month, dt, args, max_regions)
+
+
+def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
+                    ladder, taxonomy, region, month, dt, args,
+                    max_regions: int = 8) -> list[dict]:
+    """Classify each proposed box crop with the same regional ladder as the
+    whole image and assemble the per-bird region records (normalized box +
+    ranked candidate list + status). ``boxes`` is a list of ``{x, y, w, h}``
+    proposals (from the detector OR, for a user-drawn capture, the manual boxes
+    read back from the sidecar - in which case ``manual=True`` is carried
+    through the record so the box stays user-owned). Crop files are temporary
+    and removed after each classification."""
     # Coarse categories that are NOT birds - a crop that slipped through the
     # detector's bird probe but classifies as e.g. 'plant' is dropped, so a
     # false-positive region never becomes a bogus bird record.
@@ -2224,7 +2237,6 @@ def _detect_and_classify(detector: Detector, classifier: Classifier, primary: Pa
         .replace("a photo of ", "").strip().lower()
         for c in COARSE_LABELS if c != "a photo of a bird"
     }
-    boxes = detector.detect(primary)
     regions: list[dict] = []
     for box in boxes[:max_regions]:
         crop = _crop_to_temp(primary, box["x"], box["y"], box["w"], box["h"])
@@ -2247,6 +2259,7 @@ def _detect_and_classify(detector: Detector, classifier: Classifier, primary: Pa
         ]
         regions.append({
             "x": box["x"], "y": box["y"], "w": box["w"], "h": box["h"],
+            "manual": bool(box.get("manual")),
             "topSpecies": species,
             "topConfidence": confs[0],
             "status": r.get("status") or (
@@ -2412,6 +2425,10 @@ def _set_regions(desc, regions: list[dict]):
         _set_text(sd, "y", BIRD_NS, f"{float(r['y']):.4f}")
         _set_text(sd, "w", BIRD_NS, f"{float(r['w']):.4f}")
         _set_text(sd, "h", BIRD_NS, f"{float(r['h']):.4f}")
+        if r.get("manual"):
+            # A user-drawn/edited box: the --multi run must keep honoring this
+            # exact box (skip the detector) instead of regenerating it.
+            _set_text(sd, "manual", BIRD_NS, "true")
         _set_text(sd, "topSpecies", BIRD_NS, r.get("topSpecies", ""))
         _set_text(sd, "topConfidence", BIRD_NS, f"{float(r.get('topConfidence', 0)):.2f}")
         _set_text(sd, "status", BIRD_NS, r.get("status", "done"))
@@ -3353,6 +3370,48 @@ def sidecar_multi(sidecar: Path) -> bool:
         return bool(st and st[0].text and st[0].text.strip().lower() == "true")
     except Exception:
         return False
+
+
+def _read_regions(sidecar: Path) -> list[dict]:
+    """Read the per-bird region records back from a sidecar (bird:regions).
+
+    Returns the stored boxes in order, each ``{x, y, w, h, manual, topSpecies}``
+    with ``manual`` true for a USER-DRAWN/EDITED box (written by the viewer's
+    manual box editor). Used by the --multi path: when a capture carries manual
+    boxes, the run classifies EXACTLY those boxes and skips the detector (the
+    user is defining the regions, so the model must not re-propose them)."""
+    if not sidecar.exists():
+        return []
+    try:
+        root = _xmp_tree(sidecar)
+
+        out: list[dict] = []
+        # Two shapes are tolerated: the pipeline writes each region as
+        # rdf:li > rdf:Description > bird:*; exiftool (the viewer's manual box
+        # write) writes rdf:li parseType="Resource" with bird:* directly on the
+        # li. Descendant search reads either.
+        for li in _find(root, "//bird:regions/rdf:Seq/rdf:li"):
+            def _f(tag: str) -> str:
+                el = li.find(f".//{{{BIRD_NS}}}{tag}")
+                return el.text.strip() if el is not None and el.text else ""
+
+            def _num(tag: str) -> float:
+                try:
+                    return float(_f(tag))
+                except ValueError:
+                    return 0.0
+
+            x, y, w, h = _num("x"), _num("y"), _num("w"), _num("h")
+            if w <= 0 or h <= 0:
+                continue
+            out.append({
+                "x": x, "y": y, "w": w, "h": h,
+                "manual": _f("manual").strip().lower() == "true",
+                "topSpecies": _f("topSpecies"),
+            })
+        return out
+    except Exception:
+        return []
 
 
 def sidecar_prefilter(sidecar: Path):
@@ -4601,21 +4660,44 @@ def main():
                                 and sidecar_multi(sidecar))
                     regions = None
                     if is_multi and detector is not None:
-                        tui.set(stage="detect",
-                                message=f"multi-bird scan: {primary.name}")
-                        regions = _detect_and_classify(
-                            detector, classifier, primary, ladder, taxonomy,
-                            region, month, dt, args)
-                        if regions:
-                            tui.plain_line(
-                                f"  {cap.base}: {len(regions)} bird regions -> "
-                                + ", ".join(f"{r['topSpecies']} {r['topConfidence']*100:.0f}%"
-                                            for r in regions))
+                        # User-drawn/manual boxes take precedence: classify
+                        # exactly those boxes and skip the detector (the user
+                        # is defining which birds to identify - the model must
+                        # not re-propose regions). Detection only runs when the
+                        # sidecar has no manual boxes.
+                        manual_boxes = [b for b in _read_regions(sidecar)
+                                        if b.get("manual")]
+                        if manual_boxes:
+                            tui.set(
+                                stage="detect",
+                                message=(f"classifying {len(manual_boxes)} manual "
+                                         f"box(es): {primary.name}"))
+                            regions = _classify_boxes(
+                                classifier, primary, manual_boxes, ladder,
+                                taxonomy, region, month, dt, args)
+                            if regions:
+                                tui.plain_line(
+                                    f"  {cap.base}: {len(regions)} user-drawn "
+                                    "region(s) -> "
+                                    + ", ".join(
+                                        f"{r['topSpecies']} {r['topConfidence']*100:.0f}%"
+                                        for r in regions))
                         else:
-                            tui.plain_line(
-                                f"  {cap.base}: no bird region passed the "
-                                f"detector threshold (flag kept; adjust "
-                                f"--multi-min-confidence or check the photo)")
+                            tui.set(stage="detect",
+                                    message=f"multi-bird scan: {primary.name}")
+                            regions = _detect_and_classify(
+                                detector, classifier, primary, ladder, taxonomy,
+                                region, month, dt, args)
+                            if regions:
+                                tui.plain_line(
+                                    f"  {cap.base}: {len(regions)} bird regions -> "
+                                    + ", ".join(f"{r['topSpecies']} {r['topConfidence']*100:.0f}%"
+                                                for r in regions))
+                            else:
+                                tui.plain_line(
+                                    f"  {cap.base}: no bird region passed the "
+                                    f"detector threshold (flag kept; adjust "
+                                    f"--multi-min-confidence or check the photo)")
                     old_status = sidecar_status(sidecar)
                     old_best = _sidecar_best(sidecar)
                     if (not args.force and not is_multi
