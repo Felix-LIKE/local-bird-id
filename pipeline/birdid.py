@@ -3278,10 +3278,14 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
     """
     from lxml import etree
     rdf = _nsmap()["rdf"]
-    # refresh/clear: drop any existing birdid-written dwc block first
+    # refresh/clear: drop any existing dwc block first. The dwc mirror can
+    # live in its OWN <rdf:Description> (some XMP writers split namespaces
+    # across description elements) rather than under `desc`, so clear the
+    # WHOLE document - otherwise a stale dwc:identificationVerificationStatus
+    # survives an un-confirm and keeps the record frozen (sidecar_frozen).
     for tag in ("Occurrence", "Identification", "Taxon"):
-        for el in desc.findall(f"{{{DWC_NS}}}{tag}"):
-            desc.remove(el)
+        for el in _find(desc, f"//dwc:{tag}"):
+            el.getparent().remove(el)
     if not species:
         return
 
