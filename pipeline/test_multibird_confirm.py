@@ -38,16 +38,26 @@ def check(name, cond, detail=""):
 
 
 def multi_regions():
-    """Two per-bird region records (the shape _classify_boxes produces)."""
+    """Two per-bird region records (the shape _classify_boxes produces, now
+    each carrying its own DarwinCore-mirroring taxonomy ladder — scientific
+    name + kingdom/phylum/class/order/family/genus/specificEpithet)."""
     return [
         {"x": 0.10, "y": 0.10, "w": 0.40, "h": 0.30, "manual": False,
          "topSpecies": "Great Cormorant", "topConfidence": 0.97, "status": "done",
          "ranked": [("Great Cormorant", 0.97), ("European Shag", 0.87)],
-         "reasoning": "region 1"},
+         "reasoning": "region 1",
+         "scientificName": "Phalacrocorax carbo",
+         "kingdom": "Animalia", "phylum": "Chordata", "class": "Aves",
+         "order": "Suliformes", "family": "Phalacrocoracidae",
+         "genus": "Phalacrocorax", "specificEpithet": "carbo"},
         {"x": 0.60, "y": 0.10, "w": 0.30, "h": 0.30, "manual": False,
-         "topSpecies": "Great Cormorant", "topConfidence": 0.90, "status": "done",
-         "ranked": [("Great Cormorant", 0.90), ("Caspian Gull", 0.80)],
-         "reasoning": "region 2"},
+         "topSpecies": "Caspian Gull", "topConfidence": 0.90, "status": "done",
+         "ranked": [("Caspian Gull", 0.90), ("Great Cormorant", 0.80)],
+         "reasoning": "region 2",
+         "scientificName": "Larus cachinnans",
+         "kingdom": "Animalia", "phylum": "Chordata", "class": "Aves",
+         "order": "Charadriiformes", "family": "Laridae",
+         "genus": "Larus", "specificEpithet": "cachinnans"},
     ]
 
 
@@ -81,17 +91,42 @@ def top_species_list(sidecar: Path) -> list:
             if li.text and li.text.strip()]
 
 
+def region_taxonomy(sidecar: Path) -> list:
+    """Each stored region's DarwinCore-mirroring taxonomy ladder, as read back
+    by the pipeline's own _read_regions (scientific name + order/family/genus/
+    specificEpithet — kingdom/phylum/class are covered by the sidecar checks)."""
+    return [{
+        "scientificName": r.get("scientificName", ""),
+        "order": r.get("order", ""),
+        "family": r.get("family", ""),
+        "genus": r.get("genus", ""),
+        "specificEpithet": r.get("specificEpithet", ""),
+    } for r in birdid._read_regions(sidecar)]
+
+
 def run():
     with tempfile.TemporaryDirectory(prefix="birdid-multibird-confirm-") as d:
         root = Path(d)
         sidecar = build_multi_sidecar(root)
         manifest = root / "birdid_manifest.json"
+        expected_tax = [
+            {"scientificName": "Phalacrocorax carbo", "order": "Suliformes",
+             "family": "Phalacrocoracidae", "genus": "Phalacrocorax",
+             "specificEpithet": "carbo"},
+            {"scientificName": "Larus cachinnans", "order": "Charadriiformes",
+             "family": "Laridae", "genus": "Larus", "specificEpithet": "cachinnans"},
+        ]
 
         print("== setup: faithful multi-bird sidecar (2 regions) ==")
         check("sidecar written, flagged, not confirmed",
               birdid.sidecar_multi(sidecar)
               and len(birdid._read_regions(sidecar)) == 2
               and birdid.sidecar_confirmed(sidecar) is None)
+        check("each region carries its OWN taxonomy ladder (read back)",
+              region_taxonomy(sidecar) == expected_tax, str(region_taxonomy(sidecar)))
+        check("kingdom/phylum/class written per region",
+              all(r.get("kingdom") == "Animalia" and r.get("phylum") == "Chordata"
+                  and r.get("class") == "Aves" for r in birdid._read_regions(sidecar)))
 
         print("\n== T1: run_confirm('<species>') on the multi-bird capture ==")
         touched, skipped, notes = birdid.run_confirm(
@@ -108,6 +143,8 @@ def run():
         check("REGIONS PRESERVED: still 2 with per-bird species lists",
               len(birdid._read_regions(sidecar)) == 2
               and len(birdid._find(rootx, "//bird:regions/rdf:Seq/rdf:li")) == 2)
+        check("per-bird taxonomy ladder survives the confirm write",
+              region_taxonomy(sidecar) == expected_tax, str(region_taxonomy(sidecar)))
         check("birdCount=2 and multiBird flag kept",
               birdid._find(rootx, "//bird:birdCount")[0].text.strip() == "2"
               and birdid.sidecar_multi(sidecar))

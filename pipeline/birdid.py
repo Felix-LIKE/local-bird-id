@@ -2588,24 +2588,35 @@ def _crop_to_temp(image: Path, x: float, y: float, w: float, h: float,
 
 def _detect_and_classify(detector: Detector, classifier: Classifier, primary: Path,
                          ladder, taxonomy, region, month, dt, args,
-                         max_regions: int = 8) -> list[dict]:
+                         max_regions: int = 8,
+                         hierarchy: dict | None = None) -> list[dict]:
     """Run the detector over one capture, then classify each region crop (see
     `_classify_boxes` for the per-box work)."""
     boxes = detector.detect(primary)
     return _classify_boxes(classifier, primary, boxes, ladder, taxonomy, region,
-                           month, dt, args, max_regions)
+                           month, dt, args, max_regions, hierarchy)
 
 
 def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
                     ladder, taxonomy, region, month, dt, args,
-                    max_regions: int = 8) -> list[dict]:
+                    max_regions: int = 8,
+                    hierarchy: dict | None = None) -> list[dict]:
     """Classify each proposed box crop with the same regional ladder as the
     whole image and assemble the per-bird region records (normalized box +
     ranked candidate list + status). ``boxes`` is a list of ``{x, y, w, h}``
     proposals (from the detector OR, for a user-drawn capture, the manual boxes
     read back from the sidecar - in which case ``manual=True`` is carried
     through the record so the box stays user-owned). Crop files are temporary
-    and removed after each classification."""
+    and removed after each classification.
+
+    Each region ALSO carries the full DarwinCore-mirroring taxonomy of its own
+    bird (``scientificName`` + kingdom/phylum/class/order/family/genus/
+    specificEpithet), resolved from ``hierarchy`` (``load_taxonomy_hierarchy``)
+    — so a multi-bird capture stores EVERY bird's taxonomy, not just the
+    primary's. kingdom/phylum/class are Aves/Chordata/Animalia for a bird whose
+    species resolved to a scientific name (the same default the dwc mirror
+    uses); an unresolvable species writes empty strings, never a guessed class.
+    """
     # Coarse categories that are NOT birds - a crop that slipped through the
     # detector's bird probe but classifies as e.g. 'plant' is dropped, so a
     # false-positive region never becomes a bogus bird record.
@@ -2629,6 +2640,13 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
         if str(r["species"]).strip().lower() in non_bird:
             continue
         species, scientific = normalize_species(str(r["species"]), taxonomy)
+        # Per-bird taxonomy (mirrors the dwc:Taxon ladder of a confirmation).
+        kingdom = phylum = cls = order = family = genus = epithet = ""
+        if scientific:
+            order, family = (hierarchy or {}).get(scientific.lower(), ("", ""))
+            parts = scientific.split()
+            genus, epithet = parts[0], (parts[1] if len(parts) > 1 else "")
+            kingdom, phylum, cls = "Animalia", "Chordata", "Aves"
         ranked = [species] + [a for a in r.get("alternatives", []) if a and a != species]
         conf = float(r.get("confidence", 0.0))
         confs = [conf] + [
@@ -2644,6 +2662,10 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
                 else "low-confidence"),
             "ranked": list(zip(ranked, confs)),
             "reasoning": r.get("reasoning", ""),
+            "scientificName": scientific,
+            "kingdom": kingdom, "phylum": phylum, "class": cls,
+            "order": order, "family": family, "genus": genus,
+            "specificEpithet": epithet,
         })
     return regions
 
@@ -2961,6 +2983,14 @@ def _set_regions(desc, regions: list[dict]):
                   [f"{float(c):.2f}" for _, c in ranked], "Seq")
         if r.get("reasoning"):
             _set_text(sd, "reasoning", BIRD_NS, str(r["reasoning"])[:500])
+        # Per-bird DarwinCore-mirroring taxonomy (scientific name + the full
+        # ladder), so a multi-bird capture stores the taxonomy of EVERY bird,
+        # not just the primary's (which lives in the dwc mirror). Only non-empty
+        # values are written — an unresolvable species carries no ladder at all.
+        for tag in ("scientificName", "kingdom", "phylum", "class", "order",
+                    "family", "genus", "specificEpithet"):
+            if r.get(tag):
+                _set_text(sd, tag, BIRD_NS, str(r[tag]))
 
     # mwg-rs:Regions mirror — the standard Metadata Working Group region/box
     # representation (Windows/GIMP/Darktable read it): Regions > RegionList >
@@ -3902,11 +3932,13 @@ def sidecar_multi(sidecar: Path) -> bool:
 def _read_regions(sidecar: Path) -> list[dict]:
     """Read the per-bird region records back from a sidecar (bird:regions).
 
-    Returns the stored boxes in order, each ``{x, y, w, h, manual, topSpecies}``
-    with ``manual`` true for a USER-DRAWN/EDITED box (written by the viewer's
-    manual box editor). Used by the --multi path: when a capture carries manual
-    boxes, the run classifies EXACTLY those boxes and skips the detector (the
-    user is defining the regions, so the model must not re-propose them)."""
+    Returns the stored boxes in order, each ``{x, y, w, h, manual, topSpecies,
+    scientificName, kingdom, phylum, class, order, family, genus,
+    specificEpithet}`` with ``manual`` true for a USER-DRAWN/EDITED box
+    (written by the viewer's manual box editor). Used by the --multi path:
+    when a capture carries manual boxes, the run classifies EXACTLY those
+    boxes and skips the detector (the user is defining the regions, so the
+    model must not re-propose them)."""
     if not sidecar.exists():
         return []
     try:
@@ -3935,6 +3967,14 @@ def _read_regions(sidecar: Path) -> list[dict]:
                 "x": x, "y": y, "w": w, "h": h,
                 "manual": _f("manual").strip().lower() == "true",
                 "topSpecies": _f("topSpecies"),
+                # Per-bird DarwinCore-mirroring taxonomy ladder (see
+                # _classify_boxes / _set_regions) — read back so a round-trip
+                # never drops a bird's taxonomy.
+                "scientificName": _f("scientificName"),
+                "kingdom": _f("kingdom"), "phylum": _f("phylum"),
+                "class": _f("class"), "order": _f("order"),
+                "family": _f("family"), "genus": _f("genus"),
+                "specificEpithet": _f("specificEpithet"),
             })
         return out
     except Exception:
@@ -4755,6 +4795,9 @@ def main():
     db = SpeciesDB(regions_dir, data_dir / "regions_generated")
     db.load()
     taxonomy = load_taxonomy(taxonomy_path)
+    # order/family per scientific name (the Clements integrated checklist), for
+    # the per-bird taxonomy ladder written into each multi-bird region record.
+    taxonomy_hierarchy = load_taxonomy_hierarchy(taxonomy_path)
     tax_src = taxonomy_path.name if taxonomy_path else "none"
     print(f"eBird tables: {', '.join(db.regions())}   taxonomy: "
           f"{tax_src} ({len(taxonomy)} names)")
@@ -5267,7 +5310,8 @@ def main():
                                          f"box(es): {primary.name}"))
                             regions = _classify_boxes(
                                 classifier, primary, stored_boxes, ladder,
-                                taxonomy, region, month, dt, args)
+                                taxonomy, region, month, dt, args,
+                                hierarchy=taxonomy_hierarchy)
                             if regions:
                                 tui.plain_line(
                                     f"  {cap.base}: {len(regions)} box(es) -> "
@@ -5279,7 +5323,8 @@ def main():
                                     message=f"multi-bird scan: {primary.name}")
                             regions = _detect_and_classify(
                                 detector, classifier, primary, ladder, taxonomy,
-                                region, month, dt, args)
+                                region, month, dt, args,
+                                hierarchy=taxonomy_hierarchy)
                             if regions:
                                 tui.plain_line(
                                     f"  {cap.base}: {len(regions)} bird regions -> "
