@@ -468,6 +468,56 @@ def run():
         check("Capture.sidecar prefers the exact-case path when both exist",
               cap2.sidecar() == exact, f"got {cap2.sidecar()}")
 
+        print("\n== D3: a stray duplicate bird:* in a second rdf:Description "
+              "block is consolidated on re-run ==")
+        # The exact broken shape from the field (5M4_0336 + 15 siblings): a
+        # capture touched by BOTH the pipeline (lxml, inline per-element
+        # xmlns:bird in the FIRST block) and an exiftool write (which scatters
+        # tags over per-namespace blocks, so bird:multiBird ALSO lands in a
+        # SECOND block). write_sidecar must strip bird:* from EVERY block —
+        # otherwise the duplicate survives re-runs and the next exiftool write
+        # (viewer box save / flag toggle / confirm) dies with
+        # "Duplicate XMP property" (exit 1).
+        dupblock_root = root / "d3"
+        dupblock_root.mkdir()
+        dupblock = dupblock_root / "stray.xmp"
+        dupblock.write_text(
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+            ' <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+            '  <rdf:Description rdf:about="">\n'
+            '   <bird:status xmlns:bird="http://ns.birdpipeline/1.0/">low-confidence</bird:status>\n'
+            '   <bird:multiBird xmlns:bird="http://ns.birdpipeline/1.0/">true</bird:multiBird>\n'
+            '  </rdf:Description>\n'
+            '  <rdf:Description xmlns:bird="http://ns.birdpipeline/1.0/" rdf:about="">\n'
+            '   <bird:multiBird>true</bird:multiBird>\n'
+            '  </rdf:Description>\n'
+            ' </rdf:RDF>\n'
+            '</x:xmpmeta>\n', encoding="utf-8")
+        pre = dupblock.read_text()
+        check("fixture starts with a duplicate bird:multiBird",
+              pre.count("<bird:multiBird") == 2, f"count={pre.count('<bird:multiBird')}")
+        birdid.write_sidecar(dupblock,
+                             {"species": "Mallard", "confidence": 0.5,
+                              "alternatives": [], "reasoning": "whole"},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done",
+                             type("C", (), {"dc_fields": False}),
+                             regions=multi_regions())
+        post = dupblock.read_text()
+        check("re-run consolidates the duplicate to ONE bird:multiBird",
+              post.count("<bird:multiBird") == 1,
+              f"count={post.count('<bird:multiBird')}")
+        d3root = birdid._xmp_tree(dupblock)
+        d3descs = birdid._find(d3root, "//rdf:Description")
+        bird_blocks = [d for d in d3descs
+                       if any(c.tag == f"{{{birdid.BIRD_NS}}}multiBird" for c in d)]
+        check("the surviving multiBird lives in ONE block",
+              len(bird_blocks) == 1, f"blocks={len(bird_blocks)}")
+        check("multi flag still reads true after consolidation",
+              birdid.sidecar_multi(dupblock))
+        check("region records intact after consolidation",
+              len(birdid._read_regions(dupblock)) == 2)
+
         print("\n== F1: sidecars are written as readable XML documents (not plain text) ==")
         def format_ok(p: Path) -> tuple:
             raw = p.read_bytes()

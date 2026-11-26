@@ -3244,11 +3244,22 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # rebuilds them via _set_regions below, so it strips to stay idempotent.
     multi_keep = {f"{{{BIRD_NS}}}regions", f"{{{BIRD_NS}}}birdCount",
                   f"{{{BIRD_NS}}}multiBird"}
-    for el in list(desc):
-        if el.tag.startswith(f"{{{BIRD_NS}}}"):
-            if was_multi and not regions and el.tag in multi_keep:
-                continue
-            desc.remove(el)
+    # Strip bird:* from EVERY rdf:Description block, not just the canonical
+    # one: an exiftool write (the viewer's flag/box/confirm writes) scatters a
+    # sidecar's tags over SEVERAL per-namespace blocks, so a capture touched by
+    # both the pipeline and exiftool can carry a stray duplicate bird:*
+    # (typically a second bird:multiBird) in a later block. Leaving it behind
+    # makes the NEXT exiftool write fail with "Duplicate XMP property" (exit 1,
+    # file not updated) — every box save / flag toggle / confirm breaks. The
+    # canonical bird:* fields are re-written into `desc` below, so removing the
+    # strays consolidates the record; the multi_keep pass-through applies only
+    # to the canonical block's preserved multi-bird request fields.
+    for d in descs:
+        for el in list(d):
+            if el.tag.startswith(f"{{{BIRD_NS}}}"):
+                if d is desc and was_multi and not regions and el.tag in multi_keep:
+                    continue
+                d.remove(el)
 
     # re-assert the flag when it was NOT preserved above (i.e. a multi run
     # that produced no regions still keeps the request queued)
