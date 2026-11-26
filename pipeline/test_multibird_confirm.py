@@ -466,6 +466,46 @@ def run():
         check("Capture.sidecar prefers the exact-case path when both exist",
               cap2.sidecar() == exact, f"got {cap2.sidecar()}")
 
+        print("\n== F1: sidecars are written as readable XML documents (not plain text) ==")
+        def format_ok(p: Path) -> tuple:
+            raw = p.read_bytes()
+            first = raw.splitlines()[0] if raw.splitlines() else b""
+            maxlen = max((len(l) for l in raw.splitlines()), default=0)
+            return (first.startswith(b"<?xml version='1.0' encoding='UTF-8'?>"),
+                    b"xpacket" not in raw, len(raw.splitlines()) > 10,
+                    maxlen <= 1000)
+        froot = root / "f1"
+        froot.mkdir()
+        fs = froot / "single_fmt.xmp"
+        birdid.write_sidecar(fs, {"species": "Coal Tit", "confidence": 0.95,
+                                  "alternatives": ["Great Tit"],
+                                  "reasoning": "single"},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done",
+                             type("C", (), {"dc_fields": True}))
+        fdecl, fnopkt, freadable, fcompact = format_ok(fs)
+        check("single sidecar has an XML declaration (OS sees an XML document)",
+              fdecl, "no <?xml?>" if not fdecl else "")
+        check("single sidecar has no xpacket wrapper",
+              fnopkt, "xpacket present")
+        check("single sidecar is pretty-printed (every element on its own line)",
+              freadable, "only a few lines")
+        check("single sidecar has no giant one-line blobs",
+              fcompact, "long lines remain")
+        # same guarantees for the multi capture (regions nested deep)
+        fm = froot / "multi_fmt.xmp"
+        birdid.write_sidecar(fm, {"species": "Mallard", "confidence": 0.5,
+                                  "alternatives": [], "reasoning": "whole"},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done",
+                             type("C", (), {"dc_fields": False}),
+                             regions=multi_regions())
+        mdecl, mnopkt, mreadable, mcompact = format_ok(fm)
+        check("multi sidecar has an XML declaration", mdecl, "")
+        check("multi sidecar has no xpacket wrapper", mnopkt, "xpacket present")
+        check("multi sidecar is pretty-printed incl. nested regions",
+              mreadable, "only a few lines")
+        check("multi sidecar has no giant one-line blobs", mcompact,
+              "long lines remain")
+
     print("\n============================================")
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} FAILED: {', '.join(FAILURES)}")

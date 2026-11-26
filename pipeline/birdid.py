@@ -2852,25 +2852,40 @@ def _xmp_tree(sidecar: Path):
     return etree.fromstring(_XMP_TPL.format(bird_ns=BIRD_NS).encode(), parser)
 
 
-def _ensure_xpacket(root):
-    """Surround the XMP tree with the standard XMP packet wrapper PIs:
+def _write_xmp(sidecar: Path, root):
+    """Serialize an XMP tree to `sidecar` in ExifTool's STANDALONE .xmp form:
 
-        <?xpacket begin='...' id='W5M0MpCehiHzreSzNTczkc9d'?>
-        <x:xmpmeta ...>...</x:xmpmeta>
-        <?xpacket end='w'?>
+        <?xml version='1.0' encoding='UTF-8'?>
+        <x:xmpmeta ...>
+          <rdf:RDF ...>
+            <rdf:Description rdf:about=''>
+              <bird:species>
+                <rdf:Seq>
+                  <rdf:li>...</rdf:li>
+                </rdf:Seq>
+              </bird:species>
+              ...
 
-    This is how ExifTool and IMatch write .xmp files (packet first, no XML
-    declaration), so a birdid-written sidecar keeps the same format and the
-    OS still classifies it as plain text. An existing packet begin (e.g. its
-    original packet id) is preserved; a missing one is synthesized."""
+    i.e. a normal, fully indented XML document with the XML declaration up
+    front — exactly the shape ExifTool writes for a confirmed capture. Two
+    things follow from this:
+
+      * the OS classifies the file as an XML document (the old form had no
+        declaration, only the xpacket PI wrapper, so the file manager showed
+        it as 'plain text');
+      * every element lands on its own readable line (the old lxml
+        pretty-print left a rdf:Description's children on one long line).
+
+    ``etree.indent`` first normalizes the whitespace (handling nested
+    structures the serializer's built-in pretty-print skips when an element
+    carries text), then ``tostring`` on the ROOT element serializes only the
+    x:xmpmeta element and its subtree — any sibling xpacket PIs left over from
+    the old format are dropped (they are inert to every reader here: the
+    pipeline parses via lxml, the viewer via ExifTool)."""
     from lxml import etree
-    prev = root.getprevious()
-    if not (prev is not None and getattr(prev, "target", None) == "xpacket"):
-        root.addprevious(etree.ProcessingInstruction(
-            "xpacket", "begin='\ufeff' id='W5M0MpCehiHzreSzNTczkc9d'"))
-    nxt = root.getnext()
-    if not (nxt is not None and getattr(nxt, "target", None) == "xpacket"):
-        root.addnext(etree.ProcessingInstruction("xpacket", "end='w'"))
+    etree.indent(root, space="  ")
+    sidecar.write_bytes(
+        etree.tostring(root, xml_declaration=True, encoding="UTF-8"))
 
 
 def _nsmap():
@@ -3354,11 +3369,7 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
     # conventional XMP style: <?xpacket begin ...?> ... <?xpacket end='w'?> with
     # no XML declaration (matches ExifTool/IMatch, keeps the OS file-type
     # detection from flipping to "XML document")
-    _ensure_xpacket(root)
-    out = io.BytesIO()
-    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
-                                  pretty_print=True)
-    sidecar.write_bytes(out.getvalue())
+    _write_xmp(sidecar, root)
 
 
 def _photo_for_sidecar(sidecar: Path) -> Path | None:
@@ -3611,11 +3622,7 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
                         photographer=photographer, order=order, family=family,
                         verbatim=verbatim, group_ladder=group_ladder)
     _canonicalize_desc(desc)
-    _ensure_xpacket(root)
-    out = io.BytesIO()
-    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
-                                  pretty_print=True)
-    sidecar.write_bytes(out.getvalue())
+    _write_xmp(sidecar, root)
 
 
 # --------------------------------------------------------------------------
@@ -3738,11 +3745,7 @@ def _set_partial(sidecar: Path, label: str, *, photographer: str = "",
     _set_dwc_mirror(desc, species=label, scientific="", photographer=photographer,
                     verbatim=verbatim, group_ladder=ladder, partial=True)
     _canonicalize_desc(desc)
-    _ensure_xpacket(root)
-    out = io.BytesIO()
-    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
-                                  pretty_print=True)
-    sidecar.write_bytes(out.getvalue())
+    _write_xmp(sidecar, root)
 
 
 def run_confirm(root: Path, photo: str | None, species: str | None,
@@ -3962,11 +3965,7 @@ def _set_capture_verified(sidecar: Path, species: str | None, scientific="",
                         order=order, family=family, verbatim=verbatim,
                         freeze=freeze)
     _canonicalize_desc(desc)
-    _ensure_xpacket(root)
-    out = io.BytesIO()
-    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
-                                  pretty_print=True)
-    sidecar.write_bytes(out.getvalue())
+    _write_xmp(sidecar, root)
 
 
 def _write_regions(sidecar: Path, regions: list[dict]):
@@ -3980,11 +3979,7 @@ def _write_regions(sidecar: Path, regions: list[dict]):
         raise RuntimeError(f"could not locate rdf:Description in {sidecar}")
     _set_regions(descs[0], regions)
     _canonicalize_desc(descs[0])
-    _ensure_xpacket(root)
-    out = io.BytesIO()
-    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
-                                  pretty_print=True)
-    sidecar.write_bytes(out.getvalue())
+    _write_xmp(sidecar, root)
 
 
 def run_region_confirm(root: Path, photo: str | None, species: str | None,
@@ -4816,11 +4811,7 @@ def _merge_multi_from(src: Path, dst: Path) -> bool:
         dst_desc.append(copy.deepcopy(el))
         changed = True
     if changed:
-        _ensure_xpacket(dst_root)
-        out = io.BytesIO()
-        etree.ElementTree(dst_root).write(out, xml_declaration=False,
-                                          encoding="UTF-8", pretty_print=True)
-        dst.write_bytes(out.getvalue())
+        _write_xmp(dst, dst_root)
     return changed
 
 
