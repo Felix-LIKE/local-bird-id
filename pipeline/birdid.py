@@ -3055,15 +3055,25 @@ def _canonicalize_desc(desc):
 
 
 def sidecar_done(sidecar: Path) -> bool:
-    """A file is 'done' iff its sidecar has bird:species with >= 1 entry."""
+    """A file is 'done' iff its sidecar carries an identification: whole-image
+    bird:species entries, OR (a multi-bird capture, which stores NO whole-image
+    prediction) any region record that carries a classified bird (its own
+    topSpecies / ranked candidates)."""
     if not sidecar.exists():
         return False
     try:
         root = _xmp_tree(sidecar)
         li = _find(root, "//bird:species/rdf:Seq/rdf:li")
-        return bool(li and li[0].text and li[0].text.strip())
+        if li and li[0].text and li[0].text.strip():
+            return True
+        # Multi-bird captures store the identification per region (no
+        # whole-image species); a region with a bird counts as identified.
+        for r in _read_regions(sidecar):
+            if r.get("topSpecies") or (r.get("ranked")):
+                return True
     except Exception:
-        return False
+        pass
+    return False
 
 
 def sidecar_confirmed(sidecar: Path) -> str | None:
@@ -3239,75 +3249,103 @@ def write_sidecar(sidecar: Path, result: dict, region: str, month: int,
         _set_text(desc, "error", BIRD_NS, error[:500])
         _set_text(desc, "pipelineVersion", BIRD_NS, PIPELINE_VERSION)
     else:
-        species = result.get("species", "unknown")
-        confidence = float(result.get("confidence", 0.0))
-        alts = [a for a in result.get("alternatives", []) if a]
-        ranked = [species] + [a for a in alts if a and a != species]
-
-        # keep only plausible entries in alternatives for the sidecar.
-        # alternatives carry an approximate decaying confidence (the model only
-        # gives a confidence for the top pick).
-        confs = [confidence] + [
-            max(0.05, round(confidence - 0.1 * (i + 1), 2)) for i in range(len(ranked) - 1)
-        ]
-
-        _set_list(desc, "species", BIRD_NS, ranked, "Seq")
-        _set_list(desc, "confidence", BIRD_NS, [f"{c:.2f}" for c in confs], "Seq")
-        _set_text(desc, "summary", BIRD_NS, " | ".join(
-            f"{s} {c*100:.0f}%" for s, c in zip(ranked, confs)))
-        _set_text(desc, "topSpecies", BIRD_NS, species)
-        if scientific:
-            _set_text(desc, "scientificName", BIRD_NS, scientific)
-        if avibase_id:
-            _set_text(desc, "avibaseId", BIRD_NS, avibase_id)
-        if avibase_url:
-            _set_text(desc, "avibaseUrl", BIRD_NS, avibase_url)
-        _set_text(desc, "topConfidence", BIRD_NS, f"{confidence:.2f}")
+        # The capture-level verdict + metadata are written for EVERY capture;
+        # the whole-image single-bird PREDICTION fields are not (see below).
         _set_text(desc, "status", BIRD_NS, status)
         _set_text(desc, "pipelineVersion", BIRD_NS, PIPELINE_VERSION)
         _set_text(desc, "region", BIRD_NS, region)
         _set_text(desc, "month", BIRD_NS, f"{month:02d}")
         if dt:
             _set_text(desc, "datetime", BIRD_NS, dt.strftime("%Y-%m-%d %H:%M:%S"))
-        reasoning = result.get("reasoning", "")
-        _set_text(desc, "reasoning", BIRD_NS, reasoning[:1000])
 
-        # The group-partial pin (bird:status='partial') is consumed by this
-        # identification — status becomes 'done' — and its user-confirmed
-        # dwc:Taxon ladder is kept (never overridden; see the note above).
+        # A MULTI-BIRD capture (a --multi run produced `regions`, OR the
+        # capture is flagged multi and this is a single-bird re-run) stores NO
+        # whole-image single-bird prediction: with several birds in the frame
+        # the whole-image species/confidence/summary/topSpecies/reasoning/... is
+        # a misleading guess that has confused viewers and downstream tools (it
+        # is not any one bird in the photo). The identification lives in the
+        # per-bird region records (each with its own topSpecies + ranked
+        # candidates); the capture carries only the verdict + metadata. Any
+        # stale whole-image prediction fields were already stripped above.
+        if regions or was_multi:
+            if regions:
+                _set_regions(desc, regions)
+            # A stale single-bird dc:description/dc:subject from an earlier
+            # owned run would be wrong for a multi capture; remove it when we
+            # are the maintainer (--dc-fields opt-in), never foreign dc:*.
+            if owned and getattr(cfg, "dc_fields", False):
+                for stale in (list(_find(root, "//dc:description"))
+                              + list(_find(root, "//dc:subject"))):
+                    parent = stale.getparent()
+                    if parent is not None:
+                        parent.remove(stale)
+        else:
+            species = result.get("species", "unknown")
+            confidence = float(result.get("confidence", 0.0))
+            alts = [a for a in result.get("alternatives", []) if a]
+            ranked = [species] + [a for a in alts if a and a != species]
 
-        if owned and getattr(cfg, "dc_fields", False):
-            # dc:description (human readable) and dc:subject keywords - only on
-            # sidecars birdid owns AND only when --dc-fields is given (opt-in),
-            # so foreign captions/keywords are preserved either way.
-            note = f"{species} ({scientific}) {confidence*100:.0f}%" if scientific else f"{species} ({confidence*100:.0f}%)"
-            if alts:
-                note += "; alternatives: " + ", ".join(alts[:3])
-            if reasoning:
-                note += f" - {reasoning}"
+            # keep only plausible entries in alternatives for the sidecar.
+            # alternatives carry an approximate decaying confidence (the model
+            # only gives a confidence for the top pick).
+            confs = [confidence] + [
+                max(0.05, round(confidence - 0.1 * (i + 1), 2))
+                for i in range(len(ranked) - 1)
+            ]
+
+            _set_list(desc, "species", BIRD_NS, ranked, "Seq")
+            _set_list(desc, "confidence", BIRD_NS,
+                      [f"{c:.2f}" for c in confs], "Seq")
+            _set_text(desc, "summary", BIRD_NS, " | ".join(
+                f"{s} {c*100:.0f}%" for s, c in zip(ranked, confs)))
+            _set_text(desc, "topSpecies", BIRD_NS, species)
+            if scientific:
+                _set_text(desc, "scientificName", BIRD_NS, scientific)
+            if avibase_id:
+                _set_text(desc, "avibaseId", BIRD_NS, avibase_id)
             if avibase_url:
-                note += f" | Avibase: {avibase_url}"
-            _set_text(desc, "description", _nsmap()["dc"], note)
+                _set_text(desc, "avibaseUrl", BIRD_NS, avibase_url)
+            _set_text(desc, "topConfidence", BIRD_NS, f"{confidence:.2f}")
+            reasoning = result.get("reasoning", "")
+            _set_text(desc, "reasoning", BIRD_NS, reasoning[:1000])
 
-            # dc:subject -> Birds/<species> keywords (convenience for photo
-            # software); non-bird subjects get Non-bird/<category> so they stay
-            # separate. Only on owned sidecars (see above).
-            kw_prefix = "Non-bird" if status == "non-bird" else "Birds"
-            for old in _find(root, "//dc:subject"):
-                old.getparent().remove(old)
-            subj = etree.SubElement(desc, f"{{{_nsmap()['dc']}}}subject")
-            bag = etree.SubElement(subj, f"{{{_nsmap()['rdf']}}}Bag")
-            seen = set()
-            for s in ranked[:5]:
-                if s not in seen:
-                    seen.add(s)
-                    li = etree.SubElement(bag, f"{{{_nsmap()['rdf']}}}li")
-                    li.text = f"{kw_prefix}/{s}"
+            # The group-partial pin (bird:status='partial') is consumed by this
+            # identification — status becomes 'done' — and its user-confirmed
+            # dwc:Taxon ladder is kept (never overridden; see the note above).
 
-        # A multi-bird capture: per-bird region records (ranked candidate lists
-        # + normalized boxes) + the standard mwg-rs box mirror.
-        if regions:
-            _set_regions(desc, regions)
+            if owned and getattr(cfg, "dc_fields", False):
+                # dc:description (human readable) and dc:subject keywords - only
+                # on sidecars birdid owns AND only when --dc-fields is given
+                # (opt-in), so foreign captions/keywords are preserved either way.
+                note = (f"{species} ({scientific}) {confidence*100:.0f}%"
+                        if scientific else f"{species} ({confidence*100:.0f}%)")
+                if alts:
+                    note += "; alternatives: " + ", ".join(alts[:3])
+                if reasoning:
+                    note += f" - {reasoning}"
+                if avibase_url:
+                    note += f" | Avibase: {avibase_url}"
+                _set_text(desc, "description", _nsmap()["dc"], note)
+
+                # dc:subject -> Birds/<species> keywords (convenience for photo
+                # software); non-bird subjects get Non-bird/<category> so they
+                # stay separate. Only on owned sidecars (see above).
+                kw_prefix = "Non-bird" if status == "non-bird" else "Birds"
+                for old in _find(root, "//dc:subject"):
+                    old.getparent().remove(old)
+                subj = etree.SubElement(desc, f"{{{_nsmap()['dc']}}}subject")
+                bag = etree.SubElement(subj, f"{{{_nsmap()['rdf']}}}Bag")
+                seen = set()
+                for s in ranked[:5]:
+                    if s not in seen:
+                        seen.add(s)
+                        li = etree.SubElement(bag, f"{{{_nsmap()['rdf']}}}li")
+                        li.text = f"{kw_prefix}/{s}"
+
+            # A multi-bird capture: per-bird region records (ranked candidate
+            # lists + normalized boxes) + the standard mwg-rs box mirror.
+            if regions:
+                _set_regions(desc, regions)
 
     # canonical element order, regardless of whether this sidecar was merged
     # into an existing file (a re-run must not drift the layout)
@@ -4209,6 +4247,12 @@ def sidecar_status(sidecar: Path):
         if status == "no-data":
             return "no-data"
         if sidecar_done(sidecar):
+            return "done"
+        # A MULTI-bird capture that a single-bird run already stamped with
+        # bird:status='done' (but that has no whole-image species and no regions
+        # yet) must not re-process on every normal run — it is queued for
+        # --multi instead (see the --multi branch in main()).
+        if status == "done" and sidecar_multi(sidecar):
             return "done"
     except Exception:
         pass

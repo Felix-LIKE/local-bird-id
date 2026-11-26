@@ -379,6 +379,50 @@ def run():
         check("re-identified capture keeps exactly 2 regions",
               len(birdid._read_regions(sidecar)) == 2)
 
+        print("\n== M1: a multi capture stores NO whole-image single-bird prediction ==")
+        mroot = root / "m1"
+        mroot.mkdir()
+        ms = mroot / "multi_bird.xmp"
+        birdid.write_sidecar(ms, {"species": "Mallard", "confidence": 0.5,
+                                  "alternatives": [], "reasoning": "whole image"},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done",
+                             type("C", (), {"dc_fields": False}),
+                             regions=multi_regions())
+        mdesc = birdid._find(birdid._xmp_tree(ms), "//rdf:Description")[0]
+        mtags = {c.tag.split("}")[-1] for c in mdesc}
+        for f in ("species", "confidence", "summary", "topSpecies",
+                  "topConfidence", "scientificName", "avibaseId",
+                  "avibaseUrl", "reasoning"):
+            check(f"multi capture has no whole-image '{f}'",
+                  f not in mtags, "present")
+        check("multi capture keeps verdict + metadata + structure",
+              {"status", "region", "month", "multiBird", "birdCount",
+               "regions"} <= mtags)
+        check("multi capture reads as done (skip logic works)",
+              birdid.sidecar_done(ms) and birdid.sidecar_status(ms) == "done")
+        check("per-region birds still intact",
+              len(birdid._read_regions(ms)) == 2)
+
+        print("\n== M2: single-bird re-run of a multi-flagged capture stays clean ==")
+        m2root = root / "m2"
+        m2root.mkdir()
+        fs = m2root / "flagged.xmp"
+        build_flag_only_sidecar(fs)   # bare flag, no status/species yet
+        # A normal (single-bird) run re-processes the flagged capture.
+        birdid.write_sidecar(fs, {"species": "Mallard", "confidence": 0.55,
+                                  "alternatives": [], "reasoning": "whole"},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done",
+                             type("C", (), {"dc_fields": False}))
+        fdesc = birdid._find(birdid._xmp_tree(fs), "//rdf:Description")[0]
+        f2tags = {c.tag.split("}")[-1] for c in fdesc}
+        check("flagged capture keeps the multi flag after a single re-run",
+              "multiBird" in f2tags)
+        check("flagged capture still has NO whole-image prediction",
+              "species" not in f2tags and "topSpecies" not in f2tags
+              and "topConfidence" not in f2tags)
+        check("flagged capture reads as done (no infinite re-run)",
+              birdid.sidecar_status(fs) == "done")
+
         print("\n== D1: consolidate duplicate mixed-case sidecars (the 'done + "
               "no entries' bug) ==")
         dup_root = root / "dup"
