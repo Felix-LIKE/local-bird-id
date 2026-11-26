@@ -51,8 +51,12 @@ Data management (see pipeline/ebird_data.py):
   birdid.py --download-detector        (optional) download the dedicated ONNX
                                        multi-bird detector (a separate, opt-in
                                        download - BioCLIP-only users needn't)
+  birdid.py --onnx-encoder             OPT-IN: use the int8 ONNX CPU image
+                                       encoder (torch is the default; installing
+                                       onnxruntime for the ONNX multi-bird
+                                       detector does NOT flip the encoder)
   birdid.py --no-onnx-encoder          force the pybioclip CPU encoder (no
-                                       int8 ONNX fast path) even when available
+                                       int8 ONNX fast path) even when opted in
 
 Requirements:
   - exiftool, python3 (PIL, lxml, requests)
@@ -1708,9 +1712,11 @@ def run_download_encoder() -> Path:
             os.environ["HF_HUB_OFFLINE"] = had_offline
     print(f"birdid: ONNX image encoder downloaded -> {path}")
     print("  (BioCLIP 2 ViT-L/14 image tower, int8, MIT; ~0.99 cosine to the")
-    print("   PyTorch encoder - used automatically on the CPU when onnxruntime")
-    print("   is installed, and for the NPU path).")
-    print("  To use it on the CPU, install the onnx runtime:  pip install onnxruntime")
+    print("   PyTorch encoder - the fast CPU path, OPT-IN: on the CPU it is")
+    print("   used only with 'birdid --onnx-encoder' (or by setting")
+    print("   $BIRDID_ONNX_IMAGE_ENCODER); torch stays the default. The NPU")
+    print("   path always uses it.")
+    print("  To use it on the CPU: pip install onnxruntime, then run with --onnx-encoder")
     return Path(path)
 
 
@@ -1740,7 +1746,8 @@ class NpuImageEncoder:
     On the NPU (``providers=["VitisAIExecutionProvider", "CPUExecutionProvider"]``)
     only the ViT forward moves to the NPU. The same class with
     ``providers=["CPUExecutionProvider"]`` is the fast CPU path (int8
-    MatMulInteger kernels are ~4x faster than the torch.compile CPU encoder).
+    MatMulInteger kernels; measured ~3x faster per encode than the
+    torch.compile CPU encoder, ~2x end-to-end).
 
     Preprocessing is pybioclip's OWN transform (the shared backbone's
     ``.preprocess`` — ToTensor, Resize 224, the ImageNet mean/std) so the
@@ -1863,11 +1870,22 @@ class BioclipClassifier(Classifier):
             self._npu_enc = None
         return self._npu_enc
 
+    def _onnx_encoder_opted_in(self) -> bool:
+        """The int8 ONNX CPU encoder is strictly opt-in: torch stays the
+        default so onnxruntime can be installed for the dedicated ONNX
+        multi-bird detector without silently re-flipping the encoder to int8.
+        Opt in with --onnx-encoder or by setting $BIRDID_ONNX_IMAGE_ENCODER;
+        --no-onnx-encoder still forces torch."""
+        return bool(getattr(self.args, "onnx_encoder", False) or
+                    os.environ.get("BIRDID_ONNX_IMAGE_ENCODER"))
+
     def _cpu_onnx_encoder(self):
         """Lazily build the int8 ONNX image encoder on the CPU when usable.
-        Returns None when onnxruntime is missing, the .onnx is missing, or
-        the session fails - in every case the caller falls back to the
-        pybioclip CPU encoder, so the fast path never breaks a run."""
+        Returns None when the user hasn't opted in (torch is the default),
+        when --no-onnx-encoder is set, when onnxruntime / the .onnx is
+        missing, or when the session fails - in every case the caller falls
+        back to the pybioclip CPU encoder, so the fast path never breaks a
+        run."""
         if self._onnx_cpu_tried:
             return self._onnx_cpu
         self._onnx_cpu_tried = True
@@ -1875,8 +1893,24 @@ class BioclipClassifier(Classifier):
             self._report("device", "ONNX CPU image encoder disabled "
                                    "(--no-onnx-encoder) - using pybioclip")
             return None
+        if not self._onnx_encoder_opted_in():
+            # torch is the default even when onnxruntime is installed (it may
+            # be present only for the dedicated ONNX multi-bird detector).
+            return None
         onnx_path = _encoder_onnx_path()
         if onnx_path is None:
+            self._report("device", "int8 ONNX CPU encoder requested "
+                                   "(--onnx-encoder) but model not found "
+                                   "(run 'birdid --download-backends') - "
+                                   "using pybioclip")
+            return None
+        try:
+            import onnxruntime  # noqa: F401  (clearer message than a bare failure)
+        except ImportError:
+            self._report("device", "int8 ONNX CPU encoder requested "
+                                   "(--onnx-encoder) but onnxruntime is not "
+                                   "installed ('pip install onnxruntime') - "
+                                   "using pybioclip")
             return None
         try:
             self._onnx_cpu = NpuImageEncoder(
@@ -4445,10 +4479,21 @@ def main():
                     help="predownload the BioCLIP 2 + TreeOfLife backends AND "
                          "the int8 ONNX image encoder so a later run works "
                          "fully offline (same backend part as --initialize)")
+    ap.add_argument("--onnx-encoder", action="store_true",
+                    help="OPT-IN: use the int8 ONNX CPU image encoder "
+                         "('birdid --download-backends' + 'pip install "
+                         "onnxruntime') instead of the pybioclip/torch "
+                         "default. Decoupled from onnxruntime's presence: "
+                         "installing onnxruntime for the ONNX multi-bird "
+                         "detector does NOT flip the encoder - torch stays "
+                         "the default unless you pass this flag or set "
+                         "$BIRDID_ONNX_IMAGE_ENCODER. Measured ~2x faster "
+                         "end-to-end at a small accuracy cost (see "
+                         "docs/encoder-fastpath-validation.md)")
     ap.add_argument("--no-onnx-encoder", action="store_true",
                     help="force the pybioclip CPU (torch) image encoder even "
-                         "when the faster int8 ONNX encoder + onnxruntime are "
-                         "available - use to rule out int8 quantization drift "
+                         "when --onnx-encoder / $BIRDID_ONNX_IMAGE_ENCODER "
+                         "opted in - use to rule out int8 quantization drift "
                          "when comparing results")
     ap.add_argument("--download-detector", action="store_true",
                     help="download the OPTIONAL dedicated ONNX multi-bird "
@@ -4465,10 +4510,12 @@ def main():
                          "is present AND the VitisAI EP (Ryzen AI Software) is "
                          "installed, else the CPU; 'npu'/'cpu' force a device "
                          "(npu falls back to cpu if the EP is missing). On the "
-                         "CPU, the int8 ONNX image encoder is used when it is "
-                         "available (run 'birdid --download-backends' + 'pip "
-                         "install onnxruntime'), else pybioclip. Override the "
-                         "encoder path with $BIRDID_ONNX_IMAGE_ENCODER")
+                         "CPU the int8 ONNX image encoder is used ONLY when "
+                         "opted in (run 'birdid --download-backends' + 'pip "
+                         "install onnxruntime', then pass --onnx-encoder or "
+                         "set $BIRDID_ONNX_IMAGE_ENCODER); otherwise "
+                         "pybioclip/torch is the default. Override the encoder "
+                         "path with $BIRDID_ONNX_IMAGE_ENCODER")
     ap.add_argument("--api-delay", type=float, default=1.5,
                     help="seconds between eBird API calls (rate-limit guard, default 1.5)")
     ap.add_argument("--sample-dates", type=int, default=2,

@@ -33,8 +33,12 @@
 #                                      # detector - separate, opt-in download
 #   birdid --device auto|npu|cpu       # compute device for the image encoder:
 #                                      # auto = NPU when present+usable, else CPU
+#   birdid --onnx-encoder              # OPT-IN: int8 ONNX CPU image encoder
+#                                      # (torch is the default; installing
+#                                      # onnxruntime for the ONNX detector
+#                                      # does NOT flip the encoder)
 #   birdid --no-onnx-encoder           # force the pybioclip CPU encoder (no int8
-#                                      # ONNX fast path) even when it is available
+#                                      # ONNX fast path) even when opted in
 #   birdid --list-candidates           # inspect the region/month tables
 #   birdid --doctor                    # launcher self-diagnostics (run whenever
 #                                      # a run ends in a confusing bash error)
@@ -216,6 +220,10 @@ if [ "$#" -eq 0 ]; then
     say "  birdid --initialize                one-time: taxonomy + BioCLIP 2 backends"
     say "  birdid --download-detector         (optional) dedicated ONNX multi-bird"
     say "                                     detector - separate, opt-in download"
+    say "  birdid --onnx-encoder             OPT-IN: int8 ONNX CPU image"
+    say "                                     encoder (torch is the default;"
+    say "                                     installing onnxruntime for the"
+    say "                                     ONNX detector does NOT flip it)"
     say "  birdid --no-onnx-encoder           force the pybioclip CPU encoder"
     say "                                     (no int8 ONNX fast path)"
     say "  birdid --list-candidates           inspect the region/month tables"

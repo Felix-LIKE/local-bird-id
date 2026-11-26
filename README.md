@@ -345,38 +345,44 @@ Done — see **Quick usage** below.
 
 ---
 
-### Faster CPU encoding (int8 ONNX image encoder)
+### Faster CPU encoding (int8 ONNX image encoder — OPT-IN)
 
-By default the BioCLIP 2 image encoder runs through PyTorch (`torch.compile`).
-If you install `onnxruntime`, `birdid` transparently switches the **image
-encoder** to an **int8 ONNX** export of the same model — measured **~4× faster
-on CPU** on this hardware (455 ms → 114 ms per photo encode) with essentially
-unchanged results (embedding cosine ~0.99, top species identical in all
-high-confidence tests). This is the single biggest per-photo speedup available:
-it applies to *every* photo, not just multi-bird shots.
+PyTorch (`torch.compile`) is the default image encoder. An **int8 ONNX** export
+of the same model is available as an opt-in fast path — measured **~2× faster
+end-to-end** on this hardware (649 ms → 322 ms per photo on a 480-photo A/B;
+model-only ~3×). It applies to *every* photo, not just multi-bird shots.
 
 ```bash
-pip install onnxruntime        # the runtime that RUNS it
 birdid --download-backends     # fetches the int8 ONNX encoder (~307 MB) into
                                # the model cache, same as --initialize
+pip install onnxruntime        # the runtime that RUNS it
+birdid --onnx-encoder /path/to/photos   # run with the int8 encoder
 ```
 
 The encoder is part of the BioCLIP backends (same weights, ONNX format — MIT),
 so `--download-backends` / `--initialize` fetch it; there is no separate
-download flag. `birdid` then picks the encoder automatically:
+download flag. The encoder is **strictly opt-in** — installing `onnxruntime`
+alone does *not* flip it, so you can install the runtime for the dedicated
+ONNX multi-bird detector (below) while keeping the accurate torch encoder:
 
-- **int8 ONNX (CPU)** — when the model is cached **and** `onnxruntime` is
-  installed (measured ~4× faster than PyTorch on CPU).
-- **PyTorch CPU (`torch.compile`)** — otherwise (the safe default, always works).
-- `--no-onnx-encoder` forces the PyTorch path even when the ONNX encoder is
-  present (e.g. to rule out int8 quantization drift when comparing results);
+- **PyTorch CPU (`torch.compile`)** — the default, always works.
+- **int8 ONNX (CPU)** — only when the model is cached, `onnxruntime` is
+  installed, **and** you opt in with `--onnx-encoder` (or by setting
+  `$BIRDID_ONNX_IMAGE_ENCODER`).
+- `--no-onnx-encoder` forces the PyTorch path even when you opted in (e.g. to
+  rule out int8 quantization drift when comparing results);
   `$BIRDID_ONNX_IMAGE_ENCODER` overrides the model path.
 
-This is a **quantized** encoder: the ~0.99 cosine similarity means confidence
-percentages shift by a few points, and in rare low-confidence cases a
-lookalike-pair prediction can change. High-confidence results are unaffected.
-The provenance is documented in the model card (`export.json`): the fp32 export
-matches PyTorch to 8.2e-06 and the on-disk SHA-256 is verified.
+**Accuracy note (validated 2026-11-26):** this is a quantized encoder and its
+results are **not** equivalent to PyTorch at scale. Across 4 A/B tests against
+user-confirmed ground truth (1,507 photos), int8 was slightly *less* accurate:
+on a 776-photo mixed set it disagreed with PyTorch on 156 photos and was right
+only ~⅓ of the time (24 vs 48 for torch); it over-triggers the bird/non-bird
+gate on night/moon content, and is weaker on some species (e.g. Malayan Night
+Heron). PyTorch is therefore the **recommended default**; treat the int8 path
+as an opt-in ~2× speed pass where slightly lower accuracy is acceptable. Full
+A/B results and the reusable comparison recipe live in
+`docs/encoder-fastpath-validation.md`.
 
 ---
 
@@ -453,6 +459,11 @@ automatically:
 - **Zero-shot BioCLIP detector** — otherwise (the safe default, always works).
 - `--no-detector-model` forces the zero-shot one even when the ONNX model is
   present; `$BIRDID_ONNX_DETECTOR` overrides the model path.
+
+The detector's use of `onnxruntime` is **independent of the image encoder**:
+you can run the dedicated ONNX detector while keeping torch as the default
+encoder — installing `onnxruntime` alone does *not* flip the encoder, only
+`--onnx-encoder` (or `$BIRDID_ONNX_IMAGE_ENCODER`) does.
 
 Any failure (missing model, missing runtime, session error) falls back to the
 built-in detector with a one-line note at startup — multi-bird analysis never
