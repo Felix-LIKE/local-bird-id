@@ -94,6 +94,23 @@ def build_multi_sidecar(root: Path) -> Path:
     return sidecar
 
 
+def build_flag_only_sidecar(path: Path):
+    """The empty flag-only sidecar the viewer's multi-flag write used to create
+    (exiftool with only `-XMP-bird:multiBird=true`, no status/species): the
+    source of the 'done + no entries' bug when it sat next to an identified
+    original-case sidecar."""
+    path.write_text(
+        '<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>\n'
+        '<x:xmpmeta xmlns:x="adobe:ns:meta/">\n'
+        '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n'
+        ' <rdf:Description xmlns:bird="http://ns.birdpipeline/1.0/" rdf:about="">\n'
+        '  <bird:multiBird>true</bird:multiBird>\n'
+        ' </rdf:Description>\n'
+        '</rdf:RDF>\n'
+        '</x:xmpmeta>\n'
+        '<?xpacket end="w"?>\n', encoding="utf-8")
+
+
 def top_species_list(sidecar: Path) -> list:
     """The WHOLE-IMAGE bird:species list (direct child of the top Description)."""
     root = birdid._xmp_tree(sidecar)
@@ -361,6 +378,49 @@ def run():
                              regions=multi_regions())
         check("re-identified capture keeps exactly 2 regions",
               len(birdid._read_regions(sidecar)) == 2)
+
+        print("\n== D1: consolidate duplicate mixed-case sidecars (the 'done + "
+              "no entries' bug) ==")
+        dup_root = root / "dup"
+        dup_root.mkdir()
+        # The exact broken pair from the field: an identified ORIGINAL-case
+        # sidecar (whole-image, no multi flag — the old pipeline never saw the
+        # lowercase flag) + an empty flag-only LOWERCASE sidecar (the viewer's
+        # flag write before any --multi run).
+        rich = dup_root / "BIRDS_BRANCH.xmp"
+        flag_only = dup_root / "birds_branch.xmp"
+        birdid.write_sidecar(rich, {"species": "Great Cormorant",
+                                    "scientific": "Phalacrocorax carbo",
+                                    "confidence": 0.92, "alternatives": []},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done",
+                             type("C", (), {"dc_fields": False}))
+        build_flag_only_sidecar(flag_only)
+        check("duplicate pair present",
+              rich.exists() and flag_only.exists()
+              and not birdid.sidecar_multi(rich))
+        removed = birdid._consolidate_duplicate_sidecars(dup_root)
+        check("one duplicate sidecar removed", removed == 1, f"removed={removed}")
+        check("only the identified sidecar remains",
+              rich.exists() and not flag_only.exists())
+        check("multi flag merged into the survivor (request preserved)",
+              birdid.sidecar_multi(rich) and birdid.sidecar_status(rich) == "done",
+              f"multi={birdid.sidecar_multi(rich)} status={birdid.sidecar_status(rich)}")
+        check("consolidation is idempotent (nothing left to remove)",
+              birdid._consolidate_duplicate_sidecars(dup_root) == 0)
+
+        print("\n== D2: Capture.sidecar() resolves mixed-case sidecars ==")
+        low_root = root / "low"
+        low_root.mkdir()
+        low = low_root / "new_bird.xmp"
+        low.write_text("<x/>", encoding="utf-8")
+        cap = birdid.Capture("NEW_BIRD", low_root)
+        check("Capture.sidecar finds the lowercase variant",
+              cap.sidecar() == low, f"got {cap.sidecar()}")
+        exact = low_root / "NEW_BIRD.xmp"
+        exact.write_text("<x/>", encoding="utf-8")
+        cap2 = birdid.Capture("NEW_BIRD", low_root)
+        check("Capture.sidecar prefers the exact-case path when both exist",
+              cap2.sidecar() == exact, f"got {cap2.sidecar()}")
 
     print("\n============================================")
     if FAILURES:

@@ -4109,8 +4109,29 @@ class Capture:
         self.files: list[Path] = []
 
     def sidecar(self) -> Path:
-        """The one sidecar for this capture: <folder>/<base>.xmp"""
-        return self.directory / (self.base + ".xmp")
+        """The one sidecar for this capture: <folder>/<base>.xmp.
+
+        Resolves to the ACTUAL existing sidecar case-insensitively: the
+        pipeline writes the ORIGINAL-case <base>.xmp (matching the photo
+        stem), but the viewer's flag write used to create a LOWERCASED one —
+        returning the exact-case path blindly then missed it and silently
+        created a SECOND sidecar. The exact-case path is returned when it
+        exists; otherwise an existing case-variant is found so reads and
+        writes hit the same file. Falls back to the exact-case path (the
+        canonical write target) when no sidecar exists yet.
+        """
+        exact = self.directory / (self.base + ".xmp")
+        if exact.exists():
+            return exact
+        try:
+            for p in self.directory.iterdir():
+                if (p.is_file()
+                        and p.name.lower().endswith(".xmp")
+                        and p.name[:-len(".xmp")].lower() == self.base.lower()):
+                    return p
+        except OSError:
+            pass
+        return exact
 
     def primary(self) -> Path:
         """Best file to classify: a viewable one, else the first."""
@@ -4708,6 +4729,106 @@ def ask_no_data_choice(tui, region: str) -> str:
 # Main pipeline
 # --------------------------------------------------------------------------
 
+def _merge_multi_from(src: Path, dst: Path) -> bool:
+    """Copy the multi-bird request fields — ``bird:multiBird`` /
+    ``bird:birdCount`` / ``bird:regions`` — from ``src`` into ``dst`` (only
+    the ones ``dst`` lacks) and rewrite ``dst``.
+
+    The flag-only sidecar exiftool writes scatters its fields over SEVERAL
+    ``rdf:Description`` blocks (one per namespace), so the source fields are
+    located by a tree-wide ``//bird:*`` search rather than a single
+    description. ``dst`` is the pipeline-written (single-description) sidecar.
+
+    True when anything was merged. Used by ``_consolidate_duplicate_sidecars``
+    to heal a duplicate-sidecar capture: the empty flag-only sidecar carries
+    the multi-bird request the identified sidecar is missing."""
+    from lxml import etree
+    import copy
+    src_root = _xmp_tree(src)
+    dst_root = _xmp_tree(dst)
+    dst_descs = _find(dst_root, "//rdf:Description")
+    if not dst_descs:
+        return False
+    # The destination bird description: the one carrying bird:* fields (the
+    # pipeline writes them all into a single rdf:Description), else the first.
+    dst_desc = next(
+        (d for d in dst_descs
+         if any(c.tag == f"{{{BIRD_NS}}}{t}"
+                for t in ("multiBird", "birdCount", "regions", "species",
+                          "status")
+                for c in d)),
+        dst_descs[0])
+    changed = False
+    for tag in ("multiBird", "birdCount", "regions"):
+        els = _find(src_root, f"//bird:{tag}")
+        if not els:
+            continue
+        el = els[0]
+        has_content = bool((el.text or "").strip()) or len(el) > 0
+        if not has_content:
+            continue
+        if dst_desc.find(f"{{{BIRD_NS}}}{tag}") is not None:
+            continue   # dst already carries it — keep dst's
+        dst_desc.append(copy.deepcopy(el))
+        changed = True
+    if changed:
+        _ensure_xpacket(dst_root)
+        out = io.BytesIO()
+        etree.ElementTree(dst_root).write(out, xml_declaration=False,
+                                          encoding="UTF-8", pretty_print=True)
+        dst.write_bytes(out.getvalue())
+    return changed
+
+
+def _consolidate_duplicate_sidecars(root: Path) -> int:
+    """Heal duplicate ``<base>.xmp`` sidecars that differ only in CASE.
+
+    The viewer's multi-flag write used to create a LOWERCASE ``<base>.xmp``
+    (e.g. ``5m4_0333.xmp``) next to the pipeline's ORIGINAL-case one
+    (``5M4_0333.xmp``, matching the photo stem) — so a capture flagged from
+    the GUI ended up with TWO sidecars: the empty flag-only one (which the
+    viewer reads, showing 'done' with empty entries) and the identified one.
+    Consolidate each such pair to ONE sidecar: keep the sidecar carrying the
+    identification (species / status / regions), merge the multi-bird request
+    across from any other, and delete the stray duplicate(s).
+
+    Returns the number of sidecars removed. Idempotent: a run with no
+    duplicates removes nothing."""
+    from collections import defaultdict
+    by_stem: dict[tuple[Path, str], list[Path]] = defaultdict(list)
+    for p in root.rglob("*.xmp"):
+        if p.is_file():
+            by_stem[(p.parent, p.stem.lower())].append(p)
+
+    def _richness(sc: Path):
+        try:
+            regions = _read_regions(sc)
+        except Exception:
+            regions = []
+        return (
+            int(bool(sidecar_done(sc))),     # carries an identification
+            int(bool(sidecar_status(sc))),   # carries a status verdict
+            int(bool(regions)),              # carries per-bird regions
+            sc.stat().st_size,               # larger = richer
+        )
+
+    removed = 0
+    for (_dir, _stem), sidecars in by_stem.items():
+        if len(sidecars) < 2:
+            continue
+        keep = max(sidecars, key=_richness)
+        for other in sidecars:
+            if other == keep:
+                continue
+            try:
+                _merge_multi_from(other, keep)
+                other.unlink()
+                removed += 1
+            except OSError:
+                pass
+    return removed
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Offline bird-photo identification (BioCLIP 2, single XMP sidecar per capture).")
@@ -5086,6 +5207,18 @@ def main():
         root = Path(args.folder).expanduser().resolve()
         if not root.is_dir():
             sys.exit(f"folder not found: {root}")
+        # Heal duplicate <base>.xmp sidecars that differ only in case (the old
+        # viewer's flag write created a lowercase one next to the pipeline's
+        # original-case one). Runs before EVERY photo-touching command so
+        # confirm / region-confirm / multi all operate on a single sidecar.
+        if not args.dry_run:
+            try:
+                removed = _consolidate_duplicate_sidecars(root)
+                if removed:
+                    print(f"birdid: consolidated {removed} duplicate sidecar(s) "
+                          "(mixed-case <base>.xmp)")
+            except Exception as e:
+                print(f"  note: sidecar consolidation skipped: {e}")
 
     # --- user confirmation (set/clear bird:confirmed) - no model run ---
     if args.confirm is not None or args.unconfirm:
