@@ -18,9 +18,10 @@ Pins two contracts:
    ITS OWN DarwinCore-mirroring taxonomy + verification markers into that
    region record — the per-bird counterpart of the capture dwc block — so a
    multi-bird capture carries EVERY bird's verification, not just the
-   primary's. The capture-level dwc tracks the PRIMARY region (largest box):
-   written from its confirmed species, removed when the primary is
-   unconfirmed. The capture is FROZEN only once EVERY region is confirmed;
+   primary's. The capture-level dwc tracks the PRIMARY region (see
+   _region_primary_index: area weighted by box centering): written from its
+   confirmed species, removed when the primary is unconfirmed. The capture is
+   FROZEN only once EVERY region is confirmed;
    until then it stays re-runnable so --multi re-classifies exactly the
    unconfirmed regions (confirmed ones pass through untouched).
 
@@ -181,9 +182,10 @@ def run():
                                         "status": ""}, str(dwc_verified(sidecar)))
         check("regions NOT all confirmed", not birdid._regions_all_confirmed(sidecar))
 
-        # Region 0 (x=0.10 w=0.40 -> area 0.12) is larger than region 1
-        # (area 0.09), so it is the PRIMARY.
-        check("primary region is index 0 (largest box)",
+        # Region 0 (center 0.30,0.25 area 0.12) outranks region 1 (center
+        # 0.75,0.25 area 0.09) under the center-weighted primary score (both
+        # near center; region 0 is larger), so it is the PRIMARY.
+        check("primary region is index 0 (center-weighted score)",
               birdid._region_primary_index(birdid._read_regions(sidecar)) == 0)
 
         print("\n== R1: PER-REGION confirm of the PRIMARY (region 0) ==")
@@ -584,6 +586,31 @@ def run():
               _dwc_taxon2("order") == "Suliformes"
               and _dwc_taxon2("family") == "Phalacrocoracidae",
               f"order={_dwc_taxon2('order')!r} family={_dwc_taxon2('family')!r}")
+
+        print("\n== G2: PRIMARY region = area weighted by box centering ==")
+        # A bird parked at the frame edge should NOT beat a smaller bird near
+        # the frame center (the 5M4_0217 case: a center Barn Swallow loses to
+        # an edge Mallard under pure largest-area). Center-weighting must flip
+        # it. Mirror of the viewer JS primaryRegionScore — keep in sync.
+        edge_big = {"x": 0.83, "y": 0.67, "w": 0.05, "h": 0.06}   # area 0.0030, center (0.855, 0.70)
+        center_small = {"x": 0.47, "y": 0.54, "w": 0.04, "h": 0.06}  # area 0.0024, center (0.49, 0.57)
+        check("center-weighted score prefers the small centered bird",
+              birdid._region_primary_score(center_small)
+              > birdid._region_primary_score(edge_big),
+              f"center={birdid._region_primary_score(center_small):.5f} "
+              f"edge={birdid._region_primary_score(edge_big):.5f}")
+        check("primary index picks the small centered bird",
+              birdid._region_primary_index([edge_big, center_small]) == 1)
+        # But a genuinely much larger box still wins regardless of position.
+        huge_edge = {"x": 0.0, "y": 0.0, "w": 0.9, "h": 0.9}   # fills the frame
+        check("a much larger box still wins over a centered small one",
+              birdid._region_primary_index([huge_edge, center_small]) == 0)
+        # Area alone is NOT the arbiter: a large-but-edge box loses to a
+        # centered one of comparable size.
+        big_edge = {"x": 0.85, "y": 0.0, "w": 0.15, "h": 0.8}  # center (0.925, 0.4)
+        mid_center = {"x": 0.3, "y": 0.2, "w": 0.4, "h": 0.4}  # center (0.5, 0.4)
+        check("larger-but-edged box loses to a centered comparable one",
+              birdid._region_primary_index([big_edge, mid_center]) == 1)
 
     print("\n============================================")
     if FAILURES:

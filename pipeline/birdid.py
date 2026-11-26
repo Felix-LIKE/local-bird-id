@@ -3899,8 +3899,9 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
 # (--confirm --region N): confirming a region writes ITS OWN DarwinCore-
 # mirroring taxonomy + verification markers (the per-bird counterpart of the
 # whole-capture dwc block), so the taxonomy of every bird is readable from the
-# sidecar. The capture-level dwc block tracks the PRIMARY region (largest
-# box): it is written from that region's confirmed species once the primary is
+# sidecar. The capture-level dwc block tracks the PRIMARY region (see
+# _region_primary_index: area weighted by box centering): it is written from
+# that region's confirmed species once the primary is
 # confirmed, and removed when the primary is unconfirmed. The capture is
 # FROZEN only once EVERY region is confirmed (see _set_capture_verified).
 
@@ -3914,15 +3915,36 @@ _REGION_CONFIRM_FIELDS = (
 )
 
 
+def _region_primary_score(r: dict) -> float:
+    """Prominence of a region as the likely PRIMARY subject: its area (w×h)
+    weighted by how centered the box is. A bird near the frame center is more
+    likely the subject than an equally-sized one parked at the edge (e.g. a
+    small swallow perched center while a larger bird passes at the edge — the
+    swallow is still the subject). Weight runs 1.5 (dead center) down to 0.5
+    (a corner), so size still dominates: a genuinely much larger box wins
+    regardless of position."""
+    w = float(r.get("w", 0.0))
+    h = float(r.get("h", 0.0))
+    area = w * h
+    cx = float(r.get("x", 0.0)) + w / 2.0
+    cy = float(r.get("y", 0.0)) + h / 2.0
+    # Normalized distance of the box center from the image center (0.5, 0.5):
+    # 0 at dead center, 1 at a corner (max dist = sqrt(0.5^2 + 0.5^2)).
+    dn = (((cx - 0.5) ** 2 + (cy - 0.5) ** 2) ** 0.5) / 0.7071067811865476
+    return area * (1.5 - min(dn, 1.0))
+
+
 def _region_primary_index(regions: list[dict]) -> int:
-    """Index of the PRIMARY region: the largest bounding box (area = w×h —
-    that bird is the likely primary subject). Ties go to the earliest."""
+    """Index of the PRIMARY region: the box most likely to be the main subject
+    — its area weighted by how centered it is (see `_region_primary_score`), so
+    a smaller centered bird outranks a larger one at the frame edge. Ties go to
+    the earliest."""
     best_i = 0
-    best_area = -1.0
+    best_score = -1.0
     for i, r in enumerate(regions):
-        area = float(r.get("w", 0.0)) * float(r.get("h", 0.0))
-        if area > best_area:
-            best_area = area
+        score = _region_primary_score(r)
+        if score > best_score:
+            best_score = score
             best_i = i
     return best_i
 
@@ -4011,7 +4033,8 @@ def run_region_confirm(root: Path, photo: str | None, species: str | None,
     — the per-bird data the whole-capture dwc block holds for the primary, so
     a multi-bird capture carries EVERY bird's verification, not just the
     primary's. The capture-level dwc block is written/refreshed when the
-    confirmed region IS the PRIMARY (largest box), from its confirmed species,
+    confirmed region IS the PRIMARY (see _region_primary_index), from its
+    confirmed species,
     and removed when the primary is unconfirmed. Once EVERY region is confirmed
     the capture is fully done: a capture-level confirmation (bird:confirmed +
     full dwc) freezes it, so ``--multi`` skips it.
@@ -5069,7 +5092,8 @@ def main():
                          "kingdom/phylum/class/order/family/genus/"
                          "specificEpithet + dateIdentified) into that region "
                          "record; the capture-level dwc block tracks the "
-                         "PRIMARY region (largest box) - it is written from "
+                         "PRIMARY region (see _region_primary_index: area "
+                         "weighted by box centering) - it is written from "
                          "that region's confirmed species and removed when the "
                          "primary is unconfirmed. The capture is FROZEN once "
                          "every region is confirmed (--multi then skips it; "
