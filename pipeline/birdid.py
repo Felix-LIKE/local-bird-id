@@ -45,6 +45,9 @@ Data management (see pipeline/ebird_data.py):
                                        no table uses); update syncs the cache
                                        with the current eBird tables
   birdid.py --api [<key>]              store / show the eBird API key
+                                       (--api clear removes it)
+  birdid.py --status                   machine-readable JSON snapshot of the
+                                       install + data state (no network)
   birdid.py --initialize               one-time: download taxonomy + BioCLIP 2
                                        backends + the int8 ONNX image encoder
                                        so everything works offline
@@ -1628,6 +1631,108 @@ def run_cache(data_dir: Path, cache_dir: Path, tokens: list[str]):
         else:
             print(f"birdid: --cache update: cache is up to date "
                   f"({len(cache.names())} species, no changes)")
+
+
+def _hub_cache_root() -> Path:
+    """The huggingface_hub cache root (honors HF_HOME / HF_HUB_CACHE), used by
+    --status to probe which model files are already downloaded WITHOUT ever
+    hitting the network (a management status must never trigger a download)."""
+    env = os.environ.get("HF_HUB_CACHE")
+    if env:
+        return Path(env)
+    home = os.environ.get("HF_HOME") or str(Path.home() / ".cache" / "huggingface")
+    return Path(home) / "hub"
+
+
+def _hub_cached_file(repo_id: str, filename: str) -> bool:
+    """True when `repo_id`'s `filename` is already in the local HF cache
+    (pure path-probe under `models--<org>--<name>/snapshots/*/`; offline-safe)."""
+    repo_dir = _hub_cache_root() / ("models--" + repo_id.replace("/", "--"))
+    snapshots = repo_dir / "snapshots"
+    if not snapshots.is_dir():
+        return False
+    try:
+        return any((snap / filename).is_file() for snap in snapshots.iterdir())
+    except OSError:
+        return False
+
+
+def run_status(data_dir: Path, cache_dir: Path, checklists_dir: Path):
+    """`--status`: a machine-readable JSON snapshot of the install + data state.
+
+    The viewer's management panel and feature gating consume this — it is the
+    single authoritative "what is installed / downloaded" source. Prints ONE
+    JSON document to stdout and NOTHING else, so a caller can parse the entire
+    stdout as the object. Everything here is local (no network, no model load):
+    region tables, the species-embedding cache index, the API key file and the
+    HF-cache model probes. `backends.bio_clip` is the "the AI backends are
+    ready to classify" signal the viewer uses to gate the multi-bird UI."""
+    import importlib.util
+    import json as _json
+    from ebird_data import POOLS, get_api_key, load_countries
+
+    db = SpeciesDB(data_dir / "regions", data_dir / "regions_generated")
+    db.load()
+    by_src: dict[str, list[str]] = {"curated": [], "generated": []}
+    for reg in db.regions():
+        by_src.setdefault(db.source(reg), []).append(reg)
+    curated = sorted(by_src["curated"])
+    generated = sorted(by_src["generated"])
+
+    try:
+        cache_species = len(SpeciesEmbeddingCache(cache_dir).names())
+    except Exception:
+        cache_species = 0
+
+    key = get_api_key()
+    countries = load_countries(data_dir)
+
+    try:
+        pybioclip = importlib.util.find_spec("bioclip") is not None
+    except Exception:
+        pybioclip = False
+    bio_clip = _hub_cached_file(
+        "imageomics/bioclip-2", "open_clip_model.safetensors")
+    onnx_encoder = _hub_cached_file(
+        "fushanbobfan/bioclip2-vitl14-image-onnx",
+        "bioclip2_vitl14_image_int8.onnx") or _DEFAULT_ONNX_ENCODER.is_file()
+    onnx_detector = _hub_cached_file(
+        "onnx-community/rtdetr_r18vd", "onnx/model_int8.onnx")
+    tol = (_hub_cache_root() / "datasets--imageomics--TreeOfLife-200M").is_dir()
+
+    doc = {
+        "version": PIPELINE_VERSION,
+        "data_dir": str(data_dir),
+        "cache_dir": str(cache_dir),
+        "checklists_dir": str(checklists_dir),
+        "default_region": DEFAULT_REGION,
+        "api_key": {
+            "configured": bool(key),
+            "tail": key[-4:] if key else None,
+        },
+        "regions": {
+            "curated": curated,
+            "generated": generated,
+        },
+        "cache": {
+            "path": str(cache_dir),
+            "species": cache_species,
+        },
+        "backends": {
+            "pybioclip": pybioclip,
+            "bio_clip": bio_clip,
+            "onnx_encoder": onnx_encoder,
+            "onnx_detector": onnx_detector,
+            "tol": tol,
+        },
+        "countries": sorted(
+            ({"code": c, "name": n} for c, n in countries.items()),
+            key=lambda x: x["name"].lower()),
+        "pools": sorted(
+            ({"code": c, "name": info["name"]} for c, info in POOLS.items()),
+            key=lambda x: x["code"]),
+    }
+    print(_json.dumps(doc))
 
 
 def _build_ladder(db: SpeciesDB, region: str, month: int, grace: int,
@@ -4548,6 +4653,12 @@ def main():
                          "any table and encode newly-needed ones (incremental). "
                          "REGION codes come from the eBird tables, e.g. DE, "
                          "EU-WEST, AS-SOUTHEAST, EUROPE")
+    ap.add_argument("--status", action="store_true",
+                    help="print a machine-readable JSON snapshot of the "
+                         "install + data state (API key, region tables, cache, "
+                         "downloaded models) - the viewer's management panel "
+                         "and feature gating read this. Local-only, no network, "
+                         "no model load.")
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
@@ -4555,7 +4666,7 @@ def main():
     # --- data management commands (no photo folder needed) ---
     mgmt = (args.initialize or args.download_backends or args.download_detector
             or args.api is not None or args.list is not None or args.download
-            or args.update or args.cache is not None)
+            or args.update or args.cache is not None or args.status)
     if mgmt:
         try:
             if args.download_detector:
@@ -4575,6 +4686,9 @@ def main():
                 list_regions(data_dir, args.list)
             elif args.cache is not None:
                 run_cache(data_dir, Path(args.cache_dir), args.cache)
+            elif args.status:
+                run_status(data_dir, Path(args.cache_dir),
+                           Path(args.checklists_dir))
             elif args.update:
                 from ebird_data import set_api_delay, update
                 set_api_delay(args.api_delay)
@@ -4598,7 +4712,7 @@ def main():
     if not args.folder and not args.list_candidates:
         ap.error("the following arguments are required: folder  "
                  "(or use a management command: --download/--update/--list/"
-                 "--api/--initialize/--cache/--list-candidates)")
+                 "--api/--initialize/--cache/--status/--list-candidates)")
 
     root = None
     if args.folder:

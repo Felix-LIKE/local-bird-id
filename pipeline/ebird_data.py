@@ -415,7 +415,18 @@ def set_api_key(key: str):
 
 
 def handle_api(arg):
-    """`--api <key>` stores the key; bare `--api` prints status."""
+    """`--api <key>` stores the key; bare `--api` prints status; `--api
+    __clear__` removes the stored key (used by the viewer's management panel —
+    a magic token, never a real key)."""
+    if arg == "__clear__":
+        if KEY_PATH.is_file():
+            try:
+                KEY_PATH.unlink()
+            except OSError as e:
+                raise RuntimeError(
+                    f"could not remove the eBird API key at {KEY_PATH}: {e}") from e
+        print(f"birdid: eBird API key removed ({KEY_PATH}).")
+        return
     if arg == "__show__":
         key = get_api_key()
         if key:
