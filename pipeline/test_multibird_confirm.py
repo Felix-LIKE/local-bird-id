@@ -1,21 +1,33 @@
 #!/usr/bin/env python3
 """Regression test: how birdid CONFIRM behaves on a MULTI-BIRD sidecar.
 
-This pins the user-facing contract "confirm with several birds": a capture
-carrying bird:regions (per-bird candidate lists + boxes) can be confirmed
-exactly like a single-bird capture — the whole-image bird:* fields collapse
-to the confirmed pick (single-entry species at 100%, status 'done') and the
-record is FROZEN, but the per-bird region records, bird:birdCount and the
-bird:multiBird request flag are PRESERVED. Un-confirm removes the flag and
-leaves the regions; a re-run then re-identifies. A GROUP-partial pin (e.g.
-'Mammal') on a multi-bird capture stays a re-runnable partial with regions
-intact.
+Pins two contracts:
+
+1) WHOLE-CAPTURE confirm with several birds: a capture carrying bird:regions
+   (per-bird candidate lists + boxes) can be confirmed exactly like a
+   single-bird capture — the whole-image bird:* fields collapse to the
+   confirmed pick (single-entry species at 100%, status 'done') and the record
+   is FROZEN, but the per-bird region records, bird:birdCount and the
+   bird:multiBird request flag are PRESERVED. Un-confirm removes the flag and
+   leaves the regions; a re-run then re-identifies. A GROUP-partial pin (e.g.
+   'Mammal') on a multi-bird capture stays a re-runnable partial with regions
+   intact. A whole-capture confirm does NOT touch the region records (per-bird
+   taxonomy is written only by PER-REGION confirm, below).
+
+2) PER-REGION confirm (--confirm --region N): confirming ONE region writes
+   ITS OWN DarwinCore-mirroring taxonomy + verification markers into that
+   region record — the per-bird counterpart of the capture dwc block — so a
+   multi-bird capture carries EVERY bird's verification, not just the
+   primary's. The capture-level dwc tracks the PRIMARY region (largest box):
+   written from its confirmed species, removed when the primary is
+   unconfirmed. The capture is FROZEN only once EVERY region is confirmed;
+   until then it stays re-runnable so --multi re-classifies exactly the
+   unconfirmed regions (confirmed ones pass through untouched).
 
 Runs standalone (no pytest):  python3 test_multibird_confirm.py
 Uses only the pipeline's own writers/readers — no network, no models, no
 eBird data. lxml is a pipeline dependency (pulled by bootstrap).
 """
-import importlib.util
 import os
 import sys
 import tempfile
@@ -38,27 +50,30 @@ def check(name, cond, detail=""):
 
 
 def multi_regions():
-    """Two per-bird region records (the shape _classify_boxes produces, now
-    each carrying its own DarwinCore-mirroring taxonomy ladder — scientific
-    name + kingdom/phylum/class/order/family/genus/specificEpithet)."""
+    """Two per-bird region records, the suggestion-only shape _classify_boxes
+    produces at CLASSIFY time: box + ranked candidates + status. NO taxonomy
+    ladder — per-bird taxonomy is written ONLY on per-region confirmation (see
+    the R* sections), never at classify time."""
     return [
         {"x": 0.10, "y": 0.10, "w": 0.40, "h": 0.30, "manual": False,
          "topSpecies": "Great Cormorant", "topConfidence": 0.97, "status": "done",
          "ranked": [("Great Cormorant", 0.97), ("European Shag", 0.87)],
-         "reasoning": "region 1",
-         "scientificName": "Phalacrocorax carbo",
-         "kingdom": "Animalia", "phylum": "Chordata", "class": "Aves",
-         "order": "Suliformes", "family": "Phalacrocoracidae",
-         "genus": "Phalacrocorax", "specificEpithet": "carbo"},
+         "reasoning": "region 1"},
         {"x": 0.60, "y": 0.10, "w": 0.30, "h": 0.30, "manual": False,
          "topSpecies": "Caspian Gull", "topConfidence": 0.90, "status": "done",
          "ranked": [("Caspian Gull", 0.90), ("Great Cormorant", 0.80)],
-         "reasoning": "region 2",
-         "scientificName": "Larus cachinnans",
-         "kingdom": "Animalia", "phylum": "Chordata", "class": "Aves",
-         "order": "Charadriiformes", "family": "Laridae",
-         "genus": "Larus", "specificEpithet": "cachinnans"},
+         "reasoning": "region 2"},
     ]
+
+
+# A minimal common->scientific taxonomy so the confirm paths resolve the
+# scientific name + genus/specificEpithet (order/family need the Clements
+# hierarchy FILE, so they stay empty — taxonomy_path is None in these tests).
+TAX = {
+    "Great Cormorant": "Phalacrocorax carbo",
+    "Caspian Gull": "Larus cachinnans",
+    "European Shag": "Phalacrocorax aristotelis",
+}
 
 
 def build_multi_sidecar(root: Path) -> Path:
@@ -91,17 +106,43 @@ def top_species_list(sidecar: Path) -> list:
             if li.text and li.text.strip()]
 
 
-def region_taxonomy(sidecar: Path) -> list:
-    """Each stored region's DarwinCore-mirroring taxonomy ladder, as read back
-    by the pipeline's own _read_regions (scientific name + order/family/genus/
-    specificEpithet — kingdom/phylum/class are covered by the sidecar checks)."""
-    return [{
-        "scientificName": r.get("scientificName", ""),
-        "order": r.get("order", ""),
-        "family": r.get("family", ""),
-        "genus": r.get("genus", ""),
-        "specificEpithet": r.get("specificEpithet", ""),
-    } for r in birdid._read_regions(sidecar)]
+def region_confirm_state(sidecar: Path) -> list:
+    """Each stored region's per-bird verification markers + ladder, as read
+    back by the pipeline's own _read_regions."""
+    out = []
+    for r in birdid._read_regions(sidecar):
+        out.append({
+            "confirmed": r.get("confirmed", ""),
+            "scientificName": r.get("scientificName", ""),
+            "order": r.get("order", ""), "family": r.get("family", ""),
+            "genus": r.get("genus", ""), "specificEpithet": r.get("specificEpithet", ""),
+            "dateIdentified": r.get("dateIdentified", ""),
+            "verificationStatus": r.get("identificationVerificationStatus", ""),
+        })
+    return out
+
+
+def dwc_verified(sidecar: Path) -> dict:
+    """The capture-level dwc mirror's verdict fields (empty when absent)."""
+    root = birdid._xmp_tree(sidecar)
+    def _f(tag):
+        el = birdid._find(root, f"//dwc:Identification/dwc:{tag}")
+        return el[0].text.strip() if el and el[0].text else ""
+    def _tax(tag):
+        el = birdid._find(root, f"//dwc:Taxon/dwc:{tag}")
+        return el[0].text.strip() if el and el[0].text else ""
+    return {
+        "scientificName": _tax("scientificName"),
+        "verbatim": _f("verbatimIdentification"),
+        "status": _f("identificationVerificationStatus"),
+    }
+
+
+def region_carry_no_ladder(sidecar: Path) -> bool:
+    """Classify-time regions must carry NO taxonomy / verification markers."""
+    return all(not r.get("confirmed") and not r.get("scientificName")
+               and not r.get("identificationVerificationStatus")
+               for r in birdid._read_regions(sidecar))
 
 
 def run():
@@ -109,29 +150,149 @@ def run():
         root = Path(d)
         sidecar = build_multi_sidecar(root)
         manifest = root / "birdid_manifest.json"
-        expected_tax = [
-            {"scientificName": "Phalacrocorax carbo", "order": "Suliformes",
-             "family": "Phalacrocoracidae", "genus": "Phalacrocorax",
-             "specificEpithet": "carbo"},
-            {"scientificName": "Larus cachinnans", "order": "Charadriiformes",
-             "family": "Laridae", "genus": "Larus", "specificEpithet": "cachinnans"},
-        ]
 
         print("== setup: faithful multi-bird sidecar (2 regions) ==")
         check("sidecar written, flagged, not confirmed",
               birdid.sidecar_multi(sidecar)
               and len(birdid._read_regions(sidecar)) == 2
-              and birdid.sidecar_confirmed(sidecar) is None)
-        check("each region carries its OWN taxonomy ladder (read back)",
-              region_taxonomy(sidecar) == expected_tax, str(region_taxonomy(sidecar)))
-        check("kingdom/phylum/class written per region",
-              all(r.get("kingdom") == "Animalia" and r.get("phylum") == "Chordata"
-                  and r.get("class") == "Aves" for r in birdid._read_regions(sidecar)))
+              and birdid.sidecar_confirmed(sidecar) is None
+              and not birdid.sidecar_frozen(sidecar))
+        check("classify-time regions carry NO taxonomy / verification (confirm-only)",
+              region_carry_no_ladder(sidecar), str(region_confirm_state(sidecar)))
+        check("no capture-level dwc mirror yet",
+              dwc_verified(sidecar) == {"scientificName": "", "verbatim": "",
+                                        "status": ""}, str(dwc_verified(sidecar)))
+        check("regions NOT all confirmed", not birdid._regions_all_confirmed(sidecar))
 
-        print("\n== T1: run_confirm('<species>') on the multi-bird capture ==")
-        touched, skipped, notes = birdid.run_confirm(
-            root, "birds_branch", "Great Cormorant", False, manifest, {})
-        check("one sidecar touched", touched == 1, f"touched={touched}")
+        # Region 0 (x=0.10 w=0.40 -> area 0.12) is larger than region 1
+        # (area 0.09), so it is the PRIMARY.
+        check("primary region is index 0 (largest box)",
+              birdid._region_primary_index(birdid._read_regions(sidecar)) == 0)
+
+        print("\n== R1: PER-REGION confirm of the PRIMARY (region 0) ==")
+        t, s, _ = birdid.run_region_confirm(
+            root, "birds_branch", "Great Cormorant", False, 0, manifest, TAX)
+        check("touched 1 sidecar", t == 1, f"touched={t}")
+        st = region_confirm_state(sidecar)
+        check("region 0 confirmed with own ladder + verification markers",
+              st[0]["confirmed"] == "Great Cormorant"
+              and st[0]["scientificName"] == "Phalacrocorax carbo"
+              and st[0]["order"] == "" and st[0]["family"] == ""  # {} taxonomy passed
+              and st[0]["genus"] == "Phalacrocorax" and st[0]["specificEpithet"] == "carbo"
+              and st[0]["dateIdentified"] == datetime.today().strftime("%Y-%m-%d")
+              and st[0]["verificationStatus"] == birdid.DWC_CONFIRM_STATUS,
+              str(st[0]))
+        check("region 1 untouched (still a suggestion, no verification)",
+              st[1]["confirmed"] == "" and st[1]["verificationStatus"] == "",
+              str(st[1]))
+        check("capture dwc mirrors the PRIMARY (no freeze flag yet)",
+              dwc_verified(sidecar)["scientificName"] == "Phalacrocorax carbo"
+              and dwc_verified(sidecar)["status"] == "",
+              str(dwc_verified(sidecar)))
+        check("NOT frozen, no capture-level confirmed (other regions remain)",
+              birdid.sidecar_confirmed(sidecar) is None
+              and not birdid.sidecar_frozen(sidecar))
+        check("not all regions confirmed", not birdid._regions_all_confirmed(sidecar))
+
+        print("\n== R2: PER-REGION confirm of region 1 (all now confirmed) ==")
+        t2, s2, _ = birdid.run_region_confirm(
+            root, "birds_branch", "Caspian Gull", False, 1, manifest, TAX)
+        check("touched 1 sidecar", t2 == 1, f"touched={t2}")
+        check("ALL regions confirmed -> capture FROZEN from the primary's verdict",
+              birdid.sidecar_confirmed(sidecar) == "Great Cormorant"
+              and birdid.sidecar_frozen(sidecar)
+              and birdid._regions_all_confirmed(sidecar))
+        st2 = region_confirm_state(sidecar)
+        check("region 1 confirmed with own ladder",
+              st2[1]["confirmed"] == "Caspian Gull"
+              and st2[1]["scientificName"] == "Larus cachinnans"
+              and st2[1]["genus"] == "Larus", str(st2[1]))
+        check("capture dwc now carries the full verification status (frozen)",
+              dwc_verified(sidecar)["scientificName"] == "Phalacrocorax carbo"
+              and dwc_verified(sidecar)["status"] == birdid.DWC_CONFIRM_STATUS,
+              str(dwc_verified(sidecar)))
+        check("manifest records the capture-level confirmed pick",
+              birdid.load_manifest(manifest).get(str(sidecar), {}).get("confirmed")
+              == "Great Cormorant")
+
+        print("\n== R3: re-confirm an already-confirmed region is a skip ==")
+        t3, s3, _ = birdid.run_region_confirm(
+            root, "birds_branch", "Great Cormorant", False, 0, manifest, TAX)
+        check("touched 0, skipped 1", t3 == 0 and s3 == 1, f"t={t3} s={s3}")
+
+        print("\n== R4: un-confirm region 1 -> partially done, un-frozen ==")
+        t4, _, _ = birdid.run_region_confirm(root, "birds_branch", None, True, 1,
+                                             manifest, {})
+        check("touched 1", t4 == 1, f"touched={t4}")
+        st4 = region_confirm_state(sidecar)
+        check("region 1 confirmation dropped (ladder too)",
+              st4[1]["confirmed"] == "" and st4[1]["scientificName"] == ""
+              and st4[1]["verificationStatus"] == "", str(st4[1]))
+        check("capture no longer frozen; dwc still reflects the confirmed primary",
+              not birdid.sidecar_frozen(sidecar)
+              and birdid.sidecar_confirmed(sidecar) is None
+              and dwc_verified(sidecar)["scientificName"] == "Phalacrocorax carbo"
+              and dwc_verified(sidecar)["status"] == "",
+              str(dwc_verified(sidecar)))
+        check("not all regions confirmed", not birdid._regions_all_confirmed(sidecar))
+
+        print("\n== R5: un-confirm the PRIMARY -> capture dwc removed ==")
+        t5, _, _ = birdid.run_region_confirm(root, "birds_branch", None, True, 0,
+                                             manifest, {})
+        check("touched 1", t5 == 1, f"touched={t5}")
+        st5 = region_confirm_state(sidecar)
+        check("no region carries any confirmation",
+              all(not r.get("confirmed") and not r.get("scientificName")
+                  for r in birdid._read_regions(sidecar)), str(st5))
+        check("capture dwc removed, capture un-frozen",
+              dwc_verified(sidecar) == {"scientificName": "", "verbatim": "",
+                                        "status": ""}
+              and not birdid.sidecar_frozen(sidecar)
+              and birdid.sidecar_confirmed(sidecar) is None,
+              str(dwc_verified(sidecar)))
+
+        print("\n== R6: confirmed regions pass through a --multi re-run ==")
+        # Re-confirm both regions so the capture is fully done + frozen.
+        birdid.run_region_confirm(root, "birds_branch", "Great Cormorant", False,
+                                  0, manifest, TAX)
+        birdid.run_region_confirm(root, "birds_branch", "Caspian Gull", False,
+                                  1, manifest, TAX)
+        check("fully confirmed + frozen before the re-run simulation",
+              birdid._regions_all_confirmed(sidecar)
+              and birdid.sidecar_frozen(sidecar))
+        before = sidecar.read_bytes()
+        # The --multi loop reads stored regions and passes confirmed ones
+        # through _classify_boxes untouched; write_sidecar(regions=...) must
+        # then preserve every confirmed marker. Simulate that round-trip.
+        stored = birdid._read_regions(sidecar)
+        passthrough = [
+            b for b in stored if b.get("confirmed")  # what _classify_boxes emits
+        ]
+        class Cfg:
+            dc_fields = False
+        birdid.write_sidecar(sidecar, {"species": "Great Cormorant",
+                                       "scientific": "Phalacrocorax carbo",
+                                       "confidence": 0.93, "alternatives": []},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done", Cfg(),
+                             regions=passthrough)
+        st6 = region_confirm_state(sidecar)
+        check("both confirmed regions survive the re-run byte-for-byte",
+              [r["confirmed"] for r in st6] == ["Great Cormorant", "Caspian Gull"]
+              and [r["scientificName"] for r in st6]
+              == ["Phalacrocorax carbo", "Larus cachinnans"]
+              and all(r["verificationStatus"] == birdid.DWC_CONFIRM_STATUS
+                      for r in st6), str(st6))
+        check("fully-confirmed capture stays frozen after the re-run",
+              birdid.sidecar_frozen(sidecar)
+              and birdid.sidecar_confirmed(sidecar) == "Great Cormorant")
+
+        print("\n== T1: whole-capture confirm on a multi-bird capture ==")
+        # Un-fix the regions again (drop confirmations) to test whole-capture.
+        birdid.run_region_confirm(root, "birds_branch", None, True, 0, manifest, TAX)
+        birdid.run_region_confirm(root, "birds_branch", None, True, 1, manifest, TAX)
+        t6, s6, _ = birdid.run_confirm(
+            root, "birds_branch", "Great Cormorant", False, manifest, TAX)
+        check("one sidecar touched", t6 == 1, f"touched={t6}")
         check("confirmed flag set to the pick",
               birdid.sidecar_confirmed(sidecar) == "Great Cormorant")
         check("whole-image species collapsed to a single confirmed entry",
@@ -143,8 +304,8 @@ def run():
         check("REGIONS PRESERVED: still 2 with per-bird species lists",
               len(birdid._read_regions(sidecar)) == 2
               and len(birdid._find(rootx, "//bird:regions/rdf:Seq/rdf:li")) == 2)
-        check("per-bird taxonomy ladder survives the confirm write",
-              region_taxonomy(sidecar) == expected_tax, str(region_taxonomy(sidecar)))
+        check("whole-capture confirm does NOT write per-region taxonomy",
+              region_carry_no_ladder(sidecar))
         check("birdCount=2 and multiBird flag kept",
               birdid._find(rootx, "//bird:birdCount")[0].text.strip() == "2"
               and birdid.sidecar_multi(sidecar))
@@ -152,18 +313,18 @@ def run():
 
         print("\n== T2: re-confirm same species is idempotent (skip) ==")
         touched2, skipped2, _ = birdid.run_confirm(
-            root, "birds_branch", "Great Cormorant", False, manifest, {})
+            root, "birds_branch", "Great Cormorant", False, manifest, TAX)
         check("second run touches 0, reports 1 skipped",
               touched2 == 0 and skipped2 == 1, f"touched={touched2} skipped={skipped2}")
 
         print("\n== T3: a frozen sidecar is never rewritten ==")
-        before = sidecar.read_bytes()
+        before3 = sidecar.read_bytes()
         # simulate any later run reaching write_sidecar (the backstop)
         birdid.write_sidecar(sidecar, {"species": "Different", "confidence": 0.5,
                                        "alternatives": []}, "EUROPE", 11,
                              datetime(2026, 11, 21), "done", type("C", (), {"dc_fields": False}))
         check("confirmed sidecar byte-identical after a write_sidecar attempt",
-              sidecar.read_bytes() == before)
+              sidecar.read_bytes() == before3)
 
         print("\n== T4: unconfirm leaves the regions, un-freezes ==")
         touched3, _, _ = birdid.run_confirm(root, "birds_branch", None, True,
@@ -181,7 +342,7 @@ def run():
               f"got {top_species_list(sidecar)}")
 
         print("\n== T5: GROUP-partial pin on a multi-bird capture ==")
-        birdid.run_confirm(root, "birds_branch", "Mammal", False, manifest, {})
+        birdid.run_confirm(root, "birds_branch", "Mammal", False, manifest, TAX)
         rootp = birdid._xmp_tree(sidecar)
         check("status -> partial (re-runnable, no freeze)",
               birdid._find(rootp, "//bird:status")[0].text.strip() == "partial"

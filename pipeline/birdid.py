@@ -2588,19 +2588,17 @@ def _crop_to_temp(image: Path, x: float, y: float, w: float, h: float,
 
 def _detect_and_classify(detector: Detector, classifier: Classifier, primary: Path,
                          ladder, taxonomy, region, month, dt, args,
-                         max_regions: int = 8,
-                         hierarchy: dict | None = None) -> list[dict]:
+                         max_regions: int = 8) -> list[dict]:
     """Run the detector over one capture, then classify each region crop (see
     `_classify_boxes` for the per-box work)."""
     boxes = detector.detect(primary)
     return _classify_boxes(classifier, primary, boxes, ladder, taxonomy, region,
-                           month, dt, args, max_regions, hierarchy)
+                           month, dt, args, max_regions)
 
 
 def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
                     ladder, taxonomy, region, month, dt, args,
-                    max_regions: int = 8,
-                    hierarchy: dict | None = None) -> list[dict]:
+                    max_regions: int = 8) -> list[dict]:
     """Classify each proposed box crop with the same regional ladder as the
     whole image and assemble the per-bird region records (normalized box +
     ranked candidate list + status). ``boxes`` is a list of ``{x, y, w, h}``
@@ -2609,13 +2607,13 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
     through the record so the box stays user-owned). Crop files are temporary
     and removed after each classification.
 
-    Each region ALSO carries the full DarwinCore-mirroring taxonomy of its own
-    bird (``scientificName`` + kingdom/phylum/class/order/family/genus/
-    specificEpithet), resolved from ``hierarchy`` (``load_taxonomy_hierarchy``)
-    — so a multi-bird capture stores EVERY bird's taxonomy, not just the
-    primary's. kingdom/phylum/class are Aves/Chordata/Animalia for a bird whose
-    species resolved to a scientific name (the same default the dwc mirror
-    uses); an unresolvable species writes empty strings, never a guessed class.
+    A box that is ALREADY USER-CONFIRMED (carries ``confirmed``, read back by
+    ``_read_regions``) is a finished verdict: it is passed through UNTOUCHED
+    (no re-classification), so a ``--multi`` re-run keeps confirmed regions
+    exactly as-is and only classifies the still-unconfirmed ones. Confirmed
+    regions are the ONLY per-bird data written on confirmation (see
+    ``run_region_confirm``): at classify time a region carries just the
+    suggestion (``topSpecies`` + ranked candidates), never a taxonomy ladder.
     """
     # Coarse categories that are NOT birds - a crop that slipped through the
     # detector's bird probe but classifies as e.g. 'plant' is dropped, so a
@@ -2627,6 +2625,12 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
     }
     regions: list[dict] = []
     for box in boxes[:max_regions]:
+        # A confirmed region: pass through exactly as stored (its per-bird
+        # confirmed markers + taxonomy ladder must never be re-derived or
+        # dropped by a re-run).
+        if box.get("confirmed"):
+            regions.append(box)
+            continue
         crop = _crop_to_temp(primary, box["x"], box["y"], box["w"], box["h"])
         try:
             r = classifier.classify(crop, ladder, taxonomy, region, month, dt)
@@ -2640,13 +2644,6 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
         if str(r["species"]).strip().lower() in non_bird:
             continue
         species, scientific = normalize_species(str(r["species"]), taxonomy)
-        # Per-bird taxonomy (mirrors the dwc:Taxon ladder of a confirmation).
-        kingdom = phylum = cls = order = family = genus = epithet = ""
-        if scientific:
-            order, family = (hierarchy or {}).get(scientific.lower(), ("", ""))
-            parts = scientific.split()
-            genus, epithet = parts[0], (parts[1] if len(parts) > 1 else "")
-            kingdom, phylum, cls = "Animalia", "Chordata", "Aves"
         ranked = [species] + [a for a in r.get("alternatives", []) if a and a != species]
         conf = float(r.get("confidence", 0.0))
         confs = [conf] + [
@@ -2662,10 +2659,6 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
                 else "low-confidence"),
             "ranked": list(zip(ranked, confs)),
             "reasoning": r.get("reasoning", ""),
-            "scientificName": scientific,
-            "kingdom": kingdom, "phylum": phylum, "class": cls,
-            "order": order, "family": family, "genus": genus,
-            "specificEpithet": epithet,
         })
     return regions
 
@@ -2983,11 +2976,15 @@ def _set_regions(desc, regions: list[dict]):
                   [f"{float(c):.2f}" for _, c in ranked], "Seq")
         if r.get("reasoning"):
             _set_text(sd, "reasoning", BIRD_NS, str(r["reasoning"])[:500])
-        # Per-bird DarwinCore-mirroring taxonomy (scientific name + the full
-        # ladder), so a multi-bird capture stores the taxonomy of EVERY bird,
-        # not just the primary's (which lives in the dwc mirror). Only non-empty
-        # values are written — an unresolvable species carries no ladder at all.
-        for tag in ("scientificName", "kingdom", "phylum", "class", "order",
+        # A USER-CONFIRMED region (written by run_region_confirm — the ONLY
+        # place per-bird taxonomy is produced, mirroring the dwc:Taxon ladder
+        # of a whole-capture confirmation): the verdict + its own scientific
+        # name + full ladder + verification markers. Unconfirmed regions carry
+        # none of these (a suggestion is not a verification). Only non-empty
+        # values are written, and they survive a --multi re-run because
+        # _classify_boxes passes confirmed regions through untouched.
+        for tag in ("confirmed", "dateIdentified", "identificationVerificationStatus",
+                    "scientificName", "kingdom", "phylum", "class", "order",
                     "family", "genus", "specificEpithet"):
             if r.get(tag):
                 _set_text(sd, tag, BIRD_NS, str(r[tag]))
@@ -3082,9 +3079,16 @@ def sidecar_confirmed(sidecar: Path) -> str | None:
         return None
     try:
         root = _xmp_tree(sidecar)
-        el = _find(root, "//bird:confirmed")
-        if el and el[0].text and el[0].text.strip():
-            return el[0].text.strip()
+        # The CAPTURE-LEVEL confirmation — a direct child of the top
+        # rdf:Description. A per-region bird:confirmed (inside bird:regions) is
+        # a different, per-bird verdict and is not the capture's confirmed
+        # species (see _root_frozen for the same scoping).
+        descs = _find(root, "//rdf:Description")
+        if not descs:
+            return None
+        for el in descs[0].findall(f"{{{BIRD_NS}}}confirmed"):
+            if el.text and el.text.strip():
+                return el.text.strip()
     except Exception:
         pass
     return None
@@ -3092,8 +3096,8 @@ def sidecar_confirmed(sidecar: Path) -> str | None:
 
 def _root_frozen(root) -> bool:
     """True when a parsed sidecar must never be re-written: a user
-    confirmation (``bird:confirmed``) is set, OR the DarwinCore mirror carries
-    an identification verification status at all
+    confirmation (``bird:confirmed``) is set at the CAPTURE level, OR the
+    DarwinCore mirror carries an identification verification status at all
     (``dwc:identificationVerificationStatus`` is non-empty).
 
     Either marker means the identification was verified by a person, so even
@@ -3102,10 +3106,19 @@ def _root_frozen(root) -> bool:
     writes that field on ``--confirm``, so *any* value — including one written
     by other DarwinCore-aware software — signals a human verdict and protects
     the record from being rewritten.
+
+    ``bird:confirmed`` is scoped to the TOP-LEVEL ``rdf:Description``: a
+    PER-REGION ``bird:confirmed`` (inside ``bird:regions``, written by
+    ``run_region_confirm``) is a per-bird verdict, NOT a capture-level one, and
+    must never freeze the whole sidecar — otherwise ``--multi`` could not
+    re-classify the still-unconfirmed regions of a partially-confirmed
+    multi-bird capture.
     """
-    for el in _find(root, "//bird:confirmed"):
-        if el.text and el.text.strip():
-            return True
+    descs = _find(root, "//rdf:Description")
+    if descs:
+        for el in descs[0].findall(f"{{{BIRD_NS}}}confirmed"):
+            if el.text and el.text.strip():
+                return True
     for el in _find(root, "//dwc:Identification/dwc:identificationVerificationStatus"):
         if el.text and el.text.strip():
             return True
@@ -3386,7 +3399,7 @@ def _load_taxonomy_hierarchy_uncached(path: Path | None) -> dict[str, tuple[str,
 
 def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
                     order="", family="", verbatim="", group_ladder=None,
-                    partial=False):
+                    partial=False, freeze=True):
     """Write (or, with ``species=None``, clear) the DarwinCore mirror of a
     user confirmation, as the standard ExifTool-readable nested block:
 
@@ -3400,6 +3413,15 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
     who assigned the taxon, so a name there would be an unfounded claim (the
     user only wants it present when that data is actually known). ``recordedBy``
     is only written when the photographer is actually readable off the photo.
+
+    ``freeze=False`` writes the block WITHOUT the
+    ``identificationVerificationStatus`` freeze marker. Used by the
+    per-region confirm path when the PRIMARY region is confirmed but other
+    regions remain unconfirmed: the capture-level dwc reflects the verified
+    primary subject, yet the capture must stay re-runnable for ``--multi``
+    (which re-classifies the unconfirmed regions). Once EVERY region is
+    confirmed the capture is fully done and a normal confirmation (freeze=True,
+    via ``_set_confirmed``) is written instead.
 
     For a species the eBird taxonomy cannot place (e.g. a BioCLIP tree-of-life
     label like "Cat"), the class is NOT assumed to be Aves: ``group_ladder``
@@ -3439,7 +3461,9 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
     # A GROUP-partial pin deliberately omits the identificationVerificationStatus
     # freeze marker (it is NOT a final human verdict — birdid must still re-run
     # the capture, prefixed to the group). A full species confirmation writes it.
-    if not partial:
+    # `freeze=False` (the per-region primary-confirm path, see docstring) also
+    # omits it: the capture is not fully done until every region is confirmed.
+    if not partial and freeze:
         etree.SubElement(ident, f"{{{DWC_NS}}}identificationVerificationStatus").text = (
             DWC_CONFIRM_STATUS)
     if verbatim:
@@ -3810,6 +3834,256 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
 
 
 # --------------------------------------------------------------------------
+# Per-region confirmation (multi-bird captures)
+# --------------------------------------------------------------------------
+# A multi-bird capture's bird:regions records can be confirmed ONE AT A TIME
+# (--confirm --region N): confirming a region writes ITS OWN DarwinCore-
+# mirroring taxonomy + verification markers (the per-bird counterpart of the
+# whole-capture dwc block), so the taxonomy of every bird is readable from the
+# sidecar. The capture-level dwc block tracks the PRIMARY region (largest
+# box): it is written from that region's confirmed species once the primary is
+# confirmed, and removed when the primary is unconfirmed. The capture is
+# FROZEN only once EVERY region is confirmed (see _set_capture_verified).
+
+# The per-region tags of a confirmation (mirroring dwc:Taxon + dwc:
+# Identification): written into the region's bird:* struct on confirm, read
+# back by _read_regions, preserved by _set_regions.
+_REGION_CONFIRM_FIELDS = (
+    "confirmed", "dateIdentified", "identificationVerificationStatus",
+    "scientificName", "kingdom", "phylum", "class", "order", "family",
+    "genus", "specificEpithet",
+)
+
+
+def _region_primary_index(regions: list[dict]) -> int:
+    """Index of the PRIMARY region: the largest bounding box (area = w×h —
+    that bird is the likely primary subject). Ties go to the earliest."""
+    best_i = 0
+    best_area = -1.0
+    for i, r in enumerate(regions):
+        area = float(r.get("w", 0.0)) * float(r.get("h", 0.0))
+        if area > best_area:
+            best_area = area
+            best_i = i
+    return best_i
+
+
+def _regions_all_confirmed(sidecar: Path) -> bool:
+    """True when a multi-bird capture's stored regions ALL carry a per-bird
+    confirmation — i.e. the capture is fully done (every bird verified). Used
+    by the --multi queue so a fully-confirmed capture is skipped (it is frozen
+    even before the viewer/host sets a capture-level marker)."""
+    regs = _read_regions(sidecar)
+    return bool(regs) and all(r.get("confirmed") for r in regs)
+
+
+def _clear_region_confirmation(region: dict) -> dict:
+    """Drop the per-bird confirmation markers from a region record (unconfirm):
+    the verdict, its verification markers and its taxonomy ladder. The box and
+    the classified candidate suggestion stay."""
+    for tag in _REGION_CONFIRM_FIELDS:
+        region.pop(tag, None)
+    return region
+
+
+def _set_capture_verified(sidecar: Path, species: str | None, scientific="",
+                          order="", family="", verbatim="", freeze=True):
+    """Set (or, with ``species=None``, clear) the CAPTURE-LEVEL verified
+    markers WITHOUT touching the whole-image bird:* suggestion fields: the
+    DarwinCore mirror block (see ``_set_dwc_mirror``) and, on the FULL
+    confirmation, ``bird:confirmed`` (direct child of the top Description).
+    ``freeze=False`` (per-region confirm of the PRIMARY while other regions
+    remain unconfirmed) writes ONLY the dwc block — with NO
+    ``identificationVerificationStatus`` and NO top-level ``bird:confirmed`` —
+    so the capture is NOT frozen and ``--multi`` can still re-classify the
+    unconfirmed regions. Once EVERY region is confirmed the capture is fully
+    verified: ``freeze=True`` writes the top-level ``bird:confirmed`` + the
+    full dwc with verification status, and ``--multi`` skips it."""
+    from lxml import etree
+    root = _xmp_tree(sidecar)
+    descs = _find(root, "//rdf:Description")
+    if not descs:
+        raise RuntimeError(f"could not locate rdf:Description in {sidecar}")
+    desc = descs[0]
+    if species is None:
+        for el in desc.findall(f"{{{BIRD_NS}}}confirmed"):
+            desc.remove(el)
+        _set_dwc_mirror(desc, species=None)
+    else:
+        # The capture-level bird:confirmed freeze marker is written ONLY on the
+        # full (all-regions-confirmed) freeze. A partially-confirmed capture
+        # must stay re-runnable for --multi, so freeze=False writes just the
+        # dwc mirror (which reflects the verified primary subject).
+        if freeze:
+            _set_text(desc, "confirmed", BIRD_NS, species)
+        _set_dwc_mirror(desc, species=species, scientific=scientific,
+                        order=order, family=family, verbatim=verbatim,
+                        freeze=freeze)
+    _canonicalize_desc(desc)
+    _ensure_xpacket(root)
+    out = io.BytesIO()
+    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
+                                  pretty_print=True)
+    sidecar.write_bytes(out.getvalue())
+
+
+def _write_regions(sidecar: Path, regions: list[dict]):
+    """Persist a region list back into a sidecar's bird:regions (+ the mwg-rs
+    box mirror) in place, preserving every other element. Used by
+    run_region_confirm to update one region (its confirmed markers + ladder)."""
+    from lxml import etree
+    root = _xmp_tree(sidecar)
+    descs = _find(root, "//rdf:Description")
+    if not descs:
+        raise RuntimeError(f"could not locate rdf:Description in {sidecar}")
+    _set_regions(descs[0], regions)
+    _canonicalize_desc(descs[0])
+    _ensure_xpacket(root)
+    out = io.BytesIO()
+    etree.ElementTree(root).write(out, xml_declaration=False, encoding="UTF-8",
+                                  pretty_print=True)
+    sidecar.write_bytes(out.getvalue())
+
+
+def run_region_confirm(root: Path, photo: str | None, species: str | None,
+                       unconfirm: bool, region: int | None,
+                       manifest_path: Path, taxonomy: dict,
+                       taxonomy_path: Path | None = None,
+                       ) -> tuple[int, int, list[str]]:
+    """Confirm (or un-confirm) ONE region of a multi-bird capture — the
+    per-bird counterpart of ``--confirm``. ``region`` is the 0-based index
+    into the capture's ``bird:regions`` list.
+
+    Confirming writes that region's OWN DarwinCore-mirroring taxonomy
+    (``bird:confirmed`` + scientificName + kingdom/phylum/class/order/family/
+    genus/specificEpithet + dateIdentified + identificationVerificationStatus)
+    — the per-bird data the whole-capture dwc block holds for the primary, so
+    a multi-bird capture carries EVERY bird's verification, not just the
+    primary's. The capture-level dwc block is written/refreshed when the
+    confirmed region IS the PRIMARY (largest box), from its confirmed species,
+    and removed when the primary is unconfirmed. Once EVERY region is confirmed
+    the capture is fully done: a capture-level confirmation (bird:confirmed +
+    full dwc) freezes it, so ``--multi`` skips it.
+
+    Returns (touched, skipped, notes)."""
+    if region is None or region < 0:
+        raise ValueError("--region must be a 0-based region index")
+    sidecars = sorted(p for p in root.rglob("*.xmp") if p.is_file()
+                      and (not photo or p.stem == photo))
+    if not sidecars:
+        raise ValueError(f"no sidecar(s) found under {root}"
+                         + (f" for capture '{photo}'" if photo else ""))
+
+    species_norm, scientific = "", ""
+    if not unconfirm:
+        species_norm, scientific = normalize_species(species or "", taxonomy)
+        if species_norm == "unknown":
+            raise ValueError(
+                f"region confirm: empty species - use e.g. --confirm 'Great Tit' --region 0")
+
+    hier = load_taxonomy_hierarchy(taxonomy_path) if not unconfirm else {}
+    touched = skipped = 0
+    notes: list[str] = []
+    manifest = load_manifest(manifest_path)
+    for sidecar in sidecars:
+        rel = f"{sidecar.parent.name}/{sidecar.stem}"
+        regions = _read_regions(sidecar)
+        if not regions:
+            notes.append(f"  {rel}: no region records (run --multi first); skipped")
+            skipped += 1
+            continue
+        if region >= len(regions):
+            raise ValueError(
+                f"{rel}: region index {region} out of range "
+                f"({len(regions)} region(s) stored)")
+        primary_i = _region_primary_index(regions)
+        target = regions[region]
+
+        if unconfirm:
+            if not target.get("confirmed"):
+                skipped += 1
+                continue
+            was_all_done = all(r.get("confirmed") for r in regions)
+            _clear_region_confirmation(target)
+            _write_regions(sidecar, regions)
+            if region == primary_i:
+                # The primary's verdict drove the capture dwc: lift it entirely.
+                _set_capture_verified(sidecar, None)
+                m = manifest.get(str(sidecar))
+                if m and "confirmed" in m:
+                    del m["confirmed"]
+                notes.append(f"  {rel}: region {region} (primary) un-confirmed")
+            else:
+                if was_all_done:
+                    # No longer fully done: lift the capture-level freeze, but
+                    # keep the dwc reflecting the still-confirmed primary (no
+                    # freeze flag, so --multi can re-classify this region).
+                    primary = regions[primary_i]
+                    _set_capture_verified(sidecar, None)
+                    _set_capture_verified(
+                        sidecar, primary["confirmed"], primary.get("scientificName", ""),
+                        order=primary.get("order", ""), family=primary.get("family", ""),
+                        verbatim=primary["confirmed"], freeze=False)
+                    m = manifest.get(str(sidecar))
+                    if m and "confirmed" in m:
+                        del m["confirmed"]
+                notes.append(f"  {rel}: region {region} un-confirmed")
+        else:
+            if target.get("confirmed") == species_norm:
+                skipped += 1
+                continue
+            order, family = hier.get(scientific.lower(), ("", ""))
+            parts = scientific.split()
+            genus, epithet = parts[0], (parts[1] if len(parts) > 1 else "")
+            # The per-bird verdict + its own taxonomy ladder + verification
+            # markers (mirrors the dwc:Taxon/dwc:Identification of a confirm).
+            target["confirmed"] = species_norm
+            target["dateIdentified"] = datetime.today().strftime("%Y-%m-%d")
+            target["identificationVerificationStatus"] = DWC_CONFIRM_STATUS
+            target["scientificName"] = scientific
+            target["kingdom"] = "Animalia"
+            target["phylum"] = "Chordata"
+            target["class"] = "Aves"
+            target["order"] = order
+            target["family"] = family
+            target["genus"] = genus
+            target["specificEpithet"] = epithet
+            is_primary = (region == primary_i)
+            _write_regions(sidecar, regions)
+            if all(r.get("confirmed") for r in regions):
+                # Every region confirmed -> the capture is fully done: freeze it
+                # from the primary's verdict (capture-level bird:confirmed +
+                # full dwc with verification status).
+                primary = regions[primary_i]
+                _set_capture_verified(
+                    sidecar, primary["confirmed"], primary.get("scientificName", ""),
+                    order=primary.get("order", ""), family=primary.get("family", ""),
+                    verbatim=primary["confirmed"], freeze=True)
+                m = manifest.setdefault(str(sidecar), {})
+                m["confirmed"] = primary["confirmed"]
+                notes.append(
+                    f"  {rel}: region {region} confirmed as '{species_norm}' "
+                    f"(ALL regions confirmed — capture frozen as "
+                    f"'{primary['confirmed']}')")
+            else:
+                if is_primary:
+                    # Primary subject confirmed -> the capture dwc mirrors it
+                    # (no freeze flag yet: other regions remain to classify).
+                    _set_capture_verified(
+                        sidecar, species_norm, scientific, order=order,
+                        family=family, verbatim=species_norm, freeze=False)
+                    notes.append(
+                        f"  {rel}: region {region} (primary) confirmed as "
+                        f"'{species_norm}'")
+                else:
+                    notes.append(
+                        f"  {rel}: region {region} confirmed as '{species_norm}'")
+        touched += 1
+    save_manifest(manifest_path, manifest)
+    return touched, skipped, notes
+
+
+# --------------------------------------------------------------------------
 # Scan & grouping (RAW+JPEG pairs -> ONE capture -> ONE sidecar)
 # --------------------------------------------------------------------------
 
@@ -3933,12 +4207,17 @@ def _read_regions(sidecar: Path) -> list[dict]:
     """Read the per-bird region records back from a sidecar (bird:regions).
 
     Returns the stored boxes in order, each ``{x, y, w, h, manual, topSpecies,
-    scientificName, kingdom, phylum, class, order, family, genus,
-    specificEpithet}`` with ``manual`` true for a USER-DRAWN/EDITED box
-    (written by the viewer's manual box editor). Used by the --multi path:
-    when a capture carries manual boxes, the run classifies EXACTLY those
-    boxes and skips the detector (the user is defining the regions, so the
-    model must not re-propose them)."""
+    status, ranked: [(species, conf), ...], reasoning}`` plus — for a
+    USER-CONFIRMED region — ``confirmed`` (the per-bird verdict), its own
+    DarwinCore-mirroring taxonomy ladder (scientificName/kingdom/phylum/class/
+    order/family/genus/specificEpithet) and verification markers
+    (dateIdentified/identificationVerificationStatus), so a round-trip never
+    drops a bird's candidates or verification. ``manual`` is true for a
+    USER-DRAWN/EDITED box (written by the viewer's manual box editor). Used by
+    the --multi path: when a capture carries manual or confirmed boxes, the run
+    classifies EXACTLY those boxes (confirmed ones untouched) and skips the
+    detector (the user is defining the regions, so the model must not
+    re-propose them)."""
     if not sidecar.exists():
         return []
     try:
@@ -3960,16 +4239,41 @@ def _read_regions(sidecar: Path) -> list[dict]:
                 except ValueError:
                     return 0.0
 
+            def _list(tag: str) -> list[str]:
+                rdf = _nsmap()["rdf"]
+                els = li.findall(
+                    f".//{{{BIRD_NS}}}{tag}/{{{rdf}}}Seq/{{{rdf}}}li")
+                return [e.text.strip() for e in els if e.text and e.text.strip()]
+
             x, y, w, h = _num("x"), _num("y"), _num("w"), _num("h")
             if w <= 0 or h <= 0:
                 continue
+            # The per-region ranked candidate list (species + confidence
+            # arrays), rebuilt into the same shape _classify_boxes produces so
+            # a pass-through (confirmed) region round-trips losslessly.
+            sp_list = _list("species")
+            conf_list = _list("confidence")
+            ranked = []
+            for i, sp in enumerate(sp_list):
+                try:
+                    c = float(conf_list[i]) if i < len(conf_list) else 0.0
+                except (TypeError, ValueError):
+                    c = 0.0
+                ranked.append((sp, c))
             out.append({
                 "x": x, "y": y, "w": w, "h": h,
                 "manual": _f("manual").strip().lower() == "true",
                 "topSpecies": _f("topSpecies"),
-                # Per-bird DarwinCore-mirroring taxonomy ladder (see
-                # _classify_boxes / _set_regions) — read back so a round-trip
-                # never drops a bird's taxonomy.
+                "topConfidence": _num("topConfidence"),
+                "status": _f("status") or "done",
+                "ranked": ranked,
+                "reasoning": _f("reasoning"),
+                # Per-bird DarwinCore-mirroring taxonomy ladder + verification
+                # markers — present ONLY on a user-confirmed region (see
+                # run_region_confirm / _set_regions), read back losslessly.
+                "confirmed": _f("confirmed"),
+                "dateIdentified": _f("dateIdentified"),
+                "identificationVerificationStatus": _f("identificationVerificationStatus"),
                 "scientificName": _f("scientificName"),
                 "kingdom": _f("kingdom"), "phylum": _f("phylum"),
                 "class": _f("class"), "order": _f("order"),
@@ -4578,6 +4882,21 @@ def main():
                     help="with --confirm/--unconfirm: apply to the single "
                          "capture whose base name matches (e.g. IMG_1234) "
                          "instead of every .xmp sidecar in the folder.")
+    ap.add_argument("--bird-region", metavar="N", default=None,
+                    help="with --confirm/--unconfirm: target a SINGLE REGION "
+                         "of a multi-bird capture by its 0-based index into "
+                         "bird:regions (the per-bird counterpart of --confirm). "
+                         "Confirming a region writes ITS OWN DarwinCore-"
+                         "mirroring taxonomy (scientific name + "
+                         "kingdom/phylum/class/order/family/genus/"
+                         "specificEpithet + dateIdentified) into that region "
+                         "record; the capture-level dwc block tracks the "
+                         "PRIMARY region (largest box) - it is written from "
+                         "that region's confirmed species and removed when the "
+                         "primary is unconfirmed. The capture is FROZEN once "
+                         "every region is confirmed (--multi then skips it; "
+                         "until then --multi re-classifies only the "
+                         "unconfirmed regions).")
 
     # --- data management commands (no photo folder needed) ---
     ap.add_argument("-d", "--download", nargs="+", metavar="SPEC",
@@ -4767,19 +5086,47 @@ def main():
             taxonomy = load_taxonomy(taxonomy_path)
             manifest_path = Path(args.manifest) if args.manifest \
                 else root / "birdid_manifest.json"
-            touched, skipped, notes = run_confirm(
-                root, args.photo, args.confirm, args.unconfirm,
-                manifest_path, taxonomy, taxonomy_path)
-            for line in notes:
-                print(line)
-            if args.unconfirm:
-                print(f"birdid: un-confirmed {touched} sidecar(s)"
-                      + (f", {skipped} already had no flag" if skipped else ""))
+            if args.bird_region is not None:
+                # Per-region confirmation: target ONE bird of a multi-bird
+                # capture (its own taxonomy ladder + verification markers; the
+                # capture dwc tracks the primary region). See run_region_confirm.
+                try:
+                    region_idx = int(args.bird_region)
+                except (TypeError, ValueError):
+                    raise ValueError(
+                        f"--bird-region must be a 0-based region index, got "
+                        f"{args.bird_region!r}")
+                if region_idx < 0:
+                    raise ValueError("--bird-region must be a 0-based region index")
+                touched, skipped, notes = run_region_confirm(
+                    root, args.photo, args.confirm, args.unconfirm, region_idx,
+                    manifest_path, taxonomy, taxonomy_path)
+                for line in notes:
+                    print(line)
+                if args.unconfirm:
+                    print(f"birdid: un-confirmed region {region_idx} on "
+                          f"{touched} sidecar(s)"
+                          + (f", {skipped} already had no region confirmation"
+                             if skipped else ""))
+                else:
+                    print(f"birdid: confirmed region {region_idx} as "
+                          f"'{args.confirm}' on {touched} sidecar(s)"
+                          + (f", {skipped} already carried that region "
+                             f"confirmation" if skipped else ""))
             else:
-                print(f"birdid: confirmed {touched} sidecar(s) as "
-                      f"'{args.confirm}'"
-                      + (f", {skipped} already carried that confirmation"
-                         if skipped else ""))
+                touched, skipped, notes = run_confirm(
+                    root, args.photo, args.confirm, args.unconfirm,
+                    manifest_path, taxonomy, taxonomy_path)
+                for line in notes:
+                    print(line)
+                if args.unconfirm:
+                    print(f"birdid: un-confirmed {touched} sidecar(s)"
+                          + (f", {skipped} already had no flag" if skipped else ""))
+                else:
+                    print(f"birdid: confirmed {touched} sidecar(s) as "
+                          f"'{args.confirm}'"
+                          + (f", {skipped} already carried that confirmation"
+                             if skipped else ""))
         except (ValueError, OSError, RuntimeError) as e:
             if _is_write_error(e):
                 sys.exit(f"birdid: ERROR: {e}\n"
@@ -4795,9 +5142,6 @@ def main():
     db = SpeciesDB(regions_dir, data_dir / "regions_generated")
     db.load()
     taxonomy = load_taxonomy(taxonomy_path)
-    # order/family per scientific name (the Clements integrated checklist), for
-    # the per-bird taxonomy ladder written into each multi-bird region record.
-    taxonomy_hierarchy = load_taxonomy_hierarchy(taxonomy_path)
     tax_src = taxonomy_path.name if taxonomy_path else "none"
     print(f"eBird tables: {', '.join(db.regions())}   taxonomy: "
           f"{tax_src} ({len(taxonomy)} names)")
@@ -4896,10 +5240,17 @@ def main():
             # multi-bird analysis, even if its whole-image sidecar is already
             # done. The flag never makes a capture pending on a normal run
             # (single-bird behaviour is unchanged), and a frozen/confirmed
-            # capture stays exempt (classify_capture already returned
-            # 'confirmed' above and the multi queue skips it below).
+            # capture stays exempt — with ONE exception: a multi-bird capture
+            # whose regions are ALL user-confirmed is fully done (every bird
+            # verified), so it is skipped even though no capture-level
+            # confirmation was ever written (e.g. the viewer confirmed the
+            # regions directly); a capture with only SOME regions confirmed is
+            # still queued, and the --multi loop re-classifies exactly the
+            # unconfirmed regions (see _classify_boxes).
             if (getattr(args, "multi", False) and sidecar_multi(cap.sidecar())
-                    and status != "confirmed"):
+                    and status != "confirmed"
+                    and not (sidecar_multi(cap.sidecar())
+                             and _regions_all_confirmed(cap.sidecar()))):
                 status = "pending"
             if status == "partial":
                 # group-partial confirmation: the viewer pinned the subject's
@@ -5289,29 +5640,32 @@ def main():
                                 and sidecar_multi(sidecar))
                     regions = None
                     if is_multi and detector is not None:
-                        # A stored box list with ANY user-drawn/edited box is
-                        # the authoritative region set: the viewer keeps model
-                        # detections non-manual when the user only ADDS a box,
-                        # so manual + model boxes can coexist. Classify the
-                        # WHOLE stored list (not just the manual ones) and skip
-                        # the detector - the user is defining which birds to
+                        # A stored box list with ANY user-drawn/edited OR
+                        # user-confirmed box is the authoritative region set:
+                        # the viewer keeps model detections non-manual when the
+                        # user only ADDS a box, so manual + model boxes can
+                        # coexist, and a confirmed region must never be
+                        # re-derived. Classify the WHOLE stored list (skipping
+                        # the detector) - the user is defining which birds to
                         # identify, so the model must not re-propose regions.
-                        # Each box's manual flag is carried through, so a
-                        # user-owned box stays user-owned after classification.
-                        # Detection only runs when the sidecar has no stored
-                        # manual boxes at all.
+                        # Each box's manual flag is carried through, and a
+                        # CONFIRMED region is passed through untouched (see
+                        # _classify_boxes), so only the unconfirmed regions get
+                        # re-classified. Detection only runs when the sidecar
+                        # has no stored manual/confirmed boxes at all.
                         stored_boxes = _read_regions(sidecar)
                         manual_boxes = [b for b in stored_boxes
                                         if b.get("manual")]
-                        if manual_boxes:
+                        confirmed_boxes = [b for b in stored_boxes
+                                           if b.get("confirmed")]
+                        if manual_boxes or confirmed_boxes:
                             tui.set(
                                 stage="detect",
                                 message=(f"classifying {len(stored_boxes)} "
                                          f"box(es): {primary.name}"))
                             regions = _classify_boxes(
                                 classifier, primary, stored_boxes, ladder,
-                                taxonomy, region, month, dt, args,
-                                hierarchy=taxonomy_hierarchy)
+                                taxonomy, region, month, dt, args)
                             if regions:
                                 tui.plain_line(
                                     f"  {cap.base}: {len(regions)} box(es) -> "
@@ -5323,8 +5677,7 @@ def main():
                                     message=f"multi-bird scan: {primary.name}")
                             regions = _detect_and_classify(
                                 detector, classifier, primary, ladder, taxonomy,
-                                region, month, dt, args,
-                                hierarchy=taxonomy_hierarchy)
+                                region, month, dt, args)
                             if regions:
                                 tui.plain_line(
                                     f"  {cap.base}: {len(regions)} bird regions -> "
