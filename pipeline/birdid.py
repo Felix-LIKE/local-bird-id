@@ -5132,25 +5132,31 @@ def main():
                                 and sidecar_multi(sidecar))
                     regions = None
                     if is_multi and detector is not None:
-                        # User-drawn/manual boxes take precedence: classify
-                        # exactly those boxes and skip the detector (the user
-                        # is defining which birds to identify - the model must
-                        # not re-propose regions). Detection only runs when the
-                        # sidecar has no manual boxes.
-                        manual_boxes = [b for b in _read_regions(sidecar)
+                        # A stored box list with ANY user-drawn/edited box is
+                        # the authoritative region set: the viewer keeps model
+                        # detections non-manual when the user only ADDS a box,
+                        # so manual + model boxes can coexist. Classify the
+                        # WHOLE stored list (not just the manual ones) and skip
+                        # the detector - the user is defining which birds to
+                        # identify, so the model must not re-propose regions.
+                        # Each box's manual flag is carried through, so a
+                        # user-owned box stays user-owned after classification.
+                        # Detection only runs when the sidecar has no stored
+                        # manual boxes at all.
+                        stored_boxes = _read_regions(sidecar)
+                        manual_boxes = [b for b in stored_boxes
                                         if b.get("manual")]
                         if manual_boxes:
                             tui.set(
                                 stage="detect",
-                                message=(f"classifying {len(manual_boxes)} manual "
+                                message=(f"classifying {len(stored_boxes)} "
                                          f"box(es): {primary.name}"))
                             regions = _classify_boxes(
-                                classifier, primary, manual_boxes, ladder,
+                                classifier, primary, stored_boxes, ladder,
                                 taxonomy, region, month, dt, args)
                             if regions:
                                 tui.plain_line(
-                                    f"  {cap.base}: {len(regions)} user-drawn "
-                                    "region(s) -> "
+                                    f"  {cap.base}: {len(regions)} box(es) -> "
                                     + ", ".join(
                                         f"{r['topSpecies']} {r['topConfidence']*100:.0f}%"
                                         for r in regions))
