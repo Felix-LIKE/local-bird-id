@@ -3731,8 +3731,12 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
     existing sidecars left alone (an unconfirm on a sidecar without the flag,
     or a confirm on one already carrying the same confirmation).
     """
+    # `photo` is a capture base name matched against the sidecar's stem — but
+    # captures are case-preserving (5M4_0217.xmp beside 5M4_0217.JPG), so match
+    # case-insensitively: the viewer delegates region confirm/unconfirm with the
+    # exact on-disk stem, but a CLI caller may type either case.
     sidecars = sorted(p for p in root.rglob("*.xmp") if p.is_file()
-                      and (not photo or p.stem == photo))
+                      and (not photo or p.stem.lower() == photo.lower()))
     if not sidecars:
         raise ValueError(f"no sidecar(s) found under {root}"
                          + (f" for capture '{photo}'" if photo else ""))
@@ -3968,8 +3972,12 @@ def run_region_confirm(root: Path, photo: str | None, species: str | None,
     Returns (touched, skipped, notes)."""
     if region is None or region < 0:
         raise ValueError("--region must be a 0-based region index")
+    # `photo` is a capture base name matched against the sidecar's stem — but
+    # captures are case-preserving (5M4_0217.xmp beside 5M4_0217.JPG), so match
+    # case-insensitively: the viewer delegates region confirm/unconfirm with the
+    # exact on-disk stem, but a CLI caller may type either case.
     sidecars = sorted(p for p in root.rglob("*.xmp") if p.is_file()
-                      and (not photo or p.stem == photo))
+                      and (not photo or p.stem.lower() == photo.lower()))
     if not sidecars:
         raise ValueError(f"no sidecar(s) found under {root}"
                          + (f" for capture '{photo}'" if photo else ""))
