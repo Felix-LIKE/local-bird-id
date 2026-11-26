@@ -506,6 +506,85 @@ def run():
         check("multi sidecar has no giant one-line blobs", mcompact,
               "long lines remain")
 
+        print("\n== G1: DarwinCore order/family come from the eBird taxonomy ==")
+        # Regression: find_taxonomy prefers the v2023 eBird API CSV, but the
+        # hierarchy loader only read the v2026 (lowercase) column names, so it
+        # returned an EMPTY map and order/family were omitted from EVERY dwc
+        # block — single-bird captures AND multi-bird per-region ladders alike.
+        # Both formats must yield the same (order, family) ladder.
+        v23 = root / "taxonomy_v2023.csv"
+        v23.write_text(
+            "SCIENTIFIC_NAME,COMMON_NAME,CATEGORY,ORDER,FAMILY_SCI_NAME\n"
+            "Phalacrocorax carbo,Great Cormorant,species,Suliformes,"
+            "Phalacrocoracidae\n"
+            "Larus cachinnans,Caspian Gull,species,Charadriiformes,Laridae\n"
+            "Phalacrocorax aristotelis,European Shag,species,Suliformes,"
+            "Phalacrocoracidae\n",
+            encoding="utf-8")
+        v26 = root / "taxonomy_v2026.csv"
+        v26.write_text(
+            "category,English name,scientific name,order,family\n"
+            "species,Great Cormorant,Phalacrocorax carbo,Suliformes,"
+            "Phalacrocoracidae (Cormorants and Shags)\n"
+            "species,Caspian Gull,Larus cachinnans,Charadriiformes,Laridae\n"
+            "species,European Shag,Phalacrocorax aristotelis,Suliformes,"
+            "Phalacrocoracidae\n",
+            encoding="utf-8")
+        for label, taxpath in (("v2023 (eBird API CSV)", v23),
+                               ("v2026 (Clements checklist)", v26)):
+            hier = birdid.load_taxonomy_hierarchy(taxpath)
+            check(f"hierarchy parsed from {label}",
+                  hier.get("phalacrocorax carbo") == ("Suliformes", "Phalacrocoracidae")
+                  and hier.get("larus cachinnans") == ("Charadriiformes", "Laridae"),
+                  str(hier))
+
+        # A whole-capture confirm given the taxonomy file must put order/family
+        # into the dwc:Taxon mirror (previously they were dropped).
+        groot = root / "g1"
+        groot.mkdir()
+        gs = groot / "dwc_single.xmp"
+        birdid.write_sidecar(gs, {"species": "Great Cormorant",
+                                  "scientific": "Phalacrocorax carbo",
+                                  "confidence": 0.93, "alternatives": []},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done",
+                             type("C", (), {"dc_fields": False}))
+        tg, sg, _ = birdid.run_confirm(groot, "dwc_single", "Great Cormorant",
+                                       False, manifest, TAX, taxonomy_path=v23)
+        check("whole-capture confirm touched 1", tg == 1, f"touched={tg}")
+        grootx = birdid._xmp_tree(gs)
+        def _dwc_taxon(tag):
+            el = birdid._find(grootx, f"//dwc:Taxon/dwc:{tag}")
+            return el[0].text.strip() if el and el[0].text else ""
+        check("dwc:Taxon carries order/family for a single-bird capture",
+              _dwc_taxon("order") == "Suliformes"
+              and _dwc_taxon("family") == "Phalacrocoracidae",
+              f"order={_dwc_taxon('order')!r} family={_dwc_taxon('family')!r}")
+
+        # A per-region confirm with the taxonomy file must write order/family
+        # into that region's own ladder (the per-bird dwc equivalent).
+        gmulti = groot / "dwc_multi.xmp"
+        birdid.write_sidecar(gmulti, {"species": "Mallard", "confidence": 0.5,
+                                      "alternatives": [], "reasoning": "whole"},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done",
+                             type("C", (), {"dc_fields": False}),
+                             regions=multi_regions())
+        tr, sr, _ = birdid.run_region_confirm(
+            groot, "dwc_multi", "Great Cormorant", False, 0, manifest, TAX,
+            taxonomy_path=v23)
+        check("region confirm touched 1", tr == 1, f"touched={tr}")
+        gst = region_confirm_state(gmulti)
+        check("region ladder carries order/family for a multi-bird capture",
+              gst[0]["order"] == "Suliformes"
+              and gst[0]["family"] == "Phalacrocoracidae", str(gst[0]))
+        gmtx = birdid._xmp_tree(gmulti)
+        def _dwc_taxon2(tag):
+            el = birdid._find(gmtx, f"//dwc:Taxon/dwc:{tag}")
+            return el[0].text.strip() if el and el[0].text else ""
+        check("capture dwc mirror also carries order/family (primary region)",
+              _dwc_taxon2("order") == "Suliformes"
+              and _dwc_taxon2("family") == "Phalacrocoracidae",
+              f"order={_dwc_taxon2('order')!r} family={_dwc_taxon2('family')!r}")
+
     print("\n============================================")
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} FAILED: {', '.join(FAILURES)}")

@@ -3414,15 +3414,21 @@ def read_artist(path: Path | None) -> str:
 
 
 def load_taxonomy_hierarchy(path: Path | None) -> dict[str, tuple[str, str]]:
-    """sci-name (lowercased) -> (order, family) from the Clements v2026
-    integrated checklist. The v2023 eBird API file has no order/family columns,
-    so installs using it simply get an empty map (order/family are then omitted
-    from the DarwinCore mirror rather than guessed). (Result cached per
-    file+mtime; see _cached_loader.)"""
+    """sci-name (lowercased) -> (order, family) from either eBird taxonomy
+    format. The v2023 eBird API file carries them as ORDER / FAMILY_SCI_NAME;
+    the Clements v2026 integrated checklist as order / family. An unreadable or
+    missing file yields an empty map (order/family are then omitted from the
+    DarwinCore mirror rather than guessed). (Result cached per file+mtime; see
+    _cached_loader.)"""
     return _cached_loader(path, _load_taxonomy_hierarchy_uncached)
 
 
 def _load_taxonomy_hierarchy_uncached(path: Path | None) -> dict[str, tuple[str, str]]:
+    """Sci-name (lowercased) -> (order, family) from either eBird taxonomy
+    format. Handles both the eBird API v2023 CSV (uppercase SCIENTIFIC_NAME /
+    CATEGORY / ORDER / FAMILY_SCI_NAME) and the Clements v2026 integrated
+    checklist (lowercase scientific name / category / order / family), exactly
+    like `_load_taxonomy_uncached` does for the common-name map."""
     hier: dict[str, tuple[str, str]] = {}
     if not path:
         return hier
@@ -3431,13 +3437,20 @@ def _load_taxonomy_hierarchy_uncached(path: Path | None) -> dict[str, tuple[str,
             for row in csv.DictReader(f):
                 if not row:
                     continue
-                if (row.get("category") or "").strip() != "species":
-                    continue
-                sci = (row.get("scientific name") or "").strip()
+                if row.get("SCIENTIFIC_NAME") is not None:   # eBird API v2023
+                    sci = (row.get("SCIENTIFIC_NAME") or "").strip()
+                    if (row.get("CATEGORY") or "").strip() != "species":
+                        continue
+                    order = (row.get("ORDER") or "").strip()
+                    family = (row.get("FAMILY_SCI_NAME") or "").strip()
+                else:                                       # Clements v2026
+                    sci = (row.get("scientific name") or "").strip()
+                    if (row.get("category") or "").strip() != "species":
+                        continue
+                    order = (row.get("order") or "").strip()
+                    family = (row.get("family") or "").strip()
                 if not sci:
                     continue
-                order = (row.get("order") or "").strip()
-                family = (row.get("family") or "").strip()
                 if " (" in family:      # "Paridae (Tits, Chickadees, ...)" -> "Paridae"
                     family = family.split(" (", 1)[0].strip()
                 hier[sci.lower()] = (order, family)
@@ -3765,8 +3778,9 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
     Each confirmation also writes a DarwinCore XMP mirror block (see
     ``_set_dwc_mirror``): ``dwc:recordedBy`` comes from the photo's Artist tag,
     ``dwc:identificationVerificationStatus`` is DWC_CONFIRM_STATUS, and the
-    Taxon hierarchy (order/family) comes from the Clements v2026 file when
-    available (``taxonomy_path``). ``dwc:identifiedBy`` is never written.
+    Taxon hierarchy (order/family) comes from the eBird taxonomy file when
+    available (``taxonomy_path``, either format). ``dwc:identifiedBy`` is never
+    written.
 
     Returns (touched, skipped, notes): ``touched`` sidecars modified, plus
     existing sidecars left alone (an unconfirm on a sidecar without the flag,
