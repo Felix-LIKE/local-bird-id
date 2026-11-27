@@ -236,6 +236,55 @@ def run():
           py_inv > 0 and "PYTHONUNBUFFERED" in launcher[:py_inv],
           "PYTHONUNBUFFERED not exported before the python invocation")
 
+    print("\n== E6: continent-pool fallback for countries with no table ==")
+    # A fresh install ships only the curated EUROPE + SEA seeds. A country with
+    # no table of its own must fall back to its continent pool (DE -> EUROPE,
+    # SG -> SEA) instead of being flagged no-data; a country with no pool
+    # ancestor (e.g. BR) stays no-data. Once the country table IS downloaded,
+    # the tighter tree chain (DE -> EU-WEST -> EUROPE) must be preserved.
+    import shutil
+    with tempfile.TemporaryDirectory(prefix="birdid-pool-") as tmp:
+        d = Path(tmp)
+        regs = d / "regions"; regs.mkdir()
+        (d / "regions_generated").mkdir()
+        for seed in ("EUROPE.csv", "SEA.csv"):
+            shutil.copy(_HERE_DATA / "regions" / seed, regs / seed)
+        fresh = birdid.SpeciesDB(regs, d / "regions_generated")
+        fresh.load()
+        check("fresh install loads only the curated pools",
+              sorted(fresh.regions()) == ["EUROPE", "SEA"], str(fresh.regions()))
+        check("DE falls back to the EUROPE pool",
+              fresh.tier_codes("DE") == ["DE", "EUROPE"],
+              str(fresh.tier_codes("DE")))
+        check("SG falls back to the SEA pool",
+              fresh.tier_codes("SG") == ["SG", "SEA"],
+              str(fresh.tier_codes("SG")))
+        check("BR (no pool ancestor) stays no-data",
+              fresh.tier_codes("BR") == ["BR"], str(fresh.tier_codes("BR")))
+        ladder = birdid._build_ladder(fresh, "DE", 5, 0, [], [])
+        check("DE ladder is non-empty via the pool (not no-data)",
+              sum(len(st) for _, st in ladder) > 0
+              and [lbl for lbl, _ in ladder] == ["DE", "EUROPE"],
+              str([(l, len(s)) for l, s in ladder]))
+        ladder_br = birdid._build_ladder(fresh, "BR", 5, 0, [], [])
+        check("BR ladder stays empty (still no-data)",
+              sum(len(st) for _, st in ladder_br) == 0)
+
+    # Full install: the downloaded tree (EU-WEST/DE.csv under EUROPE) keeps
+    # the tighter chain; the pool chain must not displace existing ancestors.
+    full = birdid.SpeciesDB(_HERE_DATA / "regions", _HERE_DATA / "regions_generated")
+    full.load()
+    check("full install keeps DE -> EU-WEST -> EUROPE",
+          full.tier_codes("DE") == ["DE", "EU-WEST", "EUROPE"],
+          str(full.tier_codes("DE")))
+    check("full install keeps SG -> AS-SOUTHEAST -> AS",
+          full.tier_codes("SG") == ["SG", "AS-SOUTHEAST", "AS"],
+          str(full.tier_codes("SG")))
+    # _wider_pool_chain: subcontinent, then continent (deduped).
+    check("wider pool chain DE = subcontinent then continent",
+          birdid._wider_pool_chain("DE") == ["EU-WEST", "EUROPE"],
+          str(birdid._wider_pool_chain("DE")))
+
     print("\n============================================")
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} FAILED: {', '.join(FAILURES)}")

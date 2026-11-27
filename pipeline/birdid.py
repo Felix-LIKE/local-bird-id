@@ -211,6 +211,24 @@ def _build_region_pools() -> dict[str, str]:
 
 REGION_POOLS = _build_region_pools()
 
+
+def _wider_pool_chain(region: str) -> list[str]:
+    """Ordered wider pool codes for a region: its subcontinent, then its
+    continent (deduped). REGION_POOLS holds the (aliased) subcontinent for
+    most countries (DE -> EU-WEST, SG/TH -> SEA); country_continent_map()
+    supplies the continent (so SEA-aliased SG/TH still resolve to AS as a
+    second tier). Used by SpeciesDB.tier_codes to walk up to ANY loaded pool,
+    so a country with no table of its own still falls back to its continent
+    seed (e.g. DE -> EUROPE) instead of being flagged no-data."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for code in (REGION_POOLS.get(region), country_continent_map().get(region)):
+        if code and code not in seen:
+            seen.add(code)
+            out.append(code)
+    return out
+
+
 BIRD_NS = "http://ns.birdpipeline/1.0/"
 
 # Darwin Core XMP namespace (the URI ExifTool/Exiv2/IMatch's bundled ExifTool
@@ -412,8 +430,13 @@ class SpeciesDB:
         """Ordered region codes from the base region up (narrowest first),
         mirroring the tree walk pool_tiers does: for a country table stored at
         <CONT>/<SUB>/<COUNTRY>.csv this yields the subcontinent, then the
-        continent. Regions without a tree placement fall back to the
-        REGION_POOLS map (country -> continent pool), or just the base region."""
+        continent. Regions without a tree placement walk the wider pool chain
+        (subcontinent -> continent, via REGION_POOLS / the continents
+        reference) and include EVERY level that is a loaded table, so a fresh
+        install with only the curated continent seeds (EUROPE / SEA) still
+        covers a country with no table of its own (DE -> EUROPE) instead of
+        flagging it no-data. A region with neither a table nor a loaded pool
+        ancestor yields just the base region."""
         region = region.upper()
         base_dir = self._region_base.get(region)
         path = self._region_file.get(region)
@@ -429,12 +452,11 @@ class SpeciesDB:
                     seen.add(r)
                     codes.append(r)
         if not codes:
-            # flat file at the base level (legacy layout) or no tree ancestors
-            # (e.g. a country whose table only exists as a curated flat seed) ->
-            # fall back to the REGION_POOLS map (country -> continent pool).
-            pool_code = REGION_POOLS.get(region)
-            if pool_code and pool_code in self._table:
-                codes.append(pool_code)
+            # Flat file at the base level (legacy layout) or no tree ancestors:
+            # walk the wider pool chain, appending every level that is loaded.
+            for pool_code in _wider_pool_chain(region):
+                if pool_code in self._table and pool_code not in codes:
+                    codes.append(pool_code)
         return [region] + codes
 
     def pool_tiers(self, region: str, month: int, grace: int = 0
@@ -4909,9 +4931,9 @@ def ask_no_data_choice(tui, region: str) -> str:
             f"the review list, best guess left blank)\n"
             f"  To avoid this, download the region once and rerun:\n"
             f"     birdid --download {region}\n"
-            f"  (curated registry ships SG/TH/DE + the SEA/EUROPE pools; any "
-            f"other eBird country/continent needs an API key: "
-            f"birdid --api <key>)\n"
+            f"  (this flag only appears when the region has no table AND no\n"
+            f"  wider pool (EUROPE/SEA) covers it; a precise per-region\n"
+            f"  table needs a free eBird API key: birdid --api <key>)\n"
             f"  [1/2/Enter=2]: ")
         if ans in ("1", "2", "y", "n", ""):
             break
@@ -5839,12 +5861,17 @@ def main():
                     central_list: list[tuple[str, str]] = []
                     if dt:
                         central_list = central.species_for(dt.year, dt.month)
-                    # region-table species (for the "region too narrow" flag)
-                    region_names = {s.lower() for s, _ in
-                                    db.candidates(region, month, args.month_grace)}
-                    central_outside = sorted(
-                        {c[0] for c in central_list
-                         if c[0].lower() not in region_names})
+                    # region-table species (for the "region too narrow" flag).
+                    # Only meaningful when the base region has its own table:
+                    # if it fell back to a wider pool (no country table) the
+                    # pool IS the prior, so there is nothing to warn about.
+                    central_outside: list[str] = []
+                    if db.source(region):
+                        region_names = {s.lower() for s, _ in
+                                        db.candidates(region, month, args.month_grace)}
+                        central_outside = sorted(
+                            {c[0] for c in central_list
+                             if c[0].lower() not in region_names})
                     central_added = sorted({c[0] for c in central_list})
                     # Staged ladder: strict (region, month) first, then the
                     # ±month grace, then each wider region tier again without

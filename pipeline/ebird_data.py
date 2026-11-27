@@ -9,9 +9,14 @@ the rest of the pipeline stays light.
 
 Data model
 ----------
-countries  - eBird country regions we ship curated seeds for (SG / TH / DE).
-pools      - wider regional unions used by the two-tier fallback
-             (SEA = Southeast Asia, EUROPE = Europe), defined by member codes.
+countries  - eBird countries; individual country tables are NOT shipped, they
+             are downloaded with an API key into regions_generated/ (the two
+             shipped curated seeds are continent pools, see below).
+pools      - wider regional unions used as the continent-level fallback
+             (SEA = Southeast Asia, EUROPE = Europe) - the ONLY curated seeds
+             in the repo. On a fresh install a country with no table of its
+             own falls back to its continent pool (e.g. DE -> EUROPE), so
+             Europe/SEA photos still identify without any download.
 regions/   - one CSV per country/pool:  region,species,status,month_mask
              (12 chars, Jan..Dec, '1' = plausibly present that month).
 regions_generated/  - gitignored API-derived tables (--download), stored as
