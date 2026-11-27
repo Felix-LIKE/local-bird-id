@@ -1083,10 +1083,17 @@ def _run_download(data_dir: Path, tokens: list[str], year: int | None,
     generated_dir = data_dir / GENERATED_DIR
     generated_dir.mkdir(parents=True, exist_ok=True)
     today = date.today()
+    # The newest observation date a fresh sampling of `year` reaches — the
+    # `--update` freshness bar. Pools compute their own internally; countries
+    # receive it here. (Before this, --update country re-sampled EVERY country
+    # on every call, however fresh its table, because target_date stayed "" —
+    # "update all" re-downloaded everything it had just updated.)
+    target_date = _target_data_date(year, sample_dates, today) if update else ""
 
     if kind == "country":
         _download_country(generated_dir, code, label, year, sample_dates, key,
-                          subnational, today=today, update=update)
+                          subnational, today=today, update=update,
+                          target_date=target_date)
     else:
         _download_pool(generated_dir, code, label, year, sample_dates, key,
                        today=today, update=update)

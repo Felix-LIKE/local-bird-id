@@ -351,6 +351,40 @@ def run():
         check("the TH country table IS installed",
               "TH" in inst5, str(inst5))
 
+    print("\n== E8: --update passes the freshness target to country downloads ==")
+    # Regression: --update re-sampled EVERY country on every call because
+    # _run_download never supplied target_date to _download_country, so the
+    # skip-if-current branch in _sample_or_skip never ran ("update all"
+    # re-downloaded what it had just updated 30 minutes earlier). The target
+    # must be computed and handed to country downloads (pools compute their
+    # own internally; countries receive it from _run_download).
+    calls = {}
+
+    def _capture_country(generated_dir, code, label, year, sample_dates, key,
+                         subnational, today=None, update=False, target_date=""):
+        calls["args"] = dict(code=code, update=update, target_date=target_date)
+
+    old_country = ebird_data._download_country
+    ebird_data._download_country = _capture_country
+    try:
+        ebird_data._run_download(_HERE_DATA, ["DE"], None, 2, "KEY", False,
+                                 update=True)
+        got = calls.get("args") or {}
+        check("--update country resolves to the country path",
+              got.get("code") == "DE", str(got))
+        check("--update country gets a non-empty freshness target",
+              bool(got.get("target_date")),
+              f"target_date={got.get('target_date')!r} (was '' -> always refreshed)")
+        calls.clear()
+        ebird_data._run_download(_HERE_DATA, ["DE"], None, 2, "KEY", False,
+                                 update=False)
+        got = calls.get("args") or {}
+        check("--download (non-update) sends no target -> full sampling",
+              got.get("target_date") == "",
+              f"target_date={got.get('target_date')!r}")
+    finally:
+        ebird_data._download_country = old_country
+
     print("\n============================================")
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} FAILED: {', '.join(FAILURES)}")
