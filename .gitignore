@@ -15,3 +15,6 @@ ebird/regions_generated/
 
 # Local runtime logs
 *.log
+
+# Graphify knowledge-graph output (rebuilt on demand)
+graphify-out/
