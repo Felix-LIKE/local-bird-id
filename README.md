@@ -446,12 +446,14 @@ detects the `bird` class only; species ID always stays with BioCLIP) can be
 downloaded separately:
 
 ```bash
-birdid --download-detector     # ~21 MB, once, needs network (Apache-2.0)
-pip install onnxruntime        # the runtime needed to RUN it (not to download)
+birdid --download-detector     # ~21 MB, once, needs network (Apache-2.0);
+                               # also auto-installs the onnxruntime that runs it
 ```
 
 This is a **separate, opt-in download** from `--initialize`, so a BioCLIP-only
-user is never surprised by a detector download. `birdid` then picks the detector
+user is never surprised by a detector download. The command auto-installs
+`onnxruntime` (into the same Python environment) when it is missing, so a
+download never leaves a model you can't use. `birdid` then picks the detector
 automatically:
 
 - **ONNX detector** — used when the model is downloaded **and** `onnxruntime`

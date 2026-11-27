@@ -54,6 +54,8 @@ Data management (see pipeline/ebird_data.py):
   birdid.py --download-detector        (optional) download the dedicated ONNX
                                        multi-bird detector (a separate, opt-in
                                        download - BioCLIP-only users needn't)
+                                       and auto-installs the onnxruntime that
+                                       runs it
   birdid.py --onnx-encoder             OPT-IN: use the int8 ONNX CPU image
                                        encoder (torch is the default; installing
                                        onnxruntime for the ONNX multi-bird
@@ -1657,6 +1659,29 @@ def _hub_cached_file(repo_id: str, filename: str) -> bool:
         return False
 
 
+def _onnxruntime_importable() -> bool:
+    """True when the `onnxruntime` package is importable by THIS interpreter —
+    the very same one that will run the ONNX detector (probe via
+    `importlib.util.find_spec`, the same light pattern as the pybioclip check;
+    no module is loaded, so this is safe in --status)."""
+    import importlib.util
+    try:
+        return importlib.util.find_spec("onnxruntime") is not None
+    except Exception:
+        return False
+
+
+def _onnx_detector_ready() -> bool:
+    """True when automated multi-bird detection is fully usable: the ONNX
+    detector model file is downloaded AND onnxruntime is importable — exactly
+    the conditions make_detector() needs to actually use the ONNX path. A
+    downloaded model without the runtime does NOT count, so --status keeps
+    the viewer's --multi run option gated until both are in place."""
+    return (_hub_cached_file(
+        "onnx-community/rtdetr_r18vd", "onnx/model_int8.onnx")
+        and _onnxruntime_importable())
+
+
 def run_status(data_dir: Path, cache_dir: Path, checklists_dir: Path):
     """`--status`: a machine-readable JSON snapshot of the install + data state.
 
@@ -1666,7 +1691,12 @@ def run_status(data_dir: Path, cache_dir: Path, checklists_dir: Path):
     stdout as the object. Everything here is local (no network, no model load):
     region tables, the species-embedding cache index, the API key file and the
     HF-cache model probes. `backends.bio_clip` is the "the AI backends are
-    ready to classify" signal the viewer uses to gate the multi-bird UI."""
+    ready to classify" signal the viewer uses to gate the multi-bird UI, and
+    `backends.onnx_detector` is the "automated multi-bird detection is fully
+    usable" signal — TRUE only when the ONNX model file is downloaded AND
+    onnxruntime is importable, i.e. exactly when make_detector() will use it
+    (a downloaded model without the runtime still reports false, so the
+    viewer keeps the --multi run option hidden until both are in place)."""
     import importlib.util
     import json as _json
     from ebird_data import POOLS, get_api_key, load_countries
@@ -1696,8 +1726,7 @@ def run_status(data_dir: Path, cache_dir: Path, checklists_dir: Path):
     onnx_encoder = _hub_cached_file(
         "fushanbobfan/bioclip2-vitl14-image-onnx",
         "bioclip2_vitl14_image_int8.onnx") or _DEFAULT_ONNX_ENCODER.is_file()
-    onnx_detector = _hub_cached_file(
-        "onnx-community/rtdetr_r18vd", "onnx/model_int8.onnx")
+    onnx_detector = _onnx_detector_ready()
     tol = (_hub_cache_root() / "datasets--imageomics--TreeOfLife-200M").is_dir()
 
     doc = {
@@ -2672,8 +2701,11 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
 # crop, so the model only needs the 'bird' class. Download it once with
 # `birdid --download-detector` (a SEPARATE download from --initialize, so a
 # BioCLIP-only user never gets an unexpected model). It needs onnxruntime at
-# run time; without the model or onnxruntime, birdid falls back to the
-# built-in detector.
+# run time, so the download command ALSO auto-installs it (pip install, into
+# the same interpreter — see _ensure_onnxruntime below) instead of leaving a
+# half-working model behind. Without the model or onnxruntime, birdid falls
+# back to the built-in detector at runtime; backends.onnx_detector (used to
+# gate --multi in the viewer) is only true when BOTH are present.
 
 # COCO-trained RT-DETR R18VD (Apache-2.0) exported to ONNX int8. It lives in
 # the huggingface cache like the BioCLIP weights, so offline runs read the
@@ -2682,9 +2714,53 @@ _DETECTOR_REPO = "onnx-community/rtdetr_r18vd"
 _DETECTOR_FILE = "onnx/model_int8.onnx"
 
 
+def _ensure_onnxruntime() -> bool:
+    """Make sure `onnxruntime` is importable by the interpreter running birdid.
+
+    Already importable -> True (no-op, the common case once installed). When
+    missing, run ``sys.executable -m pip install onnxruntime`` so the package
+    lands in the SAME venv/interpreter that will execute the detector — never
+    a bare ``pip``, which could target the wrong environment. pip's own output
+    is streamed to our stdout/stderr so the viewer's manage console shows the
+    progress live. Returns whether onnxruntime imports afterwards; NEVER
+    raises — a failed pip run leaves the downloaded model in place and just
+    prints a manual-install hint (the viewer keeps --multi gated on
+    backends.onnx_detector, which is false until the runtime actually
+    imports)."""
+    if _onnxruntime_importable():
+        print("  onnxruntime: already installed (no pip run needed).")
+        return True
+    print("  onnxruntime: not installed - running  "
+          "pip install onnxruntime ...")
+    try:
+        import subprocess
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install",
+             "--disable-pip-version-check", "onnxruntime"],
+            check=False)
+    except Exception as e:      # noqa: BLE001 - never break the download
+        print(f"  WARNING: could not auto-install onnxruntime: {e}")
+        print("  Run it yourself:  pip install onnxruntime")
+        return False
+    if proc.returncode != 0:
+        print(f"  WARNING: 'pip install onnxruntime' exited with code "
+              f"{proc.returncode}.")
+        print("  Run it yourself:  pip install onnxruntime")
+        return False
+    if _onnxruntime_importable():
+        print("  onnxruntime: installed successfully.")
+        return True
+    print("  WARNING: pip reported success but onnxruntime still does not "
+          "import.")
+    print("  Run it yourself:  pip install onnxruntime")
+    return False
+
+
 def run_download_detector() -> Path:
     """Download the optional ONNX multi-bird detector into the huggingface
-    cache (needs network once, like --initialize). Returns the local path."""
+    cache (needs network once, like --initialize) and make sure the onnxruntime
+    it needs is importable (auto ``pip install`` when missing — see
+    ``_ensure_onnxruntime``). Returns the local model path."""
     import huggingface_hub
     # a stale HF_HUB_OFFLINE=1 must not block a deliberate download
     had_offline = os.environ.pop("HF_HUB_OFFLINE", None)
@@ -2702,7 +2778,14 @@ def run_download_detector() -> Path:
     print(f"birdid: multi-bird detector downloaded -> {path}")
     print("  (COCO-trained RT-DETR R18VD, int8, Apache-2.0; detects the "
           "'bird' class only - species ID stays with BioCLIP).")
-    print("  To use it, install the onnx runtime:  pip install onnxruntime")
+    if _ensure_onnxruntime():
+        print("  ONNX detector ready: --multi now runs automated multi-bird "
+              "detection with it.")
+    else:
+        print("  Model downloaded, but onnxruntime is NOT installed - the "
+              "viewer keeps")
+        print("  the --multi run option hidden until you run:  "
+              "pip install onnxruntime")
     return Path(path)
 
 
@@ -2728,10 +2811,11 @@ class OnnxDetector(Detector):
     COCO-trained, int8) through onnxruntime.
 
     Only proposes BIRD regions (COCO class 14) - the classifier still
-    identifies the species per crop. Needs the model file
-    (``birdid --download-detector``) and onnxruntime (``pip install
-    onnxruntime``); make_detector falls back to the built-in detector if
-    either is missing or the session fails, so detection never breaks a run.
+    identifies the species per crop. Needs the model file AND onnxruntime;
+    ``birdid --download-detector`` fetches the model and auto-installs the
+    runtime (``pip install onnxruntime`` into the same interpreter). If either
+    is missing or the session fails, make_detector falls back to the built-in
+    detector, so detection never breaks a run.
 
     Pre/post-processing mirrors the model's RTDetrImageProcessor exactly:
     input is RGB resized to 640x640 (bilinear) and scaled to [0,1]
@@ -5179,12 +5263,13 @@ def main():
     ap.add_argument("--download-detector", action="store_true",
                     help="download the OPTIONAL dedicated ONNX multi-bird "
                          "detector (RT-DETR R18VD, COCO 'bird' class only, "
-                         "~21 MB, Apache-2.0) into the model cache. A SEPARATE "
-                         "download from --initialize, so BioCLIP-only users "
-                         "get no surprise model. Needs network once; to USE "
-                         "it also 'pip install onnxruntime'. Without it, "
-                         "--multi uses the built-in zero-shot BioCLIP "
-                         "detector.")
+                         "~21 MB, Apache-2.0) into the model cache and ALSO "
+                         "auto-install the onnxruntime it needs (pip install "
+                         "onnxruntime into the same interpreter, skipped when "
+                         "already importable). A SEPARATE download from "
+                         "--initialize, so BioCLIP-only users get no surprise "
+                         "model. Needs network once. Without it, --multi uses "
+                         "the built-in zero-shot BioCLIP detector.")
     ap.add_argument("--device", choices=["auto", "npu", "cpu"], default="auto",
                     help="compute device for the BioCLIP 2 image encoder: "
                          "'auto' (default) uses the AMD NPU when the hardware "
