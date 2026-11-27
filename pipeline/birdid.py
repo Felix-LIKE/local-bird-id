@@ -1672,11 +1672,12 @@ def _onnxruntime_importable() -> bool:
 
 
 def _onnx_detector_ready() -> bool:
-    """True when automated multi-bird detection is fully usable: the ONNX
+    """True when automated multi-bird box DETECTION is available: the ONNX
     detector model file is downloaded AND onnxruntime is importable — exactly
-    the conditions make_detector() needs to actually use the ONNX path. A
-    downloaded model without the runtime does NOT count, so --status keeps
-    the viewer's --multi run option gated until both are in place."""
+    the conditions make_detector() needs to use the ONNX path. A downloaded
+    model without the runtime does NOT count: without it there is no automated
+    box source, and --multi falls back to identifying only the user-drawn
+    boxes (flagged photos with neither are skipped)."""
     return (_hub_cached_file(
         "onnx-community/rtdetr_r18vd", "onnx/model_int8.onnx")
         and _onnxruntime_importable())
@@ -1692,11 +1693,11 @@ def run_status(data_dir: Path, cache_dir: Path, checklists_dir: Path):
     region tables, the species-embedding cache index, the API key file and the
     HF-cache model probes. `backends.bio_clip` is the "the AI backends are
     ready to classify" signal the viewer uses to gate the multi-bird UI, and
-    `backends.onnx_detector` is the "automated multi-bird detection is fully
-    usable" signal — TRUE only when the ONNX model file is downloaded AND
-    onnxruntime is importable, i.e. exactly when make_detector() will use it
-    (a downloaded model without the runtime still reports false, so the
-    viewer keeps the --multi run option hidden until both are in place)."""
+    `backends.onnx_detector` is the "automated multi-bird box detection is
+    available" signal — TRUE only when the ONNX model file is downloaded AND
+    onnxruntime is importable. It does NOT gate the --multi run option (that
+    works without it, on user-drawn boxes); it only says whether --multi can
+    AUTO-detect bird boxes."""
     import importlib.util
     import json as _json
     from ebird_data import POOLS, get_api_key, load_countries
@@ -2703,9 +2704,11 @@ def _classify_boxes(classifier: Classifier, primary: Path, boxes: list[dict],
 # BioCLIP-only user never gets an unexpected model). It needs onnxruntime at
 # run time, so the download command ALSO auto-installs it (pip install, into
 # the same interpreter — see _ensure_onnxruntime below) instead of leaving a
-# half-working model behind. Without the model or onnxruntime, birdid falls
-# back to the built-in detector at runtime; backends.onnx_detector (used to
-# gate --multi in the viewer) is only true when BOTH are present.
+# half-working model behind. Without the model or onnxruntime there is NO
+# automated box source: --multi classifies only the user-drawn boxes (flagged
+# photos with neither are skipped), unless --no-detector-model opts back into
+# the zero-shot scan. backends.onnx_detector reports whether the automated
+# ONNX path is available (model AND runtime both present).
 
 # COCO-trained RT-DETR R18VD (Apache-2.0) exported to ONNX int8. It lives in
 # the huggingface cache like the BioCLIP weights, so offline runs read the
@@ -2724,9 +2727,8 @@ def _ensure_onnxruntime() -> bool:
     is streamed to our stdout/stderr so the viewer's manage console shows the
     progress live. Returns whether onnxruntime imports afterwards; NEVER
     raises — a failed pip run leaves the downloaded model in place and just
-    prints a manual-install hint (the viewer keeps --multi gated on
-    backends.onnx_detector, which is false until the runtime actually
-    imports)."""
+    prints a manual-install hint (without the runtime there is no automated
+    box detection, so --multi stays limited to user-drawn boxes)."""
     if _onnxruntime_importable():
         print("  onnxruntime: already installed (no pip run needed).")
         return True
@@ -2779,14 +2781,13 @@ def run_download_detector() -> Path:
     print("  (COCO-trained RT-DETR R18VD, int8, Apache-2.0; detects the "
           "'bird' class only - species ID stays with BioCLIP).")
     if _ensure_onnxruntime():
-        print("  ONNX detector ready: --multi now runs automated multi-bird "
-              "detection with it.")
+        print("  ONNX detector ready: --multi now auto-detects bird boxes.")
     else:
-        print("  Model downloaded, but onnxruntime is NOT installed - the "
-              "viewer keeps")
-        print("  the --multi run option hidden until you run:  "
-              "pip install onnxruntime")
-    return Path(path)
+        print("  Model downloaded, but onnxruntime is NOT installed - "
+              "automated")
+        print("  multi-bird detection stays OFF (only user-drawn boxes) "
+              "until you run:")
+        print("  pip install onnxruntime")
 
 
 def _detector_onnx_path() -> Path | None:
@@ -2814,8 +2815,9 @@ class OnnxDetector(Detector):
     identifies the species per crop. Needs the model file AND onnxruntime;
     ``birdid --download-detector`` fetches the model and auto-installs the
     runtime (``pip install onnxruntime`` into the same interpreter). If either
-    is missing or the session fails, make_detector falls back to the built-in
-    detector, so detection never breaks a run.
+    is missing or the session fails, make_detector returns None (no automated
+    proposal) and --multi classifies only the user-drawn boxes, so a run never
+    breaks.
 
     Pre/post-processing mirrors the model's RTDetrImageProcessor exactly:
     input is RGB resized to 640x640 (bilinear) and scaled to [0,1]
@@ -2872,35 +2874,41 @@ class OnnxDetector(Detector):
 def make_detector(args, classifier=None) -> Detector | None:
     """The region-proposal backend for --multi / flagged captures.
 
-    Priority:
-      1. --no-detector-model     -> the built-in zero-shot BioCLIP detector.
-      2. the ONNX detector (from ``birdid --download-detector``): used when the
-         model file is available AND onnxruntime loads it; any failure (missing
-         file / onnxruntime, session error) falls back to the built-in with a
-         one-line note.
-      3. otherwise the built-in (needs no download, always available).
+    The ONNX detector (``birdid --download-detector``) is the ONLY automated
+    region proposal: it is used when the model file is available AND
+    onnxruntime loads it; any failure (missing file / runtime, session error)
+    means NO automated proposal. --multi then classifies ONLY the user-drawn /
+    confirmed boxes already stored in the sidecar, and a flagged photo with
+    neither is skipped (see the --multi loop) — the ONNX model is the sole
+    source of automatic box drawing. The built-in zero-shot BioCLIP detector
+    remains available ONLY via the explicit ``--no-detector-model`` opt-in (it
+    is weak on small / heavily-overlapping birds, so it must never be the
+    silent default again).
 
     The chosen backend's one-line description is set on ``detector.note`` for
     main() to print at startup."""
     if classifier is None:
         return None
-    detector = BioClipCropDetector(args, classifier)
     if getattr(args, "no_detector_model", False):
-        detector.note = "built-in zero-shot detector (--no-detector-model)"
+        detector = BioClipCropDetector(args, classifier)
+        detector.note = ("built-in zero-shot detector (--no-detector-model; "
+                         "automated detection without the ONNX detector is an "
+                         "explicit opt-in)")
         return detector
     onnx_path = _detector_onnx_path()
     if onnx_path is None:
-        detector.note = ("built-in zero-shot detector (run 'birdid "
-                         "--download-detector' for the dedicated ONNX one)")
-        return detector
+        return None
     try:
         detector = OnnxDetector(args, classifier, onnx_path=onnx_path)
         detector.note = f"dedicated ONNX detector ({onnx_path.name})"
         return detector
-    except Exception as e:      # noqa: BLE001 - detection must never break a run
-        detector.note = (f"built-in zero-shot detector (ONNX detector "
-                         f"unavailable: {e}; run 'pip install onnxruntime')")
-        return detector
+    except Exception as e:      # noqa: BLE001 - never break a run
+        # A session failure means no automated proposal this run; the --multi
+        # loop then classifies manual boxes only (never the zero-shot default).
+        print(f"birdid: ONNX detector unavailable ({e}); automated multi-bird "
+              f"detection is OFF for this run - only user-drawn boxes will be "
+              f"identified (--no-detector-model re-enables the zero-shot scan)")
+        return None
 
 
 # --------------------------------------------------------------------------
@@ -5056,23 +5064,32 @@ def main():
                     help="multi-bird analysis (OPT-IN): re-process every "
                          "capture flagged 'contains multiple birds' "
                          "(bird:multiBird=true, set from the viewer). Each "
-                         "flagged photo is scanned for bird regions (the "
-                         "built-in zero-shot BioCLIP crop detector by "
-                         "default, or the dedicated ONNX detector from "
-                         "'birdid --download-detector' when downloaded), "
-                         "every region is cropped and classified "
+                         "flagged photo's boxes are cropped and classified "
                          "with the same regional ladder as the whole image, "
                          "and the sidecar gets per-region candidate lists "
                          "(bird:regions) plus the standard mwg-rs:Regions "
-                         "bounding boxes. The whole-image bird:* fields are "
-                         "still written for compatibility. The flag is kept "
-                         "until you un-flag it in the viewer, so re-running "
-                         "--multi re-identifies; frozen (confirmed) captures "
-                         "are never touched.")
+                         "bounding boxes. Region SOURCE: user-drawn/confirmed "
+                         "boxes are ALWAYS the authoritative set (identified "
+                         "as-is); a photo with no user boxes is auto-scanned "
+                         "for bird regions - which REQUIRES the dedicated ONNX "
+                         "detector ('birdid --download-detector'), the only "
+                         "automated box source. Without it, flagged photos "
+                         "that have no manual boxes are skipped (the flag is "
+                         "kept). '--no-detector-model' re-enables the weaker "
+                         "zero-shot BioCLIP scan as an explicit opt-in. The "
+                         "whole-image bird:* fields are still written for "
+                         "compatibility. The flag is kept until you un-flag "
+                         "it in the viewer, so re-running --multi "
+                         "re-identifies; frozen (confirmed) captures are "
+                         "never touched.")
     ap.add_argument("--no-detector-model", action="store_true",
-                    help="force the built-in zero-shot BioCLIP crop detector "
-                         "even when the dedicated ONNX detector "
-                         "(--download-detector) is downloaded")
+                    help="OPT-IN: use the built-in zero-shot BioCLIP crop "
+                         "detector for automated multi-bird region scanning "
+                         "instead of requiring the dedicated ONNX detector "
+                         "(--download-detector). It is weak on small / "
+                         "heavily-overlapping birds, so it is OFF by default: "
+                         "without it, --multi only identifies user-drawn "
+                         "boxes. Force it to get the old automatic scan back.")
     ap.add_argument("--multi-min-confidence", type=float, default=0.55,
                     help="region 'is a bird' score threshold: a proposed "
                          "crop is only kept as a bird region when the "
@@ -5541,6 +5558,7 @@ def main():
         confirmed_n = 0
         partial_n = 0
         partial_only_skipped_n = 0
+        multi_skipped_n = 0
         for i, cap in enumerate(captures, 1):
             tui.progress("status", i, len(captures),
                          "checking existing sidecars")
@@ -5709,6 +5727,11 @@ def main():
                 if getattr(args, "multi", False) or "ONNX" in note:
                     tui.plain_line(f"multi-bird detector: {detector.describe()} "
                                    f"- {note} (flagged captures only)")
+            elif getattr(args, "multi", False):
+                tui.plain_line("multi-bird: no automated detector available - "
+                               "only user-drawn boxes will be identified (run "
+                               "'birdid --download-detector' for automated "
+                               "bird-box detection)")
 
             report_rows = []
             stop = tui.stop_flag
@@ -5949,7 +5972,7 @@ def main():
                     is_multi = (getattr(args, "multi", False)
                                 and sidecar_multi(sidecar))
                     regions = None
-                    if is_multi and detector is not None:
+                    if is_multi:
                         # A stored box list with ANY user-drawn/edited OR
                         # user-confirmed box is the authoritative region set:
                         # the viewer keeps model detections non-manual when the
@@ -5961,8 +5984,8 @@ def main():
                         # Each box's manual flag is carried through, and a
                         # CONFIRMED region is passed through untouched (see
                         # _classify_boxes), so only the unconfirmed regions get
-                        # re-classified. Detection only runs when the sidecar
-                        # has no stored manual/confirmed boxes at all.
+                        # re-classified. This holds with OR without the ONNX
+                        # detector: user boxes are the user's own selection.
                         stored_boxes = _read_regions(sidecar)
                         manual_boxes = [b for b in stored_boxes
                                         if b.get("manual")]
@@ -5982,7 +6005,11 @@ def main():
                                     + ", ".join(
                                         f"{r['topSpecies']} {r['topConfidence']*100:.0f}%"
                                         for r in regions))
-                        else:
+                        elif detector is not None:
+                            # No user boxes but an automated detector (the ONNX
+                            # one, or the --no-detector-model opt-in): propose
+                            # regions automatically. Detection only runs when
+                            # the sidecar has no stored manual/confirmed boxes.
                             tui.set(stage="detect",
                                     message=f"multi-bird scan: {primary.name}")
                             regions = _detect_and_classify(
@@ -5998,6 +6025,21 @@ def main():
                                     f"  {cap.base}: no bird region passed the "
                                     f"detector threshold (flag kept; adjust "
                                     f"--multi-min-confidence or check the photo)")
+                        else:
+                            # No automated detector AND no user-drawn boxes:
+                            # there is nothing to identify, and the ONNX model
+                            # is the only automated box source, so this capture
+                            # is SKIPPED. The flag is kept, so it is picked up
+                            # automatically once the user draws boxes or the
+                            # detector is installed.
+                            multi_skipped_n += 1
+                            tui.plain_line(
+                                f"  {cap.base}: flagged multi but has no manual "
+                                f"boxes and no ONNX detector - skipped (draw "
+                                f"boxes in the viewer, or run 'birdid "
+                                f"--download-detector' for automated "
+                                f"detection)")
+                            continue
                     old_status = sidecar_status(sidecar)
                     old_best = _sidecar_best(sidecar)
                     if (not args.force and not is_multi
@@ -6172,6 +6214,12 @@ def main():
                     "A re-identified partial's pin is consumed (status becomes "
                     "done / low-confidence), so the next --partial-only run "
                     "naturally has less to do.")
+            if multi_skipped_n:
+                summary_lines.append(
+                    f"{multi_skipped_n} flagged-multi capture(s) skipped: no "
+                    "manual boxes and no ONNX detector (draw boxes in the "
+                    "viewer, or run 'birdid --download-detector' for automated "
+                    "detection).")
             if write_blocked:
                 if sidecars_written == 0 and not manifest_saved and not written:
                     saved_what = ("Nothing could be saved - the photo folder "
