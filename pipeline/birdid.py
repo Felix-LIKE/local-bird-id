@@ -1561,9 +1561,17 @@ def run_cache(data_dir: Path, cache_dir: Path, tokens: list[str]):
 
     cache = SpeciesEmbeddingCache(cache_dir)
 
+    # A terminal shows the encoding counter in place (\r, same line); a piped
+    # stdout (the viewer streams output line-by-line) gets a newline-terminated
+    # line per species instead, so --cache build progress arrives live.
+    in_place = sys.stdout.isatty()
+
     def _prog(name: str, i: int, total: int):
-        sys.stdout.write(f"\r  encoding {i:>3}/{total:<3}  {name[:52]:<52}")
-        sys.stdout.flush()
+        if in_place:
+            sys.stdout.write(f"\r  encoding {i:>3}/{total:<3}  {name[:52]:<52}")
+            sys.stdout.flush()
+        else:
+            print(f"  encoding {i:>3}/{total:<3}  {name[:52]:<52}", flush=True)
 
     if cmd == "build":
         needed = _cache_union(db, regions)
@@ -1573,8 +1581,9 @@ def run_cache(data_dir: Path, cache_dir: Path, tokens: list[str]):
               f"({len(needed)} species needed, "
               f"{len(cache.names())} already cached)")
         cache.matrix_for(needed, backbone, on_progress=_prog)
-        sys.stdout.write("\n")
-        sys.stdout.flush()
+        if in_place:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
         print(f"birdid: cache ready at {cache.dir} "
               f"({len(cache.names())} species, {time.time() - t0:.0f}s)")
 
@@ -4736,17 +4745,22 @@ class TUI:
 
     def progress(self, stage: str, done: int, total: int, message: str = ""):
         """Per-step progress: fullscreen bar in TUI mode, an inline
-        '\\r[label] done/total pct%' line otherwise. When the step finishes the
-        inline line is closed with a newline so later output starts fresh."""
+        '\\r[label] done/total pct%' line on a terminal (closed with a newline
+        when the step finishes). On a piped stdout — the viewer streams output
+        line-by-line — each update is a newline-terminated line instead, so
+        progress arrives live rather than only when the step completes."""
         if self.enabled:
             self.set(stage=stage, stage_done=done, stage_total=total,
                      message=message or "")
             return
         label = stage or "step"
         pct = f"{100.0 * done / total:3.0f}%" if total else "?"
-        print(f"\r[{label}] {done}/{total} {pct}   ", end="", flush=True)
-        if total and done >= total:
-            print(flush=True)   # finish the line once the step is complete
+        if sys.stdout.isatty():
+            print(f"\r[{label}] {done}/{total} {pct}   ", end="", flush=True)
+            if total and done >= total:
+                print(flush=True)   # finish the line once the step is complete
+        else:
+            print(f"[{label}] {done}/{total} {pct}", flush=True)
 
     def run_loop(self):
         if not self.enabled:

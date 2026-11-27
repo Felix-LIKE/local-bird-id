@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import csv
 import os
+import sys
 import time
 from collections import defaultdict
 from datetime import date, datetime
@@ -1113,13 +1114,22 @@ def _sample_with_progress(region_code: str, key: str, year: int, sample_dates: i
                           today: date | None = None):
     total = 12 * sample_dates
     state = {"done": 0}
+    # A real terminal shows the counter in place (carriage return, same line).
+    # A piped stdout — the viewer streams subprocess output line-by-line — gets
+    # one newline-terminated line per sample instead, so progress arrives LIVE
+    # rather than only the final line once the region finishes.
+    in_place = sys.stdout.isatty()
 
     def progress(region, done, tot, date):
         state["done"] = done
         pct = done * 100 // tot
-        print(f"  {region}: {done:3d}/{tot} ({pct:3d}%)  {date}", end="\r", flush=True)
-        if done == tot:
-            print()
+        if in_place:
+            print(f"  {region}: {done:3d}/{tot} ({pct:3d}%)  {date}",
+                  end="\r", flush=True)
+            if done == tot:
+                print()
+        else:
+            print(f"  {region}: {done:3d}/{tot} ({pct:3d}%)  {date}", flush=True)
 
     sp, data_date = sample_months(region_code, key, year, sample_dates,
                                   progress=progress, today=today)

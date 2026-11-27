@@ -264,6 +264,13 @@ if [ "$MGMT" -eq 0 ] || [ "$OFFLINE" -eq 1 ]; then
     export TRANSFORMERS_OFFLINE=1
 fi
 
+# Stream progress LIVE: when stdout is a pipe (the viewer's manage/run console
+# reads it line-by-line), python block-buffers print() output (~8 KB), so a
+# --download / --update / --cache / photo run would show nothing until it
+# exits. Unbuffered flushes every line as it is written, and the env var is
+# inherited by child python processes (e.g. the pip auto-install) too.
+export PYTHONUNBUFFERED=1
+
 "$PY" "$PIPELINE" "$@"
 rc=$?
 

@@ -169,6 +169,73 @@ def run():
         check("load_countries is cached per data_dir",
               again is countries)
 
+    print("\n== E?: progress streaming (piped vs terminal) ==")
+    # _sample_with_progress must emit one NEWLINE-terminated line per sample
+    # when stdout is a pipe (the viewer's line-by-line reader would otherwise
+    # hold \r-only progress invisible until the region finishes), and keep the
+    # in-place \r counter on a real terminal.
+    from io import StringIO
+    from contextlib import redirect_stdout
+
+    def fake_sample_months(region_code, key, year, sample_dates, progress, today=None):
+        for done in range(1, 5):            # 4 samples, 0..100%
+            progress(region_code, done, 4, date(year, 1, done))
+        return {"s": 1}, date(year, 1, 1)
+
+    orig_sample_months = ebird_data.sample_months
+    ebird_data.sample_months = fake_sample_months
+    try:
+        piped = StringIO()                  # .isatty() -> False, like a viewer pipe
+        with redirect_stdout(piped):
+            ebird_data._sample_with_progress("DE", "k", 2026, 1)
+        v = piped.getvalue()
+        check("piped stdout: 4 newline-terminated lines (no \\r, no blank)",
+              v.count("\n") == 4 and v.count("\r") == 0 and v.endswith("\n"),
+              repr(v))
+        check("piped stdout: progress lines show count + percent",
+              "DE:   4/4 (100%)" in v and "DE:   1/4 ( 25%)" in v, repr(v))
+
+        class TTYLike(StringIO):
+            def isatty(self):
+                return True
+        term = TTYLike()
+        with redirect_stdout(term):
+            ebird_data._sample_with_progress("DE", "k", 2026, 1)
+        tv = term.getvalue()
+        check("tty stdout: in-place \\r counter (4 \\r, single trailing \\n)",
+              tv.count("\r") == 4 and tv.count("\n") == 1, repr(tv))
+    finally:
+        ebird_data.sample_months = orig_sample_months
+
+    # TUI.progress() (cache builds, embeddings, ...) must split the same way:
+    # newline-terminated on a pipe, in-place \r on a terminal.
+    tui = birdid.TUI(False)
+    pbuf = StringIO()
+    with redirect_stdout(pbuf):
+        tui.progress("cache", 1, 4)
+        tui.progress("cache", 4, 4)
+    pv = pbuf.getvalue()
+    check("TUI.progress piped: newline-terminated lines, no \\r",
+          pv.count("\n") == 2 and "\r" not in pv, repr(pv))
+    class TTYLike2(StringIO):
+        def isatty(self):
+            return True
+    tv2 = TTYLike2()
+    with redirect_stdout(tv2):
+        tui.progress("cache", 1, 4)
+        tui.progress("cache", 4, 4)
+    check("TUI.progress tty: in-place \\r, newline only at completion",
+          tv2.getvalue().count("\r") == 2 and tv2.getvalue().count("\n") == 1,
+          repr(tv2.getvalue()))
+
+    # The launcher must stream the pipeline unbuffered, or every print sits in
+    # python's ~8 KB pipe buffer and the viewer sees nothing until a run ends.
+    launcher = (_HERE / "birdid").read_text(encoding="utf-8")
+    py_inv = launcher.find('"$PY" "$PIPELINE"')
+    check("launcher exports PYTHONUNBUFFERED before running the pipeline",
+          py_inv > 0 and "PYTHONUNBUFFERED" in launcher[:py_inv],
+          "PYTHONUNBUFFERED not exported before the python invocation")
+
     print("\n============================================")
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} FAILED: {', '.join(FAILURES)}")
