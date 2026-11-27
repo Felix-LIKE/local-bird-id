@@ -344,12 +344,14 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
             return "country", u, COUNTRIES[u]["name"]
         if u in POOLS:
             return "region", u, POOLS[u]["name"]
-        if u in SUB_NAMES:
-            # subcontinent (e.g. AS-SOUTHEAST, EU-WEST) - downloadable directly
-            return "region", u, SUB_NAMES[u]
         if u in POOL_ALIASES:
+            # an aliased subcontinent (AS-SOUTHEAST -> SEA): resolve to the real
+            # pool so the returned code is a POOLS member (a bare alias is not).
             tgt = POOL_ALIASES[u]
             return "region", tgt, POOLS[tgt]["name"]
+        if u in SUB_NAMES:
+            # subcontinent (e.g. EU-WEST) - downloadable directly
+            return "region", u, SUB_NAMES[u]
         if u in countries:
             return "country", u, countries[u]          # any ISO country
         raise ValueError(f"unknown country/region code: {t[0]!r} "
@@ -369,11 +371,13 @@ def resolve_spec(tokens: list[str], countries: dict[str, str] | None = None):
                 return "region", *_region_level_for(DEFAULT_REGION, u, countries)
             if u in POOLS:
                 return "region", u, POOLS[u]["name"]
-            if u in SUB_NAMES:
-                return "region", u, SUB_NAMES[u]
             if u in POOL_ALIASES:
+                # aliased subcontinent (AS-SOUTHEAST -> SEA): return the real
+                # pool code (a bare alias is not a POOLS member).
                 tgt = POOL_ALIASES[u]
                 return "region", tgt, POOLS[tgt]["name"]
+            if u in SUB_NAMES:
+                return "region", u, SUB_NAMES[u]
             raise ValueError(f"unknown region/pool: {t[1]!r} "
                              f"(known: {', '.join(sorted(POOLS))})")
         raise ValueError("--download's first value must be 'country' or 'region' "
