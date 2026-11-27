@@ -491,6 +491,34 @@ class SpeciesDB:
     def regions(self):
         return sorted(self._table)
 
+    def installed_tables(self) -> list[str]:
+        """The region tables the user actually installed — what the management
+        UI should show and 'update all' should refresh. Includes every region
+        with an explicit <CODE>.csv table (a downloaded country or pool, or a
+        curated seed), plus a country split into subnational tables. EXCLUDES
+        derived dir-union aggregates: the subcontinent/continent folders that
+        exist only as tree layout for a downloaded country (e.g. EU-WEST /
+        EUROPE created by a single DE.csv) are queryable fallbacks, not
+        independently installed tables — 'updating' one would re-download the
+        whole subcontinent/continent."""
+        sub_codes = set(country_subcontinent_map().values())
+        out: list[str] = []
+        for reg in self.regions():
+            rf = self._region_file.get(reg)
+            if rf is None:
+                continue
+            if rf.is_file():
+                out.append(reg)          # explicit <CODE>.csv (country/pool/seed)
+                continue
+            # dir-union: only a country split into subnational tables counts
+            # (its <COUNTRY>/ dir sits directly under a subcontinent dir).
+            # Scaffold dirs (a subcontinent or continent folder created by the
+            # tree layout of other tables) have a continent dir or the base as
+            # their parent, so they are not installed tables.
+            if rf.parent.name in sub_codes:
+                out.append(reg)
+        return sorted(out)
+
 
 # v2026 'category' values that carry a real English common name for a bird
 # taxon; everything else in the integrated checklist is noise for name lookup
@@ -1735,8 +1763,14 @@ def run_status(data_dir: Path, cache_dir: Path, checklists_dir: Path):
 
     db = SpeciesDB(data_dir / "regions", data_dir / "regions_generated")
     db.load()
+    # Only real installed tables: explicit <CODE>.csv files (downloaded
+    # countries/pools + curated seeds) and countries split into subnational
+    # tables. Derived dir-union scaffolds (EU-WEST / EUROPE created purely by
+    # a downloaded DE.csv's tree layout) are queryable fallbacks but not
+    # installed tables, so they must not appear here or the viewer's
+    # 'update all' would re-download a whole subcontinent/continent for them.
     by_src: dict[str, list[str]] = {"curated": [], "generated": []}
-    for reg in db.regions():
+    for reg in db.installed_tables():
         by_src.setdefault(db.source(reg), []).append(reg)
     curated = sorted(by_src["curated"])
     generated = sorted(by_src["generated"])

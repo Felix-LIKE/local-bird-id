@@ -285,6 +285,72 @@ def run():
           birdid._wider_pool_chain("DE") == ["EU-WEST", "EUROPE"],
           str(birdid._wider_pool_chain("DE")))
 
+    print("\n== E7: installed_tables() excludes derived dir-union scaffolds ==")
+    # 'installed tables' = what the panel shows and 'update all' refreshes.
+    # Downloading DE writes only <CONT>/<SUB>/DE.csv; the EU-WEST / EUROPE
+    # dirs are pure tree scaffolding and must NOT be reported as installed
+    # (the old --status listed them, so 'update all' queued --update EU-WEST /
+    # --update EUROPE and re-downloaded a whole subcontinent/continent).
+    def write_table(path: Path, region: str, mask: str = "111111111111"):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            f"region,species,status,month_mask\n"
+            f"{region},Test Sparrow,resident,{mask}\n", encoding="utf-8")
+
+    with tempfile.TemporaryDirectory(prefix="birdid-inst-") as tmp:
+        d = Path(tmp)
+        regs = d / "regions"; regs.mkdir()
+        gen = d / "regions_generated"; gen.mkdir()
+        for seed in ("EUROPE.csv", "SEA.csv"):
+            shutil.copy(_HERE_DATA / "regions" / seed, regs / seed)
+        db = birdid.SpeciesDB(regs, gen); db.load()
+        check("fresh install installed = curated seeds only",
+              db.installed_tables() == ["EUROPE", "SEA"],
+              str(db.installed_tables()))
+
+        # download DE: one file, but the loader derives EU-WEST + EUROPE dirs
+        write_table(gen / "EUROPE" / "EU-WEST" / "DE.csv", "DE")
+        db2 = birdid.SpeciesDB(regs, gen); db2.load()
+        check("DE.csv creates EU-WEST/EUROPE as queryable dir-unions",
+              "EU-WEST" in db2.regions() and "EUROPE" in db2.regions(),
+              str(db2.regions()))
+        check("but installed_tables() = DE + curated seeds only (no scaffolds)",
+              db2.installed_tables() == ["DE", "EUROPE", "SEA"],
+              str(db2.installed_tables()))
+        check("EU-WEST scaffold is NOT an installed table",
+              "EU-WEST" not in db2.installed_tables())
+
+        # a country split into subnational tables (CLI --subnational) still
+        # counts as installed: <CONT>/<SUB>/<COUNTRY>/<SUB>.csv
+        (gen / "EUROPE" / "EU-WEST" / "DE.csv").unlink()
+        write_table(gen / "EUROPE" / "EU-WEST" / "DE" / "DE-BE.csv", "DE-BE")
+        db3 = birdid.SpeciesDB(regs, gen); db3.load()
+        check("subnational country dir counts as installed",
+              "DE" in db3.installed_tables(), str(db3.installed_tables()))
+        check("subnational country dir does not leak scaffolds",
+              sorted(x for x in db3.installed_tables()
+                     if x not in ("EUROPE", "SEA")) == ["DE", "DE-BE"],
+              str(db3.installed_tables()))
+
+        # an explicitly downloaded pool (pooled <SUB>.csv) IS installed
+        write_table(gen / "EUROPE" / "EU-WEST" / "EU-WEST.csv", "EU-WEST")
+        db4 = birdid.SpeciesDB(regs, gen); db4.load()
+        check("explicit pooled subcontinent table counts as installed",
+              "EU-WEST" in db4.installed_tables(),
+              str(db4.installed_tables()))
+
+        # AS collision: the Asia continent scaffold must NOT be reported as
+        # installed even though 'AS' is also a country (American Samoa).
+        write_table(gen / "AS" / "AS-SOUTHEAST" / "TH.csv", "TH")
+        db5 = birdid.SpeciesDB(regs, gen); db5.load()
+        inst5 = db5.installed_tables()
+        check("Asia continent scaffold AS is NOT installed",
+              "AS" not in inst5, str(inst5))
+        check("Asia subcontinent scaffold AS-SOUTHEAST is NOT installed",
+              "AS-SOUTHEAST" not in inst5, str(inst5))
+        check("the TH country table IS installed",
+              "TH" in inst5, str(inst5))
+
     print("\n============================================")
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} FAILED: {', '.join(FAILURES)}")
