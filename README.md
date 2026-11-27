@@ -435,15 +435,14 @@ run to the NPU.
 ### Multi-bird detection & the optional dedicated detector
 
 Multi-bird analysis (`--multi`, or flagged captures from the viewer) works
-**out of the box with just BioCLIP** — the built-in **zero-shot** detector
-re-scans each photo with the BioCLIP backbone already loaded for classification
-("is this region a photo of a bird?"), so there is **no extra download needed**
-to get started.
+**without any extra download**: boxes the user drew/confirmed manually are
+always the authoritative set and are identified as-is. What needs the
+**dedicated ONNX object detector** is **automated** box detection — finding
+bird regions in a photo the user did not box.
 
-For **better** region proposals — especially on small or heavily-overlapping
-birds — a **dedicated ONNX object detector** (RT-DETR R18VD, COCO-trained,
-detects the `bird` class only; species ID always stays with BioCLIP) can be
-downloaded separately:
+The ONNX detector (RT-DETR R18VD, COCO-trained, detects the `bird` class only;
+species ID always stays with BioCLIP) is the **only automated box source**, and
+is downloaded separately:
 
 ```bash
 birdid --download-detector     # ~21 MB, once, needs network (Apache-2.0);
@@ -453,23 +452,24 @@ birdid --download-detector     # ~21 MB, once, needs network (Apache-2.0);
 This is a **separate, opt-in download** from `--initialize`, so a BioCLIP-only
 user is never surprised by a detector download. The command auto-installs
 `onnxruntime` (into the same Python environment) when it is missing, so a
-download never leaves a model you can't use. `birdid` then picks the detector
-automatically:
+download never leaves a model you can't use. `birdid` then behaves as:
 
-- **ONNX detector** — used when the model is downloaded **and** `onnxruntime`
-  is installed.
-- **Zero-shot BioCLIP detector** — otherwise (the safe default, always works).
-- `--no-detector-model` forces the zero-shot one even when the ONNX model is
-  present; `$BIRDID_ONNX_DETECTOR` overrides the model path.
+- **ONNX detector installed** — `--multi` auto-scans flagged photos with no
+  manual boxes for bird regions (and still identifies manual boxes as-is).
+- **No ONNX detector** — `--multi` identifies only the user-drawn/confirmed
+  boxes; a flagged photo with neither is **skipped** (flag kept, note in the
+  log + summary) instead of being auto-scanned.
+- `--no-detector-model` opts back into the weaker built-in zero-shot BioCLIP
+  scan (OFF by default — it is weak on small/overlapping birds);
+  `$BIRDID_ONNX_DETECTOR` overrides the model path.
 
 The detector's use of `onnxruntime` is **independent of the image encoder**:
 you can run the dedicated ONNX detector while keeping torch as the default
 encoder — installing `onnxruntime` alone does *not* flip the encoder, only
 `--onnx-encoder` (or `$BIRDID_ONNX_IMAGE_ENCODER`) does.
 
-Any failure (missing model, missing runtime, session error) falls back to the
-built-in detector with a one-line note at startup — multi-bird analysis never
-breaks because of the optional model.
+A detector failure (missing model, missing runtime, session error) never
+breaks a run: `--multi` simply falls back to identifying user-drawn boxes.
 
 ---
 
