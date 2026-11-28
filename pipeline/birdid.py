@@ -3739,7 +3739,8 @@ def _set_dwc_mirror(desc, *, species, scientific="", photographer="",
 
 def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
                    *, photographer: str = "", order: str = "", family: str = "",
-                   verbatim: str = "", ladder: dict | None = None):
+                   verbatim: str = "", ladder: dict | None = None,
+                   avibase_id: str = "", avibase_url: str = ""):
     """Set (or, with ``species=None``, clear) the user-confirmation flag on a
     sidecar, preserving every other element (foreign fields included).
 
@@ -3751,6 +3752,12 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
     set, birdid never re-writes the sidecar (see write_sidecar /
     classify_capture). Clearing it (``species=None``) only removes the flag and
     leaves the species fields as they are.
+
+    When the confirmed species resolves to an Avibase entry, its link is
+    written (``avibase_id``/``avibase_url``), replacing the pre-confirm
+    suggestion's link; when none is resolved the existing link is left in
+    place — confirming must never delete the Avibase link, only update it to
+    the confirmed species when there is one (matches the viewer's confirm).
 
     A confirmation additionally mirrors the pick as a standard DarwinCore XMP
     block (see ``_set_dwc_mirror``) so generic photo software that knows
@@ -3797,6 +3804,14 @@ def _set_confirmed(sidecar: Path, species: str | None, scientific: str = "",
         _set_text(desc, "topConfidence", BIRD_NS, "1.00")
         if scientific:
             _set_text(desc, "scientificName", BIRD_NS, scientific)
+        # The confirmed species's Avibase link (when it resolves to one): write
+        # it in place of the pre-confirm suggestion's link. When nothing was
+        # resolved (a group/rank/non-bird, or a species with no Avibase entry)
+        # the existing link is left untouched — confirming never deletes it.
+        if avibase_id:
+            _set_text(desc, "avibaseId", BIRD_NS, avibase_id)
+        if avibase_url:
+            _set_text(desc, "avibaseUrl", BIRD_NS, avibase_url)
         _set_text(desc, "confirmed", BIRD_NS, species)
         _set_text(desc, "status", BIRD_NS, "done")
         _set_dwc_mirror(desc, species=species, scientific=scientific,
@@ -3932,6 +3947,7 @@ def _set_partial(sidecar: Path, label: str, *, photographer: str = "",
 def run_confirm(root: Path, photo: str | None, species: str | None,
                 unconfirm: bool, manifest_path: Path, taxonomy: dict,
                 taxonomy_path: Path | None = None,
+                data_dir: Path | None = None,
                 ) -> tuple[int, int, list[str]]:
     """Set or clear the user-confirmation flag (bird:confirmed) on sidecars.
 
@@ -3942,6 +3958,12 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
     pick (single-entry list at 100%). ``--unconfirm`` removes the flag, leaving
     the species fields as they are. A confirmed sidecar is frozen - later
     birdid runs (incl. --force) never re-write it.
+
+    When ``data_dir`` is given (the CLI passes it), the confirmed species's
+    Avibase link is resolved from the bundled Clements v2026 checklist and
+    written in place of the pre-confirm suggestion's link; a species with no
+    Avibase entry keeps whatever link the sidecar already has — confirming
+    never deletes the Avibase link, only updates it (matches the viewer).
 
     Each confirmation also writes a DarwinCore XMP mirror block (see
     ``_set_dwc_mirror``): ``dwc:recordedBy`` comes from the photo's Artist tag,
@@ -3954,6 +3976,7 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
     existing sidecars left alone (an unconfirm on a sidecar without the flag,
     or a confirm on one already carrying the same confirmation).
     """
+    avibase_sci, avibase_common = load_avibase(data_dir) if data_dir else ({}, {})
     # `photo` is a capture base name matched against the sidecar's stem — but
     # captures are case-preserving (5M4_0217.xmp beside 5M4_0217.JPG), so match
     # case-insensitively: the viewer delegates region confirm/unconfirm with the
@@ -4048,9 +4071,13 @@ def run_confirm(root: Path, photo: str | None, species: str | None,
                 continue
             order, family = hier.get(scientific.lower(), ("", ""))
             photographer = read_artist(_photo_for_sidecar(sidecar))
+            avibase_url = avibase_url_for(avibase_sci, avibase_common,
+                                          scientific, species_norm)
+            avibase_id = avibase_url[len(AVIBASE_URL):] if avibase_url else ""
             _set_confirmed(sidecar, species_norm, scientific,
                            photographer=photographer, order=order, family=family,
-                           verbatim=verbatim)
+                           verbatim=verbatim,
+                           avibase_id=avibase_id, avibase_url=avibase_url)
             m = manifest.setdefault(str(sidecar), {})
             m["confirmed"] = species_norm
             notes.append(f"  {rel}: confirmed as '{species_norm}'"
@@ -5513,7 +5540,7 @@ def main():
             else:
                 touched, skipped, notes = run_confirm(
                     root, args.photo, args.confirm, args.unconfirm,
-                    manifest_path, taxonomy, taxonomy_path)
+                    manifest_path, taxonomy, taxonomy_path, data_dir)
                 for line in notes:
                     print(line)
                 if args.unconfirm:

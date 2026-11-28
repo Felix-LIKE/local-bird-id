@@ -662,6 +662,59 @@ def run():
         check("larger-but-edged box loses to a centered comparable one",
               birdid._region_primary_index([big_edge, mid_center]) == 1)
 
+    print("\n== T6: confirm updates but never deletes the Avibase link ==")
+    # The user-visible contract: confirming a photo keeps the Avibase link,
+    # updated to the confirmed species when that species has an Avibase entry.
+    # (A stale suggestion's link must be REPLACED; a confirm with no Avibase
+    # entry — a group / non-bird / unknown — must PRESERVE the existing link.)
+    with tempfile.TemporaryDirectory(prefix="birdid-avibase-confirm-") as cd:
+        croot = Path(cd)
+        cfg = type("C", (), {"dc_fields": False})
+        # 1) _set_confirmed WITH a resolved link replaces the stale one.
+        cs1 = croot / "t1.xmp"
+        birdid.write_sidecar(cs1, {"species": "Great Cormorant",
+                                   "scientific": "Phalacrocarax carbo",
+                                   "confidence": 0.92, "alternatives": []},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done", cfg,
+                             scientific="Phalacrocarax carbo",
+                             avibase_id="OLDLINK", avibase_url="https://avibase.ca/OLDLINK")
+        birdid._set_confirmed(cs1, "Coal Tit", "Periparus ater",
+                              avibase_id="166CD440",
+                              avibase_url="https://avibase.ca/166CD440")
+        t1 = cs1.read_text()
+        check("species confirm with a resolved link updates bird:avibaseId",
+              "166CD440" in t1 and "OLDLINK" not in t1, t1[-300:])
+        # 2) a confirm WITHOUT a resolved link (a group pin) PRESERVES the link.
+        birdid._set_confirmed(cs1, "Mammal", "", avibase_id="", avibase_url="")
+        t2 = cs1.read_text()
+        check("confirm without a resolved link PRESERVES the existing link",
+              "166CD440" in t2, t2[-300:])
+        # 3) run_confirm with a data_dir carrying the v2026 checklist resolves
+        #    the confirmed species's link and replaces the stale suggestion's.
+        v26 = croot / "eBird-Clements_Integrated_Checklist.csv"
+        v26.write_text(
+            "category,taxon concept ID,scientific name,English name\n"
+            "species,avibase-COALTIT,Periparus ater,Coal Tit\n"
+            "species,avibase-3DF5C587,Phalacrocarax carbo,Great Cormorant\n")
+        cs3 = croot / "birds_branch.xmp"
+        birdid.write_sidecar(cs3, {"species": "Great Cormorant",
+                                   "scientific": "Phalacrocarax carbo",
+                                   "confidence": 0.92, "alternatives": []},
+                             "EUROPE", 11, datetime(2026, 11, 21), "done", cfg,
+                             scientific="Phalacrocarax carbo",
+                             avibase_id="OLDLINK", avibase_url="https://avibase.ca/OLDLINK")
+        t3a, _, _ = birdid.run_confirm(croot, "birds_branch", "Coal Tit", False,
+                                       croot / "manifest.json", TAX, data_dir=croot)
+        t3 = cs3.read_text()
+        check("run_confirm resolves + writes the confirmed species's Avibase link",
+              t3a == 1 and "COALTIT" in t3 and "OLDLINK" not in t3, t3[-300:])
+        # 4) run_confirm with data_dir=None (no checklist) preserves the link.
+        _, _, _ = birdid.run_confirm(croot, "birds_branch", "Mystery Bird", False,
+                                     croot / "manifest.json", TAX, data_dir=None)
+        t4 = cs3.read_text()
+        check("run_confirm with no checklist PRESERVES the existing link",
+              "COALTIT" in t4, t4[-300:])
+
     print("\n============================================")
     if FAILURES:
         print(f"RESULT: {len(FAILURES)} FAILED: {', '.join(FAILURES)}")
